@@ -1,0 +1,40 @@
+# OCR Engine Configuration
+engines:
+  paddle_ocr:
+    enabled: true
+    use_gpu: true
+    language: 'en'
+    use_angle_cls: true
+    
+  trocr:
+    enabled: true
+    model_name: 'microsoft/trocr-base-handwritten'
+    use_gpu: true
+    
+  easyocr:
+    enabled: true
+    languages: ['en']
+    use_gpu: true
+    
+  tesseract:
+    enabled: false
+    config: '--psm 6'
+
+# Processing Configuration
+preprocessing:
+  enhance_contrast: true
+  denoise: true
+  resize_threshold: 1920
+  dpi_threshold: 300
+
+# Output Configuration
+output:
+  save_json: true
+  save_annotated_images: true
+  confidence_threshold: 0.5
+  
+# Performance Configuration
+performance:
+  batch_size: 1
+  max_workers: 4
+  gpu_memory_limit: 0.8
