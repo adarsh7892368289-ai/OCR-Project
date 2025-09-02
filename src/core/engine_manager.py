@@ -177,29 +177,22 @@ class EngineManager:
         
         return quality_score
         
-    def _select_engines(self, image_analysis: Dict[str, Any], **kwargs) -> Dict[str, BaseOCREngine]:
-        """Select optimal engines based on image analysis"""
+    def _select_engines(self, image_analysis: Dict[str, Any], **kwargs):
         selected = {}
-        
-        # Always include general-purpose engines
-        if "tesseract" in self.engines:
-            selected["tesseract"] = self.engines["tesseract"]
-        if "easyocr" in self.engines:
-            selected["easyocr"] = self.engines["easyocr"]
-            
-        # Add specialized engines based on analysis
         handwritten_prob = image_analysis.get("has_handwritten", 0.5)
         
-        if handwritten_prob > 0.3 and "trocr" in self.engines:
+        # Always include TrOCR for any text (it works well for printed text too)
+        if "trocr" in self.engines:
             selected["trocr"] = self.engines["trocr"]
-            print(f"Added TrOCR (handwritten probability: {handwritten_prob:.3f})")
-            
-        # Force specific engines if requested
-        force_engines = kwargs.get("force_engines", [])
-        for engine_name in force_engines:
-            if engine_name in self.engines:
-                selected[engine_name] = self.engines[engine_name]
-                
+        
+        # Add EasyOCR for mixed content
+        if "easyocr" in self.engines:
+            selected["easyocr"] = self.engines["easyocr"]
+        
+        # Add Tesseract only for clearly printed text
+        if handwritten_prob < 0.5 and "tesseract" in self.engines:
+            selected["tesseract"] = self.engines["tesseract"]
+        
         return selected
         
     def _process_parallel(self, image: np.ndarray, engines: Dict[str, BaseOCREngine], **kwargs) -> Dict[str, DocumentResult]:

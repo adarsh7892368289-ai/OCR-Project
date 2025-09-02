@@ -8,7 +8,8 @@ import time
 import re
 from PIL import Image
 import os
-
+if os.name == 'nt': 
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from ..core.base_engine import BaseOCREngine, OCRResult, DocumentResult
 
 class TesseractEngine(BaseOCREngine):

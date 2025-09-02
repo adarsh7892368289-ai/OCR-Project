@@ -20,7 +20,7 @@ class TrOCREngine(BaseOCREngine):
         self.processor = None
         self.model = None
         self.device = config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-        self.model_name = config.get("model_name", "microsoft/trocr-base-handwritten")
+        self.model_name = config.get("model_name", "microsoft/trocr-large-handwritten")
         self.max_new_tokens = config.get("max_new_tokens", 128)
         self.batch_size = config.get("batch_size", 4)
         

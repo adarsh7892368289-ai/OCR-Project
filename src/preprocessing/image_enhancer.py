@@ -162,3 +162,24 @@ class ImageEnhancer:
         component_score = 1.0 / (1.0 + abs(num_labels - ideal_components) / ideal_components)
         
         return component_score
+    
+    def enhance_for_handwriting(self, image):
+        """Special enhancement for handwritten text"""
+        # Convert to grayscale
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+        
+        # Gentle noise reduction
+        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+        
+        # Enhance contrast while preserving details
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        enhanced = clahe.apply(denoised)
+        
+        # Slight dilation to thicken thin handwriting
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        dilated = cv2.dilate(enhanced, kernel, iterations=1)
+        
+        return dilated
