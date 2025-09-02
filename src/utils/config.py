@@ -1,135 +1,161 @@
-import yaml
-import os
-from typing import Dict, Any
-from pathlib import Path
+# src/utils/config.py
 
-def load_config(config_path: str = "config/development.yaml") -> Dict[str, Any]:
-    """Load configuration from YAML file"""
+import json
+import yaml
+from pathlib import Path
+from typing import Any, Dict, Optional
+import os
+from dataclasses import dataclass, asdict
+
+@dataclass
+class OCRConfig:
+    """OCR System Configuration"""
     
-    # Default configuration
-    default_config = {
-        'engines': {
-            'paddle_ocr': {
-                'enabled': True,
-                'use_gpu': True,
-                'language': 'en',
-                'use_angle_cls': True
-            },
-            'trocr': {
-                'enabled': True,
-                'model_name': 'microsoft/trocr-base-handwritten',
-                'use_gpu': True
-            },
-            'easyocr': {
-                'enabled': True,
-                'languages': ['en'],
-                'use_gpu': True
-            },
-            'tesseract': {
-                'enabled': False,
-                'config': '--psm 6'
+    # Engine configurations
+    engines: Dict[str, Dict[str, Any]] = None
+    
+    # Processing options
+    preprocessing: Dict[str, Any] = None
+    postprocessing: Dict[str, Any] = None
+    
+    # System settings
+    parallel_processing: bool = True
+    max_workers: int = 3
+    log_level: str = "INFO"
+    
+    # Output settings
+    output: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        if self.engines is None:
+            self.engines = {
+                "tesseract": {
+                    "psm": 6,
+                    "lang": "eng",
+                    "whitelist": None,
+                    "blacklist": None
+                },
+                "easyocr": {
+                    "languages": ["en"],
+                    "gpu": True,
+                    "model_dir": None
+                },
+                "trocr": {
+                    "model_name": "microsoft/trocr-base-handwritten",
+                    "device": "auto",
+                    "max_new_tokens": 128,
+                    "batch_size": 4
+                }
             }
-        },
-        'preprocessing': {
-            'enhance_contrast': True,
-            'denoise': True,
-            'max_dimension': 2048,
-            'dpi_threshold': 300
-        },
-        'output': {
-            'save_json': True,
-            'save_annotated_images': False,
-            'confidence_threshold': 0.5
-        },
-        'performance': {
-            'batch_size': 1,
-            'max_workers': 4,
-            'gpu_memory_limit': 0.8
-        }
-    }
-    
-    # Try to load config file
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                file_config = yaml.safe_load(f) or {}
             
-            # Merge with default config
-            merged_config = deep_merge(default_config, file_config)
-            return merged_config
+        if self.preprocessing is None:
+            self.preprocessing = {
+                "enhancement_level": "medium",
+                "preserve_aspect_ratio": True,
+                "angle_range": 45,
+                "angle_step": 0.5,
+                "min_text_size": 10,
+                "max_text_size": 300
+            }
+            
+        if self.postprocessing is None:
+            self.postprocessing = {
+                "min_confidence": 0.5,
+                "min_word_length": 2,
+                "language": "en",
+                "domain_vocabulary": [],
+                "line_height_threshold": 1.5,
+                "paragraph_gap_threshold": 2.0
+            }
+            
+        if self.output is None:
+            self.output = {
+                "preserve_formatting": True,
+                "include_confidence": False
+            }
+
+class Config:
+    """Configuration manager for OCR system"""
+    
+    def __init__(self, config_path: Optional[str] = None):
+        self.config_data = {}
+        self.default_config = OCRConfig()
+        
+        if config_path:
+            self.load_from_file(config_path)
+        else:
+            # Load default configuration
+            self.config_data = asdict(self.default_config)
+            
+    def load_from_file(self, config_path: str):
+        """Load configuration from file"""
+        config_path = Path(config_path)
+        
+        if not config_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+            
+        try:
+            with open(config_path, 'r') as f:
+                if config_path.suffix.lower() in ['.yaml', '.yml']:
+                    self.config_data = yaml.safe_load(f)
+                elif config_path.suffix.lower() == '.json':
+                    self.config_data = json.load(f)
+                else:
+                    raise ValueError("Unsupported configuration file format")
+                    
+            # Merge with defaults
+            default_dict = asdict(self.default_config)
+            self.config_data = self._deep_merge(default_dict, self.config_data)
             
         except Exception as e:
-            print(f"Warning: Could not load config file {config_path}: {e}")
-            print("Using default configuration...")
-            return default_config
-    else:
-        print(f"Config file {config_path} not found. Using default configuration...")
-        return default_config
-
-def deep_merge(base_dict: Dict, update_dict: Dict) -> Dict:
-    """Deep merge two dictionaries"""
-    result = base_dict.copy()
-    
-    for key, value in update_dict.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    
-    return result
-
-def create_default_config(config_path: str = "config/development.yaml"):
-    """Create a default configuration file"""
-    
-    config_content = """# Advanced OCR System Configuration
-
-# OCR Engine Configuration
-engines:
-  paddle_ocr:
-    enabled: true
-    use_gpu: true
-    language: 'en'
-    use_angle_cls: true
-    
-  trocr:
-    enabled: true
-    model_name: 'microsoft/trocr-base-handwritten'
-    use_gpu: true
-    
-  easyocr:
-    enabled: true
-    languages: ['en']
-    use_gpu: true
-    
-  tesseract:
-    enabled: false
-    config: '--psm 6'
-
-# Image Preprocessing Configuration
-preprocessing:
-  enhance_contrast: true
-  denoise: true
-  max_dimension: 2048
-  dpi_threshold: 300
-
-# Output Configuration
-output:
-  save_json: true
-  save_annotated_images: false
-  confidence_threshold: 0.5
-  
-# Performance Configuration
-performance:
-  batch_size: 1
-  max_workers: 4
-  gpu_memory_limit: 0.8
-"""
-    
-    # Ensure directory exists
-    Path(config_path).parent.mkdir(parents=True, exist_ok=True)
-    
-    # Write config file
-    with open(config_path, 'w', encoding='utf-8') as f:
-        f.write(config_content)
-    
-    print(f"Created default configuration file: {config_path}")
+            raise RuntimeError(f"Error loading configuration: {e}")
+            
+    def _deep_merge(self, default: dict, override: dict) -> dict:
+        """Deep merge two dictionaries"""
+        result = default.copy()
+        
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+                
+        return result
+        
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get configuration value using dot notation"""
+        keys = key.split('.')
+        value = self.config_data
+        
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else:
+                return default
+                
+        return value
+        
+    def set(self, key: str, value: Any):
+        """Set configuration value using dot notation"""
+        keys = key.split('.')
+        config = self.config_data
+        
+        for k in keys[:-1]:
+            if k not in config:
+                config[k] = {}
+            config = config[k]
+            
+        config[keys[-1]] = value
+        
+    def save_to_file(self, config_path: str):
+        """Save configuration to file"""
+        config_path = Path(config_path)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(config_path, 'w') as f:
+            if config_path.suffix.lower() in ['.yaml', '.yml']:
+                yaml.dump(self.config_data, f, default_flow_style=False)
+            elif config_path.suffix.lower() == '.json':
+                json.dump(self.config_data, f, indent=2)
+            else:
+                raise ValueError("Unsupported configuration file format")

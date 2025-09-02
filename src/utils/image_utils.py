@@ -1,104 +1,85 @@
+# src/utils/image_utils.py
+
 import cv2
 import numpy as np
+from typing import Tuple, Optional, List
 from PIL import Image
-from typing import Dict, Any, List, Optional
-from pathlib import Path
+import io
 
-def get_image_quality(image_path: str) -> Dict[str, Any]:
-    """Analyze image quality and characteristics."""
-    try:
-        image = Image.open(image_path).convert('RGB')
-        np_image = np.array(image)
+class ImageUtils:
+    """Utility functions for image processing"""
+    
+    @staticmethod
+    def load_image(image_path: str) -> np.ndarray:
+        """Load image from file path"""
+        image = cv2.imread(image_path)
+        if image is None:
+            raise ValueError(f"Could not load image from {image_path}")
+        return image
+    
+    @staticmethod
+    def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
+        """Load image from byte data"""
+        image = Image.open(io.BytesIO(image_bytes))
+        return np.array(image)
+    
+    @staticmethod
+    def resize_image(image: np.ndarray, max_width: int = 2048, max_height: int = 2048) -> np.ndarray:
+        """Resize image while maintaining aspect ratio"""
+        height, width = image.shape[:2]
         
-        # Convert to grayscale for analysis
-        gray = cv2.cvtColor(np_image, cv2.COLOR_RGB2GRAY)
+        if width <= max_width and height <= max_height:
+            return image
         
-        # Calculate image metrics
-        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-        is_color = np_image.shape[2] == 3 and not (np_image[:,:,0] == np_image[:,:,1]).all() and not (np_image[:,:,0] == np_image[:,:,2]).all()
+        # Calculate scaling factor
+        scale_w = max_width / width
+        scale_h = max_height / height
+        scale = min(scale_w, scale_h)
         
-        # Simple heuristic for handwritten vs printed
-        # This is a basic check and can be improved with ML models
-        is_handwritten = sharpness < 100 # A very low sharpness might indicate handwriting
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        
+        return cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+    
+    @staticmethod
+    def convert_color_space(image: np.ndarray, conversion: str) -> np.ndarray:
+        """Convert image color space"""
+        conversions = {
+            "BGR2RGB": cv2.COLOR_BGR2RGB,
+            "RGB2BGR": cv2.COLOR_RGB2BGR,
+            "BGR2GRAY": cv2.COLOR_BGR2GRAY,
+            "RGB2GRAY": cv2.COLOR_RGB2GRAY,
+            "GRAY2BGR": cv2.COLOR_GRAY2BGR,
+            "GRAY2RGB": cv2.COLOR_GRAY2RGB
+        }
+        
+        if conversion not in conversions:
+            raise ValueError(f"Unsupported conversion: {conversion}")
+        
+        return cv2.cvtColor(image, conversions[conversion])
+    
+    @staticmethod
+    def calculate_image_stats(image: np.ndarray) -> dict:
+        """Calculate image statistics"""
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
         
         return {
-            'image_loaded': True,
-            'sharpness': sharpness,
-            'is_color': is_color,
-            'is_handwritten': is_handwritten,
-            'file_size_kb': Path(image_path).stat().st_size / 1024
+            "width": image.shape[1],
+            "height": image.shape[0],
+            "channels": len(image.shape),
+            "mean_brightness": np.mean(gray),
+            "std_brightness": np.std(gray),
+            "min_brightness": np.min(gray),
+            "max_brightness": np.max(gray),
+            "total_pixels": image.size
         }
-    except Exception as e:
-        return {'image_loaded': False, 'error': str(e)}
-
-def enhance_image_quality(image_path: str) -> np.ndarray:
-    """
-    Applies a series of image enhancement steps to a given image.
     
-    Args:
-        image_path (str): The path to the image file.
-        
-    Returns:
-        np.ndarray: The enhanced image as a NumPy array.
-    """
-    try:
-        image = Image.open(image_path).convert('RGB')
-        np_image = np.array(image)
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(np_image, cv2.COLOR_RGB2GRAY)
-        
-        # Denoise the image
-        denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-        
-        # Apply adaptive thresholding to get a clean black and white image
-        enhanced = cv2.adaptiveThreshold(denoised, 255, 
-                                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                         cv2.THRESH_BINARY, 11, 2)
-        
-        return enhanced
-    except Exception as e:
-        print(f"Error enhancing image: {e}")
-        # Return the original image if enhancement fails
-        return np.array(Image.open(image_path).convert('RGB'))
-
-def validate_image_file(image_path: str) -> bool:
-    """
-    Validates if the given file path is a valid image file.
-    
-    Args:
-        image_path (str): The path to the image file.
-        
-    Returns:
-        bool: True if the file is a valid image, False otherwise.
-    """
-    valid_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'}
-    
-    if not Path(image_path).exists():
-        print(f"Error: Image file '{image_path}' not found.")
-        return False
-        
-    file_ext = Path(image_path).suffix.lower()
-    if file_ext not in valid_extensions:
-        print(f"Error: Unsupported file format '{file_ext}'. Supported formats: {', '.join(valid_extensions)}")
-        return False
-        
-    return True
-
-def get_image_info(image_path: str) -> Optional[Dict[str, Any]]:
-    """
-    Provides a comprehensive analysis of an image file.
-
-    This function first validates the file and then returns quality metrics.
-    
-    Args:
-        image_path (str): The path to the image file.
-    
-    Returns:
-        Optional[Dict[str, Any]]: A dictionary with image info, or None if validation fails.
-    """
-    if not validate_image_file(image_path):
-        return None
-    
-    info = get_image_quality(image_path)
-    return info
+    @staticmethod
+    def save_image(image: np.ndarray, output_path: str, quality: int = 95):
+        """Save image to file"""
+        success = cv2.imwrite(output_path, image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not success:
+            raise ValueError(f"Failed to save image to {output_path}")
