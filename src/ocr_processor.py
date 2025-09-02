@@ -57,10 +57,38 @@ class AdvancedOCRProcessor:
             self.logger.info("EasyOCR initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize EasyOCR: {e}")
+            
+        # --- Tesseract Initialization ---
+        try:
+            # Check for Windows OS
+            if os.name == 'nt':
+                # Define potential paths to check, prioritizing the common one
+                potential_paths = [
+                    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                    r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+                ]
+                
+                path_found = False
+                for path in potential_paths:
+                    if os.path.exists(path):
+                        pytesseract.pytesseract.tesseract_cmd = path
+                        self.logger.info(f"Tesseract path set to: {path}")
+                        path_found = True
+                        break
+                
+                if not path_found:
+                    self.logger.warning("Tesseract path could not be found. Please install Tesseract or check your path.")
+            else:
+                # For non-Windows systems, assume Tesseract is in the system's PATH
+                pytesseract.pytesseract.tesseract_cmd = 'tesseract'
+                self.logger.info("Tesseract path automatically set for non-Windows systems.")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to configure Tesseract path: {e}")
 
         if PADDLE_AVAILABLE:
             try:
-                self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+                self.paddle_ocr = PaddleOCR(use_angle_cls=True, lang='en')
                 self.logger.info("PaddleOCR initialized successfully")
             except Exception as e:
                 self.logger.error(f"Failed to initialize PaddleOCR: {e}")
@@ -143,10 +171,10 @@ class AdvancedOCRProcessor:
         
         try:
             # Preprocess image
-            processed_image = self.preprocess_image(image_path, 'standard')
+            processed_image = self.preprocess_image(image_path, 'enhanced')
             
             # OCR with confidence scores
-            data = pytesseract.image_to_data(processed_image, config=config, output_type=pytesseract.Output.DICT)
+            data = pytesseract.image_to_data( processed_image, config="--oem 3 --psm 6 -l eng -c preserve_interword_spaces=1", output_type=pytesseract.Output.DICT )
             
             # Extract text and calculate average confidence
             texts = []
@@ -281,8 +309,8 @@ class AdvancedOCRProcessor:
                 raise Exception("TrOCR not initialized")
             
             # Preprocess for handwriting
-            processed_image = self.preprocess_image(image_path, 'handwriting')
-            pil_image = Image.fromarray(processed_image)
+            processed_image = self.preprocess_image(image_path, 'handwriting') 
+            pil_image = Image.fromarray(processed_image).convert("RGB")
             
             pixel_values = self.trocr_processor(images=pil_image, return_tensors="pt").pixel_values
             
