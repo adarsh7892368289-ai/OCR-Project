@@ -1,0 +1,42 @@
+================================================================================
+OCR PROCESSING RESULTS
+================================================================================
+
+🏆 BEST RESULT (EasyOCR):
+Confidence: 79.1%
+Processing Time: 32877ms
+Text: Kona Wave IZoz bt] 10.00 CVM SIGN Athletic Mexican Cooper Invoice 1501571011 9.Q0 Response APPROVED 20 . Q0 Auth Code 117493 2 Modelo Especia1 1402 draft AID 40000000041010 22.00 TVR ooooooao00 5 GoIden Road 10 Hop IAD IPA I4oz draft 55 . 00 OOOOOOOOOOOFF Golden Road 10 Hop Hazy TSI E8OO IPA I4z draft 11,00 ARC 23 Owens Ginger Beer Can 6.00 Amount USD $184.23 Subtota] 8170 , Q0 Tax 814,23 AMRISH THAKKAR 6:57 PM Total Due $184.23 #+ MERCHANT COPY ##+ Suggested Gratuity Calculated on Total Before Discounts are App] ied TIP Tip Tota] 18X of sale: 830,60 Round Up For Charity= 834.00 8218 .23 22X of sale: S37 , 40 8221 .63 Music Forward prepares youth for Tota] successfu] careers in the industr and beyond! ' Thank Signature: Www hobrusicforward.org Thanks anl come agaIn! RETAIN ONE COPY FOR YOUR RECORDS on Tota? Before Discounts are Appl ed 18% of sale: Total 834.00 8214.83 8218.23 $221.63 Big Hazy Tip
+
+--------------------------------------------------------------------------------
+
+ALL OCR ENGINE RESULTS:
+--------------------------------------------------------------------------------
+
+1. ✅ Tesseract OCR
+   Status: SUCCESS
+   Confidence: 71.9%
+   Processing Time: 3036ms
+   Text Length: 470 characters
+   Text: 10.00 LAthletic Mexi ooper Thvo 501571011 i Response APPROVED bil 20.00 A 2: Modelo Especial: draft, ug AID 00 TVR TAD: 10. Hazy 55.00 lazy TSI : IPA, 11.00 Amount USD.$184.23 Tax Subtotal: $170.00 $14.23 / i 23 BY Suggested: Gratuity Before Discounts.are Ut Appia Total $30.60 $214.83 $37,,40. $221.63 Music Forwa rd prepares for 2s Sucgessful care beyorid Sic a Ur and aga ni For YOUR RECORDS iN 4 Total APD i) Tip Tota) $214.83 4) 334,00 $218.23 (22% of Sale: $221.63
+
+2. ✅ EasyOCR
+   Status: SUCCESS
+   Confidence: 79.1%
+   Processing Time: 32877ms
+   Text Length: 910 characters
+   Text: Kona Wave IZoz bt] 10.00 CVM SIGN Athletic Mexican Cooper Invoice 1501571011 9.Q0 Response APPROVED 20 . Q0 Auth Code 117493 2 Modelo Especia1 1402 draft AID 40000000041010 22.00 TVR ooooooao00 5 GoIden Road 10 Hop IAD IPA I4oz draft 55 . 00 OOOOOOOOOOOFF Golden Road 10 Hop Hazy TSI E8OO IPA I4z draft 11,00 ARC 23 Owens Ginger Beer Can 6.00 Amount USD $184.23 Subtota] 8170 , Q0 Tax 814,23 AMRISH THAKKAR 6:57 PM Total Due $184.23 #+ MERCHANT COPY ##+ Suggested Gratuity Calculated on Total Before ...
+
+3. ❌ PaddleOCR
+   Status: ERROR
+   Error: PaddleOCR not initialized
+
+4. ✅ TrOCR Handwriting
+   Status: SUCCESS
+   Confidence: 70.0%
+   Processing Time: 13453ms
+   Text Length: 14 characters
+   Text: ' Our Thai 444
+
+================================================================================
+
+Total processing time: 53.16 seconds
