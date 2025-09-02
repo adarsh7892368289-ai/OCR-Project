@@ -1,54 +1,75 @@
+import os
 import cv2
-import numpy as np
-from typing import List, Dict, Any
 import logging
+from typing import List, Dict, Any
+import warnings
 
-class PaddleEngine:
-    """PaddleOCR engine wrapper with improved text extraction"""
+# Suppress the PaddlePaddle warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='paddle')
+
+class PaddleOCREngine:
+    """A wrapper class for the PaddleOCR engine."""
     
-    def __init__(self, use_gpu: bool = True, config: Dict = None):
-        self.use_gpu = use_gpu
-        self.config = config or {}
-        self.logger = logging.getLogger(__name__)
+    def __init__(self):
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.ocr = None
-        self._initialize()
+        self._initialize_paddleocr()
     
-    def _initialize(self):
-        """Initialize PaddleOCR"""
+    def _initialize_paddleocr(self):
+        """Initializes the PaddleOCR engine and handles common errors."""
         try:
+            # Critical fix for OMP: Error #15
+            os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+            
             from paddleocr import PaddleOCR
             
+            # This will determine if a GPU is available and use it
+            use_gpu = len(os.getenv('CUDA_VISIBLE_DEVICES', '')) > 0
+            
+            # Suppress specific logging from PaddleOCR
             self.ocr = PaddleOCR(
-                use_angle_cls=self.config.get('use_angle_cls', True),
-                lang=self.config.get('language', 'en'),
-                use_gpu=self.use_gpu,
-                show_log=False  # Reduce verbose output
+                use_angle_cls=True,
+                lang='en',
+                use_gpu=use_gpu,
+                show_log=False
             )
+            self.logger.info(f"PaddleOCR initialized successfully. GPU enabled: {use_gpu}")
             
         except ImportError:
-            raise ImportError("PaddleOCR not installed. Run: pip install paddleocr")
+            self.logger.error("PaddleOCR or its dependencies are not installed. Run: pip install paddleocr paddlepaddle")
+            self.ocr = None
         except Exception as e:
             self.logger.error(f"PaddleOCR initialization failed: {e}")
-            raise
-    
-    def extract_text(self, image: np.ndarray) -> List[Dict[str, Any]]:
-        """Extract text using PaddleOCR with better error handling"""
-        
-        if self.ocr is None:
+            self.ocr = None
+
+    def extract_text(self, image_path: str) -> List[Dict[str, Any]]:
+        """
+        Extracts text from an image path using PaddleOCR.
+        Args:
+            image_path (str): Path to the image file.
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries, each containing
+                                   'text', 'confidence', and 'bbox'.
+        """
+        if not self.ocr:
+            self.logger.warning("PaddleOCR not initialized. Skipping extraction.")
             return []
-        
-        try:
-            # Ensure image is in the right format
-            if len(image.shape) == 2:
-                # Convert grayscale to BGR
-                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            elif len(image.shape) == 3 and image.shape[2] == 3:
-                # Ensure it's BGR format (PaddleOCR expects BGR)
-                pass
             
+        try:
+            # Read the image from the path using OpenCV
+            image = cv2.imread(image_path)
+            if image is None:
+                raise FileNotFoundError(f"Image not found at path: {image_path}")
+            
+            # The PaddleOCR .ocr() method expects a BGR image.
+            # Your original code was correct in this regard.
+            # No need for manual conversion here, as .ocr() handles it.
+            
+            # Use cls=True for angle classification, which is essential for rotated text
             results = self.ocr.ocr(image, cls=True)
             extracted_texts = []
             
+            # Check if results is not None and has at least one element
             if results and results[0]:
                 for line in results[0]:
                     if line and len(line) >= 2:
@@ -57,15 +78,15 @@ class PaddleEngine:
                         text = text_info[0] if text_info else ""
                         confidence = text_info[1] if len(text_info) > 1 else 0.0
                         
-                        if text.strip():  # Only add non-empty text
+                        if text.strip():
                             extracted_texts.append({
                                 'text': text.strip(),
-                                'confidence': float(confidence) * 100,  # Convert to percentage
+                                'confidence': float(confidence) * 100,
                                 'bbox': bbox,
                                 'engine': 'PADDLE'
                             })
             
-            self.logger.info(f"PaddleOCR found {len(extracted_texts)} text regions")
+            self.logger.info(f"PaddleOCR found {len(extracted_texts)} text regions.")
             return extracted_texts
             
         except Exception as e:

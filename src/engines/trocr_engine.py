@@ -4,15 +4,15 @@ from typing import List, Dict, Any
 import logging
 import numpy as np
 import cv2
+import os
 
 class TrOCREngine:
     """TrOCR engine for handwritten text recognition with improved processing"""
     
-    def __init__(self, use_gpu: bool = True, config: Dict = None):
-        self.use_gpu = use_gpu and torch.cuda.is_available()
+    def __init__(self):
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.use_gpu = torch.cuda.is_available()
         self.device = "cuda" if self.use_gpu else "cpu"
-        self.config = config or {}
-        self.logger = logging.getLogger(__name__)
         
         self.processor = None
         self.model = None
@@ -23,7 +23,8 @@ class TrOCREngine:
         try:
             from transformers import TrOCRProcessor, VisionEncoderDecoderModel
             
-            model_name = self.config.get('model_name', 'microsoft/trocr-base-handwritten')
+            # Use the handwritten model as it's the most versatile for your case
+            model_name = 'microsoft/trocr-base-handwritten'
             
             self.processor = TrOCRProcessor.from_pretrained(model_name)
             self.model = VisionEncoderDecoderModel.from_pretrained(model_name)
@@ -31,35 +32,33 @@ class TrOCREngine:
             if self.use_gpu:
                 self.model = self.model.to(self.device)
                 
+            self.logger.info(f"TrOCR initialized successfully on {self.device}.")
+            
         except ImportError:
-            raise ImportError("Transformers not installed. Run: pip install transformers torch")
+            self.logger.error("Transformers or PyTorch not installed. Run: pip install transformers torch")
+            self.processor = None
+            self.model = None
         except Exception as e:
             self.logger.error(f"TrOCR initialization failed: {e}")
-            raise
+            self.processor = None
+            self.model = None
     
-    def extract_text(self, image) -> List[Dict[str, Any]]:
-        """Extract text using TrOCR with better preprocessing"""
+    def extract_text(self, image_path: str) -> List[Dict[str, Any]]:
+        """Extracts text from an image path using TrOCR."""
         
         if self.processor is None or self.model is None:
+            self.logger.warning("TrOCR not initialized. Skipping extraction.")
             return []
         
         try:
-            # Convert numpy array to PIL Image if needed
-            if isinstance(image, np.ndarray):
-                if len(image.shape) == 3:
-                    # Convert BGR to RGB
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                elif len(image.shape) == 2:
-                    # Convert grayscale to RGB
-                    image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-                pil_image = Image.fromarray(image)
-            else:
-                pil_image = image
+            # Open the image using PIL from the provided path
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Image not found at path: {image_path}")
+                
+            pil_image = Image.open(image_path).convert('RGB')
             
-            # Ensure proper size and format
-            pil_image = pil_image.convert('RGB')
-            
-            # Process with TrOCR
+            # TrOCR doesn't return bounding boxes, so we'll have to return an empty list for 'bbox'
+            # We'll treat the entire image as a single text region for simplicity
             pixel_values = self.processor(pil_image, return_tensors="pt").pixel_values
             
             if self.use_gpu:
@@ -76,18 +75,20 @@ class TrOCREngine:
                 generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             
             if generated_text.strip():
-                confidence = 85.0  # TrOCR doesn't provide confidence scores, use default
+                # TrOCR doesn't provide confidence scores per word, so we'll estimate a high confidence
+                # since it's a dedicated model for handwritten text.
+                confidence = 85.0
                 self.logger.info(f"TrOCR extracted: '{generated_text[:50]}...'")
                 
                 return [{
                     'text': generated_text.strip(),
                     'confidence': confidence,
-                    'bbox': [],
+                    'bbox': [], # TrOCR doesn't provide bounding boxes
                     'engine': 'TROCR'
                 }]
             else:
                 return []
-                
+            
         except Exception as e:
             self.logger.error(f"TrOCR extraction failed: {e}")
             return []

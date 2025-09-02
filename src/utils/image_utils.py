@@ -1,349 +1,104 @@
-"""
-Enhanced Image Preprocessing for OCR
-Fixes common issues: contrast, noise, skew, blur
-"""
-
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
-import logging
-from typing import Tuple, Optional
-import math
+from PIL import Image
+from typing import Dict, Any, List, Optional
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+def get_image_quality(image_path: str) -> Dict[str, Any]:
+    """Analyze image quality and characteristics."""
+    try:
+        image = Image.open(image_path).convert('RGB')
+        np_image = np.array(image)
+        
+        # Convert to grayscale for analysis
+        gray = cv2.cvtColor(np_image, cv2.COLOR_RGB2GRAY)
+        
+        # Calculate image metrics
+        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+        is_color = np_image.shape[2] == 3 and not (np_image[:,:,0] == np_image[:,:,1]).all() and not (np_image[:,:,0] == np_image[:,:,2]).all()
+        
+        # Simple heuristic for handwritten vs printed
+        # This is a basic check and can be improved with ML models
+        is_handwritten = sharpness < 100 # A very low sharpness might indicate handwriting
+        
+        return {
+            'image_loaded': True,
+            'sharpness': sharpness,
+            'is_color': is_color,
+            'is_handwritten': is_handwritten,
+            'file_size_kb': Path(image_path).stat().st_size / 1024
+        }
+    except Exception as e:
+        return {'image_loaded': False, 'error': str(e)}
 
-class ImagePreprocessor:
-    """Advanced image preprocessing for better OCR results"""
+def enhance_image_quality(image_path: str) -> np.ndarray:
+    """
+    Applies a series of image enhancement steps to a given image.
     
-    def __init__(self):
-        self.debug_mode = True
+    Args:
+        image_path (str): The path to the image file.
         
-    def enhance_image_for_ocr(self, image_path: str, save_debug: bool = False) -> np.ndarray:
-        """
-        Comprehensive image enhancement pipeline for OCR
+    Returns:
+        np.ndarray: The enhanced image as a NumPy array.
+    """
+    try:
+        image = Image.open(image_path).convert('RGB')
+        np_image = np.array(image)
         
-        Args:
-            image_path: Path to input image
-            save_debug: Save intermediate processing steps
-            
-        Returns:
-            Enhanced image as numpy array
-        """
-        try:
-            # Load image
-            image = cv2.imread(image_path)
-            if image is None:
-                raise ValueError(f"Could not load image: {image_path}")
-                
-            logger.info(f"Original image shape: {image.shape}")
-            original = image.copy()
-            
-            # Step 1: Convert to grayscale
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image.copy()
-            
-            if save_debug:
-                cv2.imwrite("debug_01_grayscale.jpg", gray)
-            
-            # Step 2: Noise reduction
-            gray = self.reduce_noise(gray)
-            if save_debug:
-                cv2.imwrite("debug_02_denoised.jpg", gray)
-            
-            # Step 3: Fix skew/rotation
-            gray = self.correct_skew(gray)
-            if save_debug:
-                cv2.imwrite("debug_03_deskewed.jpg", gray)
-            
-            # Step 4: Enhance contrast - CRITICAL for OCR
-            gray = self.enhance_contrast_adaptive(gray)
-            if save_debug:
-                cv2.imwrite("debug_04_contrast.jpg", gray)
-            
-            # Step 5: Sharpen text
-            gray = self.sharpen_text(gray)
-            if save_debug:
-                cv2.imwrite("debug_05_sharpened.jpg", gray)
-            
-            # Step 6: Binarization (make text pure black on white)
-            binary = self.adaptive_threshold(gray)
-            if save_debug:
-                cv2.imwrite("debug_06_binary.jpg", binary)
-            
-            # Step 7: Final cleanup
-            final = self.morphological_cleanup(binary)
-            if save_debug:
-                cv2.imwrite("debug_07_final.jpg", final)
-            
-            # Resize if too small (OCR works better on larger images)
-            final = self.resize_for_ocr(final)
-            if save_debug:
-                cv2.imwrite("debug_08_resized.jpg", final)
-            
-            logger.info(f"Enhanced image shape: {final.shape}")
-            return final
-            
-        except Exception as e:
-            logger.error(f"Image preprocessing failed: {e}")
-            # Return original grayscale as fallback
-            return cv2.cvtColor(original, cv2.COLOR_BGR2GRAY) if len(original.shape) == 3 else original
-    
-    def reduce_noise(self, image: np.ndarray) -> np.ndarray:
-        """Remove noise while preserving text edges"""
-        # Use bilateral filter - removes noise but keeps edges sharp
-        denoised = cv2.bilateralFilter(image, 9, 75, 75)
-        return denoised
-    
-    def correct_skew(self, image: np.ndarray) -> np.ndarray:
-        """Detect and correct document skew"""
-        try:
-            # Find text regions
-            coords = np.column_stack(np.where(image > 0))
-            if len(coords) < 100:  # Not enough points
-                return image
-                
-            # Find minimum area rectangle
-            rect = cv2.minAreaRect(coords)
-            angle = rect[2]
-            
-            # Adjust angle
-            if angle < -45:
-                angle = 90 + angle
-            elif angle > 45:
-                angle = angle - 90
-                
-            # Only correct if angle is significant
-            if abs(angle) > 0.5:
-                logger.info(f"Correcting skew: {angle:.2f} degrees")
-                height, width = image.shape[:2]
-                center = (width // 2, height // 2)
-                matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-                corrected = cv2.warpAffine(image, matrix, (width, height), 
-                                         flags=cv2.INTER_CUBIC, 
-                                         borderMode=cv2.BORDER_REPLICATE)
-                return corrected
-            
-            return image
-            
-        except Exception as e:
-            logger.warning(f"Skew correction failed: {e}")
-            return image
-    
-    def enhance_contrast_adaptive(self, image: np.ndarray) -> np.ndarray:
-        """Enhanced contrast using multiple techniques"""
-        # Method 1: CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(image)
+        # Convert to grayscale
+        gray = cv2.cvtColor(np_image, cv2.COLOR_RGB2GRAY)
         
-        # Method 2: Gamma correction for dark images
-        gamma = self.calculate_optimal_gamma(image)
-        if gamma != 1.0:
-            inv_gamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** inv_gamma) * 255
-                            for i in np.arange(0, 256)]).astype("uint8")
-            enhanced = cv2.LUT(enhanced, table)
+        # Denoise the image
+        denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
         
-        # Method 3: Normalize contrast
-        enhanced = cv2.normalize(enhanced, None, 0, 255, cv2.NORM_MINMAX)
+        # Apply adaptive thresholding to get a clean black and white image
+        enhanced = cv2.adaptiveThreshold(denoised, 255, 
+                                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                         cv2.THRESH_BINARY, 11, 2)
         
         return enhanced
-    
-    def calculate_optimal_gamma(self, image: np.ndarray) -> float:
-        """Calculate optimal gamma for image brightness"""
-        mean_brightness = np.mean(image)
-        
-        if mean_brightness < 60:  # Very dark
-            return 0.5
-        elif mean_brightness < 100:  # Dark
-            return 0.7
-        elif mean_brightness > 180:  # Very bright
-            return 1.5
-        else:  # Normal
-            return 1.0
-    
-    def sharpen_text(self, image: np.ndarray) -> np.ndarray:
-        """Sharpen text edges for better OCR"""
-        # Unsharp masking
-        gaussian = cv2.GaussianBlur(image, (0, 0), 2.0)
-        sharpened = cv2.addWeighted(image, 1.5, gaussian, -0.5, 0)
-        
-        # Alternative: Use a sharpening kernel
-        kernel = np.array([[-1,-1,-1],
-                          [-1, 9,-1],
-                          [-1,-1,-1]])
-        sharpened = cv2.filter2D(sharpened, -1, kernel)
-        
-        return sharpened
-    
-    def adaptive_threshold(self, image: np.ndarray) -> np.ndarray:
-        """Convert to binary image with adaptive thresholding"""
-        # Try multiple threshold methods and pick the best
-        
-        # Method 1: Otsu's thresholding
-        _, thresh1 = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Method 2: Adaptive threshold
-        thresh2 = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                       cv2.THRESH_BINARY, 11, 2)
-        
-        # Method 3: Adaptive threshold with different parameters
-        thresh3 = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
-                                       cv2.THRESH_BINARY, 15, 3)
-        
-        # Choose the method that produces the most text-like regions
-        best_thresh = self.select_best_threshold(image, [thresh1, thresh2, thresh3])
-        
-        return best_thresh
-    
-    def select_best_threshold(self, original: np.ndarray, thresholds: list) -> np.ndarray:
-        """Select the threshold method that produces the best text regions"""
-        best_score = -1
-        best_thresh = thresholds[0]
-        
-        for thresh in thresholds:
-            # Count connected components (text regions)
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
-            
-            # Score based on number and size of components
-            # Good text images have moderate number of reasonably sized components
-            valid_components = 0
-            for i in range(1, num_labels):
-                area = stats[i, cv2.CC_STAT_AREA]
-                width = stats[i, cv2.CC_STAT_WIDTH]
-                height = stats[i, cv2.CC_STAT_HEIGHT]
-                
-                # Filter for text-like components
-                if 10 < area < 10000 and 2 < width < 500 and 5 < height < 100:
-                    valid_components += 1
-            
-            score = valid_components
-            if score > best_score:
-                best_score = score
-                best_thresh = thresh
-        
-        logger.info(f"Selected threshold with {best_score} text regions")
-        return best_thresh
-    
-    def morphological_cleanup(self, image: np.ndarray) -> np.ndarray:
-        """Clean up binary image using morphological operations"""
-        # Remove small noise
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-        cleaned = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel)
-        
-        # Connect broken characters
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 1))
-        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
-        
-        return cleaned
-    
-    def resize_for_ocr(self, image: np.ndarray) -> np.ndarray:
-        """Resize image to optimal size for OCR"""
-        height, width = image.shape[:2]
-        
-        # Target height around 64-100 pixels for typical text
-        # But ensure minimum resolution for small text
-        min_height = 300
-        max_height = 2000
-        
-        if height < min_height:
-            # Scale up small images
-            scale_factor = min_height / height
-            new_width = int(width * scale_factor)
-            new_height = min_height
-            resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-            logger.info(f"Upscaled image from {width}x{height} to {new_width}x{new_height}")
-            return resized
-        elif height > max_height:
-            # Scale down very large images
-            scale_factor = max_height / height
-            new_width = int(width * scale_factor)
-            new_height = max_height
-            resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            logger.info(f"Downscaled image from {width}x{height} to {new_width}x{new_height}")
-            return resized
-        
-        return image
-    
-    def analyze_image_quality(self, image: np.ndarray) -> dict:
-        """Analyze image quality metrics"""
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Calculate blur score
-        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        # Calculate brightness
-        brightness = np.mean(gray)
-        
-        # Calculate contrast
-        contrast = np.std(gray)
-        
-        # Quality assessment
-        quality = {
-            'blur_score': float(blur_score),
-            'brightness': float(brightness),
-            'contrast': float(contrast),
-            'is_blurry': blur_score < 100,
-            'is_dark': brightness < 80,
-            'is_bright': brightness > 200,
-            'low_contrast': contrast < 50
-        }
-        
-        return quality
+    except Exception as e:
+        print(f"Error enhancing image: {e}")
+        # Return the original image if enhancement fails
+        return np.array(Image.open(image_path).convert('RGB'))
 
+def validate_image_file(image_path: str) -> bool:
+    """
+    Validates if the given file path is a valid image file.
+    
+    Args:
+        image_path (str): The path to the image file.
+        
+    Returns:
+        bool: True if the file is a valid image, False otherwise.
+    """
+    valid_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'}
+    
+    if not Path(image_path).exists():
+        print(f"Error: Image file '{image_path}' not found.")
+        return False
+        
+    file_ext = Path(image_path).suffix.lower()
+    if file_ext not in valid_extensions:
+        print(f"Error: Unsupported file format '{file_ext}'. Supported formats: {', '.join(valid_extensions)}")
+        return False
+        
+    return True
 
-def preprocess_for_paddle(image_path: str) -> np.ndarray:
-    """Preprocessing optimized for PaddleOCR"""
-    preprocessor = ImagePreprocessor()
-    enhanced = preprocessor.enhance_image_for_ocr(image_path, save_debug=True)
-    
-    # PaddleOCR works better with 3-channel images
-    if len(enhanced.shape) == 2:
-        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-    
-    return enhanced
+def get_image_info(image_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Provides a comprehensive analysis of an image file.
 
-
-def preprocess_for_trocr(image_path: str) -> Image.Image:
-    """Preprocessing optimized for TrOCR (handwritten text)"""
-    preprocessor = ImagePreprocessor()
-    enhanced = preprocessor.enhance_image_for_ocr(image_path)
+    This function first validates the file and then returns quality metrics.
     
-    # TrOCR expects PIL Image
-    pil_image = Image.fromarray(enhanced)
+    Args:
+        image_path (str): The path to the image file.
     
-    # Additional enhancement for handwritten text
-    enhancer = ImageEnhance.Contrast(pil_image)
-    pil_image = enhancer.enhance(1.5)
+    Returns:
+        Optional[Dict[str, Any]]: A dictionary with image info, or None if validation fails.
+    """
+    if not validate_image_file(image_path):
+        return None
     
-    enhancer = ImageEnhance.Sharpness(pil_image)
-    pil_image = enhancer.enhance(1.2)
-    
-    return pil_image
-
-
-def preprocess_for_easyocr(image_path: str) -> np.ndarray:
-    """Preprocessing optimized for EasyOCR"""
-    preprocessor = ImagePreprocessor()
-    enhanced = preprocessor.enhance_image_for_ocr(image_path)
-    return enhanced
-
-
-def preprocess_for_tesseract(image_path: str) -> np.ndarray:
-    """Preprocessing optimized for Tesseract"""
-    preprocessor = ImagePreprocessor()
-    enhanced = preprocessor.enhance_image_for_ocr(image_path)
-    
-    # Tesseract works better with high DPI
-    # Ensure minimum size
-    height, width = enhanced.shape[:2]
-    if height < 100:
-        scale = 100 / height
-        new_width = int(width * scale)
-        enhanced = cv2.resize(enhanced, (new_width, 100), interpolation=cv2.INTER_CUBIC)
-    
-    return enhanced
+    info = get_image_quality(image_path)
+    return info
