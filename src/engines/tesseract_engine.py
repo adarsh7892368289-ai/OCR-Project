@@ -13,6 +13,7 @@ def find_tesseract():
     """Find Tesseract installation automatically"""
     possible_paths = [
         r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
         r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
         r'C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'.format(os.getenv('USERNAME', '')),
         'tesseract',  # Linux/Mac default

@@ -35,8 +35,7 @@ check_python() {
     print_status "Checking Python version..."
     
     if command -v python3 &> /dev/null; then
-        PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
-        PYTHON_CMD="python3"
+        PYTHON_VERSION=$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')        PYTHON_CMD="python3"
     elif command -v python &> /dev/null; then
         PYTHON_VERSION=$(python --version 2>&1 | awk '{print $2}')
         PYTHON_CMD="python"
