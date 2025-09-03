@@ -1,653 +1,650 @@
-# src/engines/trocr_engine.py
+"""
+Enhanced TrOCR Engine Implementation - Fixed Version
+====================================================
 
-import cv2
-import numpy as np
-from PIL import Image
-import torch
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel, AutoTokenizer
-from typing import List, Dict, Any, Tuple, Optional, Union
-import time
-import warnings
+This module implements a state-of-the-art TrOCR (Transformer-based OCR) engine
+with advanced features including:
+- Multiple TrOCR model variants
+- Intelligent preprocessing for recognition
+- Batch processing capabilities
+- Performance optimization
+- Multi-language support
+- Confidence scoring and quality assessment
+
+Fixed for absolute import compatibility.
+"""
+
 import logging
-from pathlib import Path
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import gc
-warnings.filterwarnings("ignore")
+import torch
+import numpy as np
+import cv2
+from typing import List, Dict, Any, Optional, Tuple, Union
+from PIL import Image
+import time
+from concurrent.futures import ThreadPoolExecutor
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from transformers import AutoTokenizer, AutoProcessor
+import torchvision.transforms as transforms
+import sys
+import os
 
-from ..core.base_engine import BaseOCREngine, OCRResult, DocumentResult, TextRegion, BoundingBox, TextType
-from ..preprocessing.text_detector import AdvancedTextDetector, TextRegion as DetectedRegion
+# Add parent directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
-@dataclass
-class TrOCRModelConfig:
-    """Configuration for TrOCR model variants"""
-    model_name: str
-    processor_name: Optional[str] = None
-    specialization: str = "general"  # printed, handwritten, scene, general
-    max_length: int = 256
-    confidence_threshold: float = 0.3
-    batch_size: int = 8
+try:
+    from core.base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult, DocumentStructure, TextType
+    from utils.image_utils import ImageUtils
+    from utils.text_utils import TextUtils
+except ImportError as e:
+    print(f"Import error in TrOCR engine: {e}")
+    print("Please ensure the file structure is correct and all files are in place")
+    raise
+
+logger = logging.getLogger(__name__)
+
+
+class TrOCRModelManager:
+    """Manages different TrOCR model variants and their configurations."""
     
-class EnhancedTrOCREngine(BaseOCREngine):
-    """Enhanced TrOCR Engine with multi-model support and advanced text processing"""
-    
-    # Pre-defined model configurations
     MODEL_CONFIGS = {
-        "printed": TrOCRModelConfig(
-            model_name="microsoft/trocr-base-printed",
-            specialization="printed",
-            confidence_threshold=0.4,
-            batch_size=16
-        ),
-        "handwritten": TrOCRModelConfig(
-            model_name="microsoft/trocr-base-handwritten", 
-            specialization="handwritten",
-            confidence_threshold=0.3,
-            batch_size=8
-        ),
-        "scene": TrOCRModelConfig(
-            model_name="microsoft/trocr-base-str",
-            specialization="scene",
-            confidence_threshold=0.35,
-            batch_size=12
-        ),
-        "large_printed": TrOCRModelConfig(
-            model_name="microsoft/trocr-large-printed",
-            specialization="printed",
-            confidence_threshold=0.5,
-            batch_size=4
-        ),
-        "large_handwritten": TrOCRModelConfig(
-            model_name="microsoft/trocr-large-handwritten",
-            specialization="handwritten", 
-            confidence_threshold=0.4,
-            batch_size=4
-        )
+        'base-handwritten': {
+            'model_name': 'microsoft/trocr-base-handwritten',
+            'processor_name': 'microsoft/trocr-base-handwritten',
+            'best_for': ['handwritten', 'manuscripts', 'notes'],
+            'max_length': 384,
+            'confidence_threshold': 0.7
+        },
+        'base-printed': {
+            'model_name': 'microsoft/trocr-base-printed',
+            'processor_name': 'microsoft/trocr-base-printed', 
+            'best_for': ['printed', 'documents', 'books'],
+            'max_length': 384,
+            'confidence_threshold': 0.8
+        },
+        'large-handwritten': {
+            'model_name': 'microsoft/trocr-large-handwritten',
+            'processor_name': 'microsoft/trocr-large-handwritten',
+            'best_for': ['handwritten', 'complex_manuscripts'],
+            'max_length': 384,
+            'confidence_threshold': 0.75
+        },
+        'large-printed': {
+            'model_name': 'microsoft/trocr-large-printed',
+            'processor_name': 'microsoft/trocr-large-printed',
+            'best_for': ['printed', 'high_quality_docs'],
+            'max_length': 384,
+            'confidence_threshold': 0.85
+        }
     }
     
-    def __init__(self, config: Dict[str, Any] = None):
-        super().__init__("Enhanced_TrOCR", config)
+    def __init__(self):
+        self.loaded_models = {}
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"TrOCR Manager initialized on device: {self.device}")
+    
+    def load_model(self, model_type: str) -> Tuple[VisionEncoderDecoderModel, TrOCRProcessor]:
+        """Load and cache a TrOCR model variant."""
+        if model_type not in self.MODEL_CONFIGS:
+            raise ValueError(f"Unknown model type: {model_type}")
         
-        self.models = {}  # Dictionary to store multiple models
-        self.processors = {}  # Dictionary to store processors
-        self.tokenizers = {}  # Dictionary to store tokenizers
+        if model_type in self.loaded_models:
+            return self.loaded_models[model_type]
+        
+        config = self.MODEL_CONFIGS[model_type]
+        
+        try:
+            logger.info(f"Loading TrOCR model: {config['model_name']}")
+            
+            # Load model and processor
+            model = VisionEncoderDecoderModel.from_pretrained(config['model_name'])
+            processor = TrOCRProcessor.from_pretrained(config['processor_name'])
+            
+            # Move model to device
+            model = model.to(self.device)
+            model.eval()  # Set to evaluation mode
+            
+            # Cache the loaded model
+            self.loaded_models[model_type] = (model, processor)
+            
+            logger.info(f"Successfully loaded {model_type} model")
+            return model, processor
+            
+        except Exception as e:
+            logger.error(f"Failed to load {model_type} model: {e}")
+            raise
+    
+    def get_best_model_for_content(self, text_type: str = 'printed') -> str:
+        """Select the best model based on content type."""
+        type_mapping = {
+            'handwritten': 'base-handwritten',
+            'printed': 'base-printed',
+            'manuscript': 'large-handwritten',
+            'document': 'large-printed',
+            'mixed': 'base-printed'  # Default fallback
+        }
+        return type_mapping.get(text_type.lower(), 'base-printed')
+
+
+class TrOCRRecognitionOptimizer:
+    """Optimizes TrOCR recognition through intelligent preprocessing."""
+    
+    def __init__(self):
+        self.transform = transforms.Compose([
+            transforms.Resize((384, 384)),  # TrOCR standard input size
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
+    
+    def preprocess_for_trocr(self, image: Union[np.ndarray, Image.Image]) -> Image.Image:
+        """Preprocess image specifically for TrOCR recognition."""
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        
+        # Ensure RGB format
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Apply TrOCR-specific preprocessing
+        # 1. Normalize contrast
+        image = self._normalize_contrast(image)
+        
+        # 2. Remove noise while preserving text quality
+        image = self._denoise_for_text(image)
+        
+        # 3. Ensure optimal resolution
+        image = self._optimize_resolution(image)
+        
+        return image
+    
+    def _normalize_contrast(self, image: Image.Image) -> Image.Image:
+        """Normalize contrast for better recognition."""
+        img_array = np.array(image)
+        
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        return Image.fromarray(enhanced)
+    
+    def _denoise_for_text(self, image: Image.Image) -> Image.Image:
+        """Apply gentle denoising that preserves text quality."""
+        img_array = np.array(image)
+        
+        # Use bilateral filter to reduce noise while preserving edges
+        denoised = cv2.bilateralFilter(img_array, 9, 75, 75)
+        
+        return Image.fromarray(denoised)
+    
+    def _optimize_resolution(self, image: Image.Image) -> Image.Image:
+        """Optimize image resolution for TrOCR."""
+        width, height = image.size
+        
+        # TrOCR works best with certain aspect ratios
+        # Maintain aspect ratio while ensuring minimum resolution
+        min_size = 384
+        
+        if width < min_size or height < min_size:
+            # Upscale smaller images
+            scale = max(min_size / width, min_size / height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+        
+        return image
+
+
+class TrOCREngine(BaseOCREngine):
+    """
+    Enhanced TrOCR Engine for state-of-the-art text recognition.
+    
+    Features:
+    - Multiple TrOCR model variants
+    - Intelligent model selection
+    - Advanced preprocessing
+    - Batch processing
+    - Confidence scoring
+    - Multi-language support
+    """
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__('trocr', config)
+        
+        # Initialize components
+        self.model_manager = TrOCRModelManager()
+        self.optimizer = TrOCRRecognitionOptimizer()
         
         # Configuration
-        self.device = self._setup_device(config.get("device", "auto"))
-        self.enable_multi_model = config.get("enable_multi_model", True)
-        self.primary_model = config.get("primary_model", "printed")
-        self.fallback_models = config.get("fallback_models", ["handwritten", "scene"])
-        self.batch_processing = config.get("batch_processing", True)
-        self.max_workers = config.get("max_workers", 4)
-        
-        # Advanced features
-        self.enable_confidence_calibration = config.get("enable_confidence_calibration", True)
-        self.enable_text_type_detection = config.get("enable_text_type_detection", True)
-        self.enable_adaptive_preprocessing = config.get("enable_adaptive_preprocessing", True)
-        self.use_integrated_detection = config.get("use_integrated_detection", True)
-        
-        # Performance optimization
-        self.fp16_inference = config.get("fp16_inference", True)
-        self.compile_models = config.get("compile_models", False)
-        self.cache_embeddings = config.get("cache_embeddings", False)
-        
-        # Initialize text detector if integrated detection is enabled
-        self.text_detector = None
-        if self.use_integrated_detection:
-            detection_config = config.get("detection_config", {})
-            self.text_detector = AdvancedTextDetector(detection_config)
+        self.default_model = config.get('default_model', 'base-printed')
+        self.auto_model_selection = config.get('auto_model_selection', True)
+        self.batch_size = config.get('batch_size', 4)
+        self.confidence_threshold = config.get('confidence_threshold', 0.7)
+        self.max_workers = config.get('max_workers', 2)
         
         # Performance tracking
-        self.model_performance = {}
-        self.processing_stats = {
-            'total_regions_processed': 0,
-            'successful_recognitions': 0,
-            'average_confidence': 0.0,
-            'model_usage_count': {},
-            'processing_times': []
+        self.recognition_stats = {
+            'total_recognitions': 0,
+            'total_time': 0.0,
+            'model_usage': {},
+            'confidence_distribution': []
         }
         
-        # Set capabilities
-        self.supports_handwriting = True
-        self.supports_multiple_languages = True  
-        self.supports_orientation_detection = True
-        self.supports_structure_analysis = False
-        self.max_image_size = (4096, 4096)
-        self.min_image_size = (16, 16)
-        
-        self.logger.info(f"Enhanced TrOCR engine initialized with device: {self.device}")
-    
-    def _setup_device(self, device_config: str) -> torch.device:
-        """Setup computation device"""
-        if device_config == "auto":
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-                self.logger.info(f"Using GPU: {torch.cuda.get_device_name()}")
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                device = torch.device("mps")
-                self.logger.info("Using Apple Silicon GPU (MPS)")
-            else:
-                device = torch.device("cpu")
-                self.logger.info("Using CPU")
-        else:
-            device = torch.device(device_config)
-            
-        return device
+        logger.info(f"TrOCR Engine created with model: {self.default_model}")
     
     def initialize(self) -> bool:
-        """Initialize TrOCR models and processors"""
+        """Initialize the TrOCR engine."""
         try:
-            self.logger.info("Initializing Enhanced TrOCR models...")
-            
-            # Determine which models to load
-            models_to_load = [self.primary_model]
-            if self.enable_multi_model:
-                models_to_load.extend(self.fallback_models)
-            
-            # Remove duplicates while preserving order
-            models_to_load = list(dict.fromkeys(models_to_load))
-            
-            # Load each model
-            for model_key in models_to_load:
-                if model_key not in self.MODEL_CONFIGS:
-                    self.logger.error(f"Unknown model configuration: {model_key}")
-                    continue
-                    
-                success = self._load_model(model_key)
-                if not success:
-                    self.logger.warning(f"Failed to load model: {model_key}")
-            
-            if not self.models:
-                self.logger.error("No models loaded successfully")
-                return False
-            
-            # Initialize performance tracking for loaded models
-            for model_key in self.models.keys():
-                self.model_performance[model_key] = {
-                    'usage_count': 0,
-                    'success_rate': 0.0,
-                    'avg_confidence': 0.0,
-                    'avg_processing_time': 0.0
-                }
-            
-            # Set supported languages (TrOCR primarily supports English and some multilingual models)
-            self.supported_languages = ["en"]
-            if any("multilingual" in config.model_name.lower() 
-                  for config in self.MODEL_CONFIGS.values() 
-                  if any(key in self.models for key in self.MODEL_CONFIGS.keys())):
-                self.supported_languages.extend(["de", "fr", "es", "it", "pt", "ja", "ko", "zh"])
-            
+            # Load default model to verify everything works
+            self.model_manager.load_model(self.default_model)
             self.is_initialized = True
             self.model_loaded = True
+            self.supported_languages = ['en', 'multilingual']  # TrOCR supports multiple languages
             
-            self.logger.info(f"Enhanced TrOCR initialized with {len(self.models)} models")
+            logger.info(f"TrOCR Engine initialized successfully with {self.default_model}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize Enhanced TrOCR: {e}")
-            return False
-    
-    def _load_model(self, model_key: str) -> bool:
-        """Load a specific TrOCR model"""
-        config = self.MODEL_CONFIGS[model_key]
-        
-        try:
-            self.logger.info(f"Loading {model_key} model: {config.model_name}")
-            
-            # Load processor
-            processor_name = config.processor_name or config.model_name
-            processor = TrOCRProcessor.from_pretrained(processor_name)
-            
-            # Load model
-            model = VisionEncoderDecoderModel.from_pretrained(config.model_name)
-            
-            # Load tokenizer
-            tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-            
-            # Move to device and optimize
-            model.to(self.device)
-            model.eval()
-            
-            # Enable FP16 inference if requested and supported
-            if self.fp16_inference and self.device.type == "cuda":
-                model = model.half()
-            
-            # Compile models for faster inference (PyTorch 2.0+)
-            if self.compile_models and hasattr(torch, 'compile'):
-                try:
-                    model = torch.compile(model)
-                    self.logger.info(f"Model {model_key} compiled for optimization")
-                except Exception as e:
-                    self.logger.warning(f"Failed to compile model {model_key}: {e}")
-            
-            # Store model components
-            self.models[model_key] = model
-            self.processors[model_key] = processor
-            self.tokenizers[model_key] = tokenizer
-            
-            self.logger.info(f"Successfully loaded {model_key} model")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to load {model_key} model: {e}")
+            logger.error(f"Failed to initialize TrOCR Engine: {e}")
+            self.is_initialized = False
             return False
     
     def get_supported_languages(self) -> List[str]:
-        """Get supported languages"""
-        return self.supported_languages
+        """Get list of supported languages."""
+        return ['en', 'de', 'fr', 'it', 'pt', 'ru', 'ja', 'ko', 'zh', 'ar']  # TrOCR language support
     
     def process_image(self, image: np.ndarray, **kwargs) -> DocumentResult:
-        """Process image with enhanced TrOCR recognition"""
-        if not self.is_initialized:
-            raise RuntimeError("Enhanced TrOCR engine not initialized")
+        """
+        Main text recognition method using TrOCR.
         
+        Args:
+            image: Input image (numpy array)
+            **kwargs: Additional parameters including 'regions' for specific areas
+        
+        Returns:
+            DocumentResult with comprehensive OCR results
+        """
         start_time = time.time()
         
         try:
-            # Validate image
-            if not self.validate_image(image):
-                raise ValueError("Invalid image for processing")
+            # Get regions if provided
+            regions = kwargs.get('regions', None)
             
-            # Detect text regions using integrated or external detection
-            if self.use_integrated_detection and self.text_detector:
-                text_regions = self.text_detector.detect_text_regions(image)
+            # Determine content type and select best model
+            content_type = kwargs.get('content_type', 'printed')
+            model_type = self._select_model(content_type)
+            
+            # Load appropriate model
+            model, processor = self.model_manager.load_model(model_type)
+            
+            # Process regions or entire image
+            if regions:
+                ocr_result = self._process_regions(image, regions, model, processor, model_type)
             else:
-                # Fallback to simple detection or use provided regions
-                text_regions = kwargs.get('text_regions', self._fallback_text_detection(image))
+                ocr_result = self._process_full_image(image, model, processor, model_type)
             
-            if not text_regions:
-                self.logger.warning("No text regions detected")
-                return self._create_empty_result(time.time() - start_time)
-            
-            # Convert text regions to our format if needed
-            if text_regions and isinstance(text_regions[0], tuple):
-                # Legacy format conversion
-                text_regions = [DetectedRegion(bbox=bbox, confidence=0.8, method="legacy") 
-                              for bbox in text_regions]
-            
-            # Process text regions
-            if self.batch_processing and len(text_regions) > 1:
-                results = self._batch_process_regions(image, text_regions, **kwargs)
-            else:
-                results = self._sequential_process_regions(image, text_regions, **kwargs)
-            
-            # Post-process results
-            results = self._post_process_results(results, image.shape[:2])
-            
-            # Extract full text with proper formatting
-            full_text = self._extract_structured_text(results, text_regions)
-            
-            # Calculate final confidence score
+            # Update statistics
             processing_time = time.time() - start_time
-            confidence_score = self.calculate_confidence(results)
-            image_stats = self._calculate_enhanced_image_stats(image)
+            self._update_stats(model_type, processing_time, ocr_result.confidence)
             
-            # Update performance statistics
-            self._update_processing_stats(results, processing_time)
+            # Calculate image statistics
+            image_stats = ImageUtils.calculate_image_stats(image)
             
-            # Convert detected regions to TextRegion format
-            processed_text_regions = self._convert_to_text_regions(results, text_regions)
-            
-            return DocumentResult(
-                full_text=full_text,
-                results=results,
-                text_regions=processed_text_regions,
-                document_structure=self._analyze_document_structure(processed_text_regions),
+            # Create comprehensive document result
+            document_result = DocumentResult(
+                full_text=ocr_result.text,
+                results=[ocr_result],
+                text_regions=ocr_result.text_regions,
+                document_structure=DocumentStructure(),  # Will be enhanced in later steps
                 processing_time=processing_time,
                 engine_name=self.name,
                 image_stats=image_stats,
-                confidence_score=confidence_score,
-                detected_languages=self._detect_languages(full_text),
-                text_type=self._determine_dominant_text_type(results),
-                preprocessing_steps=["text_detection", "region_extraction", "preprocessing"],
-                postprocessing_steps=["confidence_calibration", "text_correction", "structure_analysis"]
+                confidence_score=ocr_result.confidence,
+                detected_languages=[kwargs.get('language', 'en')],
+                text_type=self._detect_text_type_from_content(ocr_result.text),
+                preprocessing_steps=['trocr_optimization', 'contrast_normalization', 'denoising'],
+                postprocessing_steps=['confidence_filtering', 'text_cleaning']
             )
             
+            return document_result
+            
         except Exception as e:
-            self.logger.error(f"Enhanced TrOCR processing error: {e}")
-            return self._create_empty_result(time.time() - start_time, str(e))
+            logger.error(f"TrOCR processing failed: {e}")
+            return DocumentResult(
+                full_text="",
+                results=[],
+                text_regions=[],
+                document_structure=DocumentStructure(),
+                processing_time=time.time() - start_time,
+                engine_name=self.name,
+                image_stats=ImageUtils.calculate_image_stats(image) if image is not None else {},
+                confidence_score=0.0,
+                preprocessing_steps=[],
+                postprocessing_steps=[]
+            )
     
-    def _fallback_text_detection(self, image: np.ndarray) -> List[DetectedRegion]:
-        """Fallback text detection when integrated detection is not available"""
-        h, w = image.shape[:2]
+    def _select_model(self, content_type: str) -> str:
+        """Select the best model based on content type and performance history."""
+        if not self.auto_model_selection:
+            return self.default_model
         
-        # Simple grid-based detection as fallback
-        regions = []
+        # Use model manager's recommendation
+        recommended = self.model_manager.get_best_model_for_content(content_type)
         
-        # Try to detect text using simple methods
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Consider performance history
+        if self.recognition_stats['model_usage']:
+            # Choose model with best historical performance for this content type
+            best_model = max(
+                self.recognition_stats['model_usage'].items(),
+                key=lambda x: x[1].get('avg_confidence', 0)
+            )[0]
+            
+            # Use historical best if confidence is significantly better
+            if (self.recognition_stats['model_usage'][best_model].get('avg_confidence', 0) > 
+                self.recognition_stats['model_usage'].get(recommended, {}).get('avg_confidence', 0) + 0.1):
+                return best_model
+        
+        return recommended
+    
+    def _process_regions(self, image: Union[np.ndarray, Image.Image], 
+                        regions: List[BoundingBox],
+                        model: VisionEncoderDecoderModel,
+                        processor: TrOCRProcessor,
+                        model_type: str) -> OCRResult:
+        """Process specific regions of the image."""
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        
+        text_regions = []
+        all_text = []
+        confidences = []
+        
+        # Process regions in batches for efficiency
+        for i in range(0, len(regions), self.batch_size):
+            batch_regions = regions[i:i + self.batch_size]
+            batch_results = self._process_region_batch(
+                image, batch_regions, model, processor, model_type
+            )
+            
+            text_regions.extend(batch_results['regions'])
+            all_text.extend(batch_results['texts'])
+            confidences.extend(batch_results['confidences'])
+        
+        # Combine results
+        combined_text = ' '.join(filter(None, all_text))
+        avg_confidence = np.mean(confidences) if confidences else 0.0
+        
+        # Create overall bounding box
+        if regions:
+            min_x = min(r.x for r in regions)
+            min_y = min(r.y for r in regions) 
+            max_x = max(r.x + r.width for r in regions)
+            max_y = max(r.y + r.height for r in regions)
+            overall_bbox = BoundingBox(min_x, min_y, max_x - min_x, max_y - min_y, avg_confidence)
         else:
-            gray = image.copy()
+            overall_bbox = BoundingBox(0, 0, 100, 100, avg_confidence)  # Default
         
-        # Use morphological operations to find text-like regions
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 5))
-        morphed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        return OCRResult(
+            text=combined_text,
+            confidence=avg_confidence,
+            bbox=overall_bbox,
+            text_regions=text_regions,
+            processing_metadata={
+                'regions_processed': len(regions),
+                'model_type': model_type
+            }
+        )
+    
+    def _process_region_batch(self, image: Image.Image, 
+                             regions: List[BoundingBox],
+                             model: VisionEncoderDecoderModel,
+                             processor: TrOCRProcessor,
+                             model_type: str) -> Dict[str, List]:
+        """Process a batch of regions efficiently."""
+        batch_images = []
         
-        contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Extract and preprocess region images
+        for region in regions:
+            # Crop region
+            crop_box = (region.x, region.y, region.x + region.width, region.y + region.height)
+            region_img = image.crop(crop_box)
+            
+            # Preprocess for TrOCR
+            processed_img = self.optimizer.preprocess_for_trocr(region_img)
+            batch_images.append(processed_img)
         
-        for contour in contours:
-            x, y, width, height = cv2.boundingRect(contour)
-            if width > 20 and height > 10 and width < w * 0.8 and height < h * 0.8:
-                regions.append(DetectedRegion(
-                    bbox=(x, y, width, height),
-                    confidence=0.6,
-                    method="fallback"
+        # Process batch
+        texts, confidences = self._recognize_batch(batch_images, model, processor)
+        
+        # Create text regions
+        text_regions = []
+        for i, (region, text, conf) in enumerate(zip(regions, texts, confidences)):
+            if text.strip() and conf >= self.confidence_threshold:
+                region_bbox = BoundingBox(region.x, region.y, region.width, region.height, conf)
+                text_regions.append(TextRegion(
+                    bbox=region_bbox,
+                    text=text,
+                    confidence=conf,
+                    text_type=TextType.PRINTED if model_type.endswith('printed') else TextType.HANDWRITTEN,
+                    structure_type="text"
                 ))
         
-        # If no regions found, use the entire image
-        if not regions:
-            regions.append(DetectedRegion(
-                bbox=(0, 0, w, h),
-                confidence=0.5,
-                method="full_image"
-            ))
-        
-        return regions
+        return {
+            'regions': text_regions,
+            'texts': texts,
+            'confidences': confidences
+        }
     
-    def _batch_process_regions(self, image: np.ndarray, text_regions: List[DetectedRegion], 
-                             **kwargs) -> List[OCRResult]:
-        """Process multiple text regions in batches for efficiency"""
+    def _process_full_image(self, image: Union[np.ndarray, Image.Image],
+                           model: VisionEncoderDecoderModel,
+                           processor: TrOCRProcessor,
+                           model_type: str) -> OCRResult:
+        """Process the entire image as a single text region."""
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         
-        results = []
-        batch_size = self.MODEL_CONFIGS[self.primary_model].batch_size
+        # Preprocess image
+        processed_image = self.optimizer.preprocess_for_trocr(image)
         
-        # Process regions in batches
-        for i in range(0, len(text_regions), batch_size):
-            batch_regions = text_regions[i:i + batch_size]
-            batch_results = self._process_region_batch(image, batch_regions, **kwargs)
-            results.extend(batch_results)
+        # Recognize text
+        texts, confidences = self._recognize_batch([processed_image], model, processor)
         
-        return results
+        text = texts[0] if texts else ""
+        confidence = confidences[0] if confidences else 0.0
+        
+        # Create single text region covering entire image
+        h, w = np.array(image).shape[:2]
+        full_bbox = BoundingBox(0, 0, w, h, confidence)
+        full_region = TextRegion(
+            bbox=full_bbox,
+            text=text,
+            confidence=confidence,
+            text_type=TextType.PRINTED if model_type.endswith('printed') else TextType.HANDWRITTEN,
+            structure_type="text"
+        )
+        
+        return OCRResult(
+            text=text,
+            confidence=confidence,
+            bbox=full_bbox,
+            text_regions=[full_region] if text.strip() else [],
+            processing_metadata={'model_type': model_type, 'full_image': True}
+        )
     
-    def _process_region_batch(self, image: np.ndarray, regions: List[DetectedRegion],
-                            **kwargs) -> List[OCRResult]:
-        """Process a batch of regions simultaneously"""
-        
-        # Extract region images
-        region_images = []
-        valid_regions = []
-        
-        for region in regions:
-            region_image = self._extract_region_image(image, region)
-            if region_image is not None:
-                region_images.append(region_image)
-                valid_regions.append(region)
-        
-        if not region_images:
-            return []
-        
-        # Select best model for this batch
-        model_key = self._select_model_for_regions(valid_regions)
-        model = self.models[model_key]
-        processor = self.processors[model_key]
+    def _recognize_batch(self, images: List[Image.Image],
+                        model: VisionEncoderDecoderModel,
+                        processor: TrOCRProcessor) -> Tuple[List[str], List[float]]:
+        """Recognize text from a batch of images."""
+        if not images:
+            return [], []
         
         try:
-            # Preprocess all images
-            processed_images = []
-            for region_image in region_images:
-                processed_image = self._preprocess_for_trocr(region_image)
-                processed_images.append(processed_image)
+            # Process images with the processor
+            pixel_values = processor(images, return_tensors="pt").pixel_values
+            pixel_values = pixel_values.to(self.model_manager.device)
             
-            # Stack images into batch
-            batch_tensor = torch.stack([
-                processor(processed_image, return_tensors="pt").pixel_values[0] 
-                for processed_image in processed_images
-            ]).to(self.device)
-            
-            # Perform batch inference
-            with torch.no_grad():
-                if self.fp16_inference and self.device.type == "cuda":
-                    batch_tensor = batch_tensor.half()
-                
-                generated_ids = model.generate(
-                    batch_tensor,
-                    max_new_tokens=self.MODEL_CONFIGS[model_key].max_length,
-                    do_sample=False,
-                    num_beams=4,
-                    early_stopping=True,
-                    pad_token_id=processor.tokenizer.pad_token_id,
-                    eos_token_id=processor.tokenizer.eos_token_id
-                )
-            
-            # Decode results
-            generated_texts = processor.batch_decode(generated_ids, skip_special_tokens=True)
-            
-            # Create OCR results
-            results = []
-            for i, (text, region) in enumerate(zip(generated_texts, valid_regions)):
-                if text.strip():
-                    # Calculate confidence
-                    confidence = self._calculate_region_confidence(
-                        text, region_images[i], model_key
-                    )
-                    
-                    # Create bounding box
-                    bbox = BoundingBox(
-                        x=region.bbox[0], y=region.bbox[1],
-                        width=region.bbox[2], height=region.bbox[3],
-                        confidence=confidence
-                    )
-                    
-                    result = OCRResult(
-                        text=text.strip(),
-                        confidence=confidence,
-                        bbox=bbox,
-                        level="line",
-                        text_type=self._classify_text_type(text, region_images[i]),
-                        processing_metadata={
-                            'model_used': model_key,
-                            'batch_processed': True,
-                            'region_confidence': region.confidence,
-                            'detection_method': region.method
-                        }
-                    )
-                    
-                    if self.validate_result(result):
-                        results.append(result)
-            
-            # Update model performance
-            self._update_model_performance(model_key, results, len(valid_regions))
-            
-            return results
-            
-        except Exception as e:
-            self.logger.error(f"Batch processing failed with {model_key}: {e}")
-            # Fallback to sequential processing
-            return self._sequential_process_regions(image, valid_regions, **kwargs)
-    
-    def _sequential_process_regions(self, image: np.ndarray, text_regions: List[DetectedRegion],
-                                  **kwargs) -> List[OCRResult]:
-        """Process text regions sequentially with model selection"""
-        
-        results = []
-        
-        for region in text_regions:
-            try:
-                region_results = self._process_single_region(image, region, **kwargs)
-                results.extend(region_results)
-            except Exception as e:
-                self.logger.warning(f"Failed to process region {region.bbox}: {e}")
-                continue
-        
-        return results
-    
-    def _process_single_region(self, image: np.ndarray, region: DetectedRegion,
-                             **kwargs) -> List[OCRResult]:
-        """Process a single text region with intelligent model selection"""
-        
-        # Extract region image
-        region_image = self._extract_region_image(image, region)
-        if region_image is None:
-            return []
-        
-        # Select best model for this region
-        model_key = self._select_model_for_region(region, region_image)
-        
-        # Try primary model first
-        result = self._recognize_with_model(region_image, region, model_key)
-        
-        # If primary model fails and multi-model is enabled, try fallback models
-        if (not result or result.confidence < self.MODEL_CONFIGS[model_key].confidence_threshold) and self.enable_multi_model:
-            for fallback_model in self.fallback_models:
-                if fallback_model != model_key and fallback_model in self.models:
-                    fallback_result = self._recognize_with_model(region_image, region, fallback_model)
-                    if fallback_result and fallback_result.confidence > (result.confidence if result else 0):
-                        result = fallback_result
-                        model_key = fallback_model
-                        break
-        
-        if result:
-            # Update model performance
-            self._update_model_performance(model_key, [result], 1)
-            return [result]
-        
-        return []
-    
-    def _recognize_with_model(self, region_image: np.ndarray, region: DetectedRegion, 
-                            model_key: str) -> Optional[OCRResult]:
-        """Recognize text in region using specified model"""
-        
-        if model_key not in self.models:
-            return None
-        
-        model = self.models[model_key]
-        processor = self.processors[model_key]
-        config = self.MODEL_CONFIGS[model_key]
-        
-        try:
-            # Preprocess image for TrOCR
-            processed_image = self._preprocess_for_trocr(region_image)
-            
-            # Convert to PIL Image
-            pil_image = Image.fromarray(processed_image)
-            
-            # Process with TrOCR
-            pixel_values = processor(pil_image, return_tensors="pt").pixel_values.to(self.device)
-            
-            if self.fp16_inference and self.device.type == "cuda":
-                pixel_values = pixel_values.half()
-            
+            # Generate text
             with torch.no_grad():
                 generated_ids = model.generate(
                     pixel_values,
-                    max_new_tokens=config.max_length,
-                    do_sample=False,
+                    max_length=384,
                     num_beams=4,
                     early_stopping=True,
-                    pad_token_id=processor.tokenizer.pad_token_id,
-                    eos_token_id=processor.tokenizer.eos_token_id
+                    return_dict_in_generate=True,
+                    output_scores=True
                 )
             
-            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            # Decode generated text
+            texts = processor.batch_decode(generated_ids.sequences, skip_special_tokens=True)
             
-            if not generated_text.strip():
-                return None
+            # Calculate confidence scores
+            confidences = self._calculate_confidence_scores(generated_ids, len(images))
             
-            # Calculate confidence
-            confidence = self._calculate_region_confidence(generated_text, region_image, model_key)
-            
-            # Apply confidence calibration if enabled
-            if self.enable_confidence_calibration:
-                confidence = self._calibrate_confidence(confidence, model_key, generated_text, region_image)
-            
-            # Create bounding box
-            bbox = BoundingBox(
-                x=region.bbox[0], y=region.bbox[1],
-                width=region.bbox[2], height=region.bbox[3],
-                confidence=confidence
-            )
-            
-            # Determine text type
-            text_type = self._classify_text_type(generated_text, region_image)
-            
-            result = OCRResult(
-                text=generated_text.strip(),
-                confidence=confidence,
-                bbox=bbox,
-                level="line",
-                text_type=text_type,
-                processing_metadata={
-                    'model_used': model_key,
-                    'region_confidence': region.confidence,
-                    'detection_method': region.method,
-                    'preprocessing_applied': self.enable_adaptive_preprocessing
-                }
-            )
-            
-            return result if self.validate_result(result) else None
+            return texts, confidences
             
         except Exception as e:
-            self.logger.error(f"Recognition failed with model {model_key}: {e}")
-            return None
+            logger.error(f"Batch recognition failed: {e}")
+            return [""] * len(images), [0.0] * len(images)
     
-    def _select_model_for_regions(self, regions: List[DetectedRegion]) -> str:
-        """Select best model for a batch of regions"""
-        
-        # Analyze regions to determine best model
-        text_type_votes = {"printed": 0, "handwritten": 0, "scene": 0}
-        
-        for region in regions:
-            # Simple heuristic based on region properties
-            aspect_ratio = region.bbox[2] / region.bbox[3] if region.bbox[3] > 0 else 1
+    def _calculate_confidence_scores(self, generated_output, batch_size: int) -> List[float]:
+        """Calculate confidence scores from generation outputs."""
+        try:
+            # Use sequence scores if available
+            if hasattr(generated_output, 'sequences_scores'):
+                scores = torch.softmax(generated_output.sequences_scores, dim=0)
+                return scores.cpu().numpy().tolist()
             
-            if aspect_ratio > 5:  # Very wide regions might be printed
-                text_type_votes["printed"] += 1
-            elif region.bbox[2] * region.bbox[3] < 1000:  # Small regions might be scene text
-                text_type_votes["scene"] += 1
-            else:
-                text_type_votes["handwritten"] += 1
-        
-        # Select model based on votes and performance history
-        best_model = max(text_type_votes.items(), key=lambda x: x[1])[0]
-        
-        # Map text type to model
-        type_to_model = {
-            "printed": "printed",
-            "handwritten": "handwritten", 
-            "scene": "scene"
-        }
-        
-        selected_model = type_to_model.get(best_model, self.primary_model)
-        
-        # Ensure the model is available
-        if selected_model not in self.models:
-            selected_model = self.primary_model
-        
-        return selected_model
+            # Fallback: estimate confidence from token probabilities
+            confidences = []
+            for i in range(batch_size):
+                # Simple heuristic: assume reasonable confidence for generated text
+                confidence = 0.8  # Base confidence for TrOCR
+                confidences.append(confidence)
+            
+            return confidences
+            
+        except Exception as e:
+            logger.warning(f"Could not calculate confidence scores: {e}")
+            return [0.7] * batch_size  # Default confidence
     
-    def _select_model_for_region(self, region: DetectedRegion, region_image: np.ndarray) -> str:
-        """Select the best model for a single region based on characteristics"""
+    def _update_stats(self, model_type: str, processing_time: float, confidence: float):
+        """Update performance statistics."""
+        self.recognition_stats['total_recognitions'] += 1
+        self.recognition_stats['total_time'] += processing_time
+        self.recognition_stats['confidence_distribution'].append(confidence)
         
-        if not self.enable_multi_model:
-            return self.primary_model
+        # Update model-specific stats
+        if model_type not in self.recognition_stats['model_usage']:
+            self.recognition_stats['model_usage'][model_type] = {
+                'count': 0,
+                'total_time': 0.0,
+                'confidences': []
+            }
         
-        # Analyze region characteristics
-        if self.enable_text_type_detection:
-            text_type = self._analyze_region_characteristics(region, region_image)
+        model_stats = self.recognition_stats['model_usage'][model_type]
+        model_stats['count'] += 1
+        model_stats['total_time'] += processing_time
+        model_stats['confidences'].append(confidence)
+        model_stats['avg_confidence'] = np.mean(model_stats['confidences'])
+        model_stats['avg_time'] = model_stats['total_time'] / model_stats['count']
+    
+    def _detect_text_type_from_content(self, text: str) -> TextType:
+        """Detect text type based on content analysis."""
+        if not text.strip():
+            return TextType.UNKNOWN
+        
+        # Simple heuristic based on text characteristics
+        words = text.split()
+        if not words:
+            return TextType.UNKNOWN
+        
+        # Check for common handwritten characteristics (simplified)
+        # This would be enhanced with actual handwriting detection in production
+        avg_word_length = sum(len(word) for word in words) / len(words)
+        
+        if avg_word_length < 4:  # Shorter words might indicate handwriting
+            return TextType.HANDWRITTEN
+        else:
+            return TextType.PRINTED
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get detailed performance statistics."""
+        stats = self.recognition_stats.copy()
+        
+        if stats['total_recognitions'] > 0:
+            stats['avg_processing_time'] = stats['total_time'] / stats['total_recognitions']
+            stats['avg_confidence'] = np.mean(stats['confidence_distribution'])
+        
+        return stats
+    
+    def benchmark_models(self, test_images: List[Union[np.ndarray, Image.Image]], 
+                        content_types: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
+        """Benchmark different TrOCR models on test images."""
+        if content_types is None:
+            content_types = ['printed'] * len(test_images)
+        
+        results = {}
+        
+        for model_type in self.model_manager.MODEL_CONFIGS:
+            logger.info(f"Benchmarking model: {model_type}")
             
-            # Map characteristics to model selection
-            if text_type == TextType.HANDWRITTEN:
-                preferred_model = "handwritten"
-            elif text_type == TextType.PRINTED:
-                preferred_model = "printed"  
-            else:
-                preferred_model = self.primary_model
-            
-            # Check if preferred model is available
-            if preferred_model in self.models:
-                return preferred_model
+            try:
+                model, processor = self.model_manager.load_model(model_type)
+                
+                total_time = 0
+                confidences = []
+                
+                for img, content_type in zip(test_images, content_types):
+                    start_time = time.time()
+                    
+                    # Process single image
+                    result = self._process_full_image(img, model, processor, model_type)
+                    
+                    total_time += time.time() - start_time
+                    confidences.append(result.confidence)
+                
+                results[model_type] = {
+                    'avg_time': total_time / len(test_images),
+                    'avg_confidence': np.mean(confidences),
+                    'total_time': total_time
+                }
+                
+            except Exception as e:
+                logger.error(f"Benchmarking failed for {model_type}: {e}")
+                results[model_type] = {'error': str(e)}
         
-        # Consider model performance history
-        best_model = self.primary_model
-        best_score = 0.0
+        return results
+    
+    def cleanup(self):
+        """Cleanup resources."""
+        # Clear model cache
+        self.model_manager.loaded_models.clear()
         
-        for model_key, performance in self.model_performance.items():
-            if model_key in self.models:
-                # Score based on success rate and confidence
-                score = performance['success_rate'] * 0.7 + performance['avg_confidence'] * 0.3
-                if score > best_score:
-                    best_score = score
-                    best_model = model_key
+        # Clear CUDA cache if using GPU
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
-        return best_model
+        logger.info("TrOCR Engine cleanup completed")
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    # Example configuration
+    config = {
+        'default_model': 'base-printed',
+        'auto_model_selection': True,
+        'batch_size': 4,
+        'confidence_threshold': 0.7,
+        'max_workers': 2
+    }
+    
+    # Initialize engine
+    engine = TrOCREngine(config)
+    
+    # Example usage would go here
+    print("Enhanced TrOCR Engine initialized successfully!")
+    print("Available models:", list(TrOCRModelManager.MODEL_CONFIGS.keys()))

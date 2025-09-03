@@ -1,13 +1,13 @@
-# src/utils/image_utils.py
+# Enhanced src/utils/image_utils.py - Additional functions for TrOCR
 
 import cv2
 import numpy as np
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Union
 from PIL import Image
 import io
 
 class ImageUtils:
-    """Utility functions for image processing"""
+    """Enhanced utility functions for image processing"""
     
     @staticmethod
     def load_image(image_path: str) -> np.ndarray:
@@ -61,6 +61,9 @@ class ImageUtils:
     @staticmethod
     def calculate_image_stats(image: np.ndarray) -> dict:
         """Calculate image statistics"""
+        if image is None:
+            return {}
+        
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
@@ -70,11 +73,11 @@ class ImageUtils:
             "width": image.shape[1],
             "height": image.shape[0],
             "channels": len(image.shape),
-            "mean_brightness": np.mean(gray),
-            "std_brightness": np.std(gray),
-            "min_brightness": np.min(gray),
-            "max_brightness": np.max(gray),
-            "total_pixels": image.size
+            "mean_brightness": float(np.mean(gray)),
+            "std_brightness": float(np.std(gray)),
+            "min_brightness": int(np.min(gray)),
+            "max_brightness": int(np.max(gray)),
+            "total_pixels": int(image.size)
         }
     
     @staticmethod
@@ -83,3 +86,147 @@ class ImageUtils:
         success = cv2.imwrite(output_path, image, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if not success:
             raise ValueError(f"Failed to save image to {output_path}")
+    
+    # NEW FUNCTIONS FOR TROCR INTEGRATION
+    
+    @staticmethod
+    def preprocess_image_for_recognition(image: Union[np.ndarray, Image.Image]) -> Image.Image:
+        """Preprocess image specifically for TrOCR recognition"""
+        if isinstance(image, np.ndarray):
+            # Convert BGR to RGB if needed
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(image)
+        
+        # Ensure RGB format
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Apply preprocessing steps
+        image = ImageUtils._enhance_contrast_for_ocr(image)
+        image = ImageUtils._denoise_for_text_recognition(image)
+        image = ImageUtils._optimize_resolution_for_ocr(image)
+        
+        return image
+    
+    @staticmethod
+    def _enhance_contrast_for_ocr(image: Image.Image) -> Image.Image:
+        """Enhance contrast specifically for OCR"""
+        img_array = np.array(image)
+        
+        # Convert to LAB color space for better contrast enhancement
+        lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
+        
+        # Apply CLAHE to the L channel
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        
+        # Convert back to RGB
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        return Image.fromarray(enhanced)
+    
+    @staticmethod
+    def _denoise_for_text_recognition(image: Image.Image) -> Image.Image:
+        """Apply gentle denoising that preserves text quality"""
+        img_array = np.array(image)
+        
+        # Use bilateral filter to reduce noise while preserving edges
+        # This is gentler than Gaussian blur and preserves text edges better
+        denoised = cv2.bilateralFilter(img_array, 9, 75, 75)
+        
+        return Image.fromarray(denoised)
+    
+    @staticmethod
+    def _optimize_resolution_for_ocr(image: Image.Image) -> Image.Image:
+        """Optimize image resolution for OCR engines"""
+        width, height = image.size
+        
+        # OCR works best with certain resolutions
+        # Ensure minimum resolution while maintaining aspect ratio
+        min_dimension = 384  # Good for TrOCR
+        max_dimension = 2048  # Prevent memory issues
+        
+        # Calculate scaling
+        scale = 1.0
+        if min(width, height) < min_dimension:
+            scale = min_dimension / min(width, height)
+        elif max(width, height) > max_dimension:
+            scale = max_dimension / max(width, height)
+        
+        if scale != 1.0:
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+        
+        return image
+    
+    @staticmethod
+    def crop_text_region(image: Union[np.ndarray, Image.Image], 
+                        bbox: Tuple[int, int, int, int],
+                        padding: int = 5) -> Image.Image:
+        """Crop a text region from image with optional padding"""
+        if isinstance(image, np.ndarray):
+            if len(image.shape) == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(image)
+        
+        x, y, w, h = bbox
+        
+        # Add padding
+        x = max(0, x - padding)
+        y = max(0, y - padding)
+        w = min(image.width - x, w + 2 * padding)
+        h = min(image.height - y, h + 2 * padding)
+        
+        # Crop the region
+        crop_box = (x, y, x + w, y + h)
+        cropped = image.crop(crop_box)
+        
+        return cropped
+    
+    @staticmethod
+    def detect_image_quality(image: Union[np.ndarray, Image.Image]) -> dict:
+        """Detect image quality metrics relevant for OCR"""
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image
+        
+        # Calculate various quality metrics
+        
+        # 1. Blur detection using Laplacian variance
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # 2. Noise estimation
+        noise_score = np.std(gray)
+        
+        # 3. Contrast measurement
+        contrast_score = gray.std()
+        
+        # 4. Brightness analysis
+        brightness = np.mean(gray)
+        
+        # 5. Resolution check
+        height, width = gray.shape
+        resolution_score = width * height
+        
+        return {
+            'blur_score': float(blur_score),
+            'is_blurry': blur_score < 100,  # Threshold for blur detection
+            'noise_level': float(noise_score),
+            'contrast_level': float(contrast_score),
+            'brightness_level': float(brightness),
+            'is_too_dark': brightness < 50,
+            'is_too_bright': brightness > 200,
+            'resolution': resolution_score,
+            'width': width,
+            'height': height,
+            'recommended_for_ocr': (
+                blur_score > 100 and  # Not too blurry
+                50 < brightness < 200 and  # Good brightness
+                contrast_score > 20  # Sufficient contrast
+            )
+        }
