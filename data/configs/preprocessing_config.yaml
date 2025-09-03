@@ -1,0 +1,372 @@
+# data/configs/preprocessing_config.yaml - Step 4 Enhanced Preprocessing Configuration
+
+# Quality Analysis Configuration
+quality_analyzer:
+  enable_deep_analysis: true
+  analysis_cache: true
+  
+  # Quality thresholds for assessment
+  quality_thresholds:
+    sharpness_min: 100.0
+    noise_max: 0.3
+    contrast_min: 0.3
+    brightness_range: [0.2, 0.8]
+    resolution_min: 150
+    skew_tolerance: 2.0
+
+# Image Enhancement Configuration  
+image_enhancer:
+  # Enhancement strategy
+  enhancement_level: "medium"  # minimal, light, medium, aggressive, maximum
+  preserve_aspect_ratio: true
+  enable_ai_guidance: true
+  cache_enhanced_images: true
+  measure_improvement: true
+  
+  # Enhancement parameters
+  bilateral_filter:
+    d: 9
+    sigma_color: 75
+    sigma_space: 75
+  
+  non_local_means:
+    h: 10
+    template_window_size: 7
+    search_window_size: 21
+  
+  clahe:
+    clip_limit: 3.0
+    tile_grid_size: [8, 8]
+  
+  morphological:
+    opening_kernel: [2, 2]
+    closing_kernel: [3, 1]
+    iterations: 1
+
+# Skew Correction Configuration
+skew_corrector:
+  # Detection parameters
+  angle_range: 45.0
+  angle_step: 0.1
+  confidence_threshold: 0.7
+  enable_validation: true
+  
+  # Line detection parameters
+  min_line_length: 100
+  max_line_gap: 10
+  hough_threshold: 100
+  
+  # Correction parameters
+  correction_quality: "balanced"  # fast, balanced, high_quality, preserve_quality
+  preserve_size: false
+  border_mode: "replicate"
+
+# Adaptive Processor Configuration
+adaptive_processor:
+  # Quality validation
+  enable_quality_validation: true
+  max_processing_iterations: 3
+  quality_improvement_threshold: 0.05
+  processing_timeout: 60.0
+  
+  # Performance settings
+  measure_final_quality: true
+  enable_statistics: true
+  
+  # Processing pipelines (can be customized)
+  custom_pipelines: []
+
+# System Configuration
+system:
+  # Logging
+  log_level: "INFO"
+  log_preprocessing: true
+  log_performance: true
+  
+  # Performance
+  enable_profiling: false
+  profile_output_dir: "./profiles/preprocessing"
+  
+  # Caching
+  enable_caching: true
+  cache_dir: "./cache/preprocessing" 
+  max_cache_size: 512  # MB
+  cache_ttl: 3600  # seconds
+  
+  # Memory management
+  memory_limit: 2048  # MB for preprocessing
+  cleanup_intermediate: true
+  
+  # Threading
+  max_workers: 4
+  enable_parallel: true
+
+# Content-Specific Settings
+content_optimization:
+  # Handwritten text
+  handwriting:
+    gentle_enhancement: true
+    preserve_strokes: true
+    enhancement_level: "conservative"
+  
+  # Table documents
+  tables:
+    enhance_structure: true
+    line_enhancement: true
+    preserve_grid: true
+  
+  # Form documents
+  forms:
+    preserve_fields: true
+    enhance_boundaries: true
+    field_detection: true
+  
+  # Natural scene text
+  scene_text:
+    background_suppression: true
+    text_isolation: true
+    adaptive_enhancement: true
+  
+  # Low quality documents
+  low_quality:
+    aggressive_restoration: true
+    multi_stage_enhancement: true
+    iterative_improvement: true
+
+# Validation and Quality Control
+validation:
+  # Quality gates
+  min_acceptable_quality: 0.4
+  require_improvement: true
+  min_improvement_threshold: 0.02
+  
+  # Fallback strategies
+  enable_fallback: true
+  fallback_to_original: true
+  max_degradation_tolerance: 0.1
+
+---
+
+# data/configs/step4_integration.yaml - Integration Configuration
+
+# Integration with existing OCR engines
+engine_integration:
+  # Preprocessing pipeline selection per engine
+  engine_preprocessing:
+    tesseract:
+      pipeline: "standard_document"
+      additional_steps: ["binarization", "noise_reduction"]
+    
+    easyocr:
+      pipeline: "balanced_enhancement"
+      additional_steps: ["contrast_enhancement"]
+    
+    paddleocr:
+      pipeline: "standard_document"
+      additional_steps: ["structure_preservation"]
+    
+    trocr:
+      pipeline: "content_aware"
+      additional_steps: ["handwriting_optimization"]
+
+# Preprocessing workflow
+workflow:
+  # Default processing order
+  default_steps:
+    1. "quality_analysis"
+    2. "pipeline_selection" 
+    3. "skew_correction"
+    4. "enhancement_processing"
+    5. "quality_validation"
+    6. "final_optimization"
+  
+  # Conditional processing
+  conditional_steps:
+    low_quality:
+      - "aggressive_restoration"
+      - "iterative_enhancement"
+    
+    handwritten:
+      - "stroke_preservation"
+      - "gentle_enhancement"
+    
+    table_document:
+      - "structure_enhancement"
+      - "line_detection"
+  
+  # Quality checkpoints
+  checkpoints:
+    after_skew_correction: true
+    after_enhancement: true
+    final_validation: true
+
+# Performance optimization
+performance:
+  # Adaptive processing based on image size
+  size_based_optimization:
+    small_image: # < 500x500
+      method: "fast_processing"
+      skip_expensive_operations: true
+    
+    medium_image: # 500x500 to 2000x2000  
+      method: "balanced_processing"
+      enable_all_features: true
+    
+    large_image: # > 2000x2000
+      method: "memory_efficient"
+      chunk_processing: true
+      reduced_quality_analysis: false
+  
+  # Resource management
+  memory_management:
+    max_image_cache: 10
+    aggressive_cleanup: true
+    monitor_memory: true
+  
+  # Processing optimization
+  processing_optimization:
+    skip_redundant_analysis: true
+    cache_intermediate_results: true
+    early_termination: true
+
+# Monitoring and debugging
+monitoring:
+  # Performance tracking
+  track_processing_time: true
+  track_quality_improvement: true
+  track_pipeline_usage: true
+  
+  # Debug output
+  save_debug_images: false
+  debug_output_dir: "./debug/preprocessing"
+  save_intermediate_steps: false
+  
+  # Statistics
+  enable_statistics: true
+  statistics_output: "./stats/preprocessing_stats.json"
+  update_interval: 100  # images
+
+# Error handling and recovery
+error_handling:
+  # Fallback strategies
+  on_analysis_failure: "use_default_pipeline"
+  on_enhancement_failure: "return_original"
+  on_correction_failure: "skip_correction"
+  
+  # Retry logic
+  max_retries: 2
+  retry_with_fallback: true
+  
+  # Error reporting
+  log_errors: true
+  detailed_error_info: true
+  
+  # Recovery options
+  partial_processing_acceptable: true
+  min_successful_steps: 2
+
+---
+
+# data/configs/step4_examples.yaml - Example Configurations
+
+# Example 1: High-speed processing for real-time applications
+high_speed_config:
+  image_enhancer:
+    enhancement_level: "light"
+    enable_ai_guidance: false
+    cache_enhanced_images: true
+  
+  skew_corrector:
+    correction_quality: "fast"
+    angle_step: 0.5
+    enable_validation: false
+  
+  adaptive_processor:
+    enable_quality_validation: false
+    max_processing_iterations: 1
+  
+  system:
+    enable_parallel: true
+    max_workers: 8
+
+# Example 2: Maximum quality for archival scanning
+maximum_quality_config:
+  image_enhancer:
+    enhancement_level: "maximum"
+    enable_ai_guidance: true
+    measure_improvement: true
+  
+  skew_corrector:
+    correction_quality: "preserve_quality"
+    angle_step: 0.05
+    enable_validation: true
+  
+  adaptive_processor:
+    enable_quality_validation: true
+    max_processing_iterations: 5
+    quality_improvement_threshold: 0.01
+  
+  validation:
+    min_acceptable_quality: 0.7
+    require_improvement: true
+
+# Example 3: Handwriting-optimized configuration
+handwriting_config:
+  image_enhancer:
+    enhancement_level: "conservative"
+    enable_ai_guidance: true
+  
+  content_optimization:
+    handwriting:
+      gentle_enhancement: true
+      preserve_strokes: true
+      enhancement_level: "conservative"
+  
+  adaptive_processor:
+    custom_pipelines:
+      - name: "handwriting_focused"
+        steps: ["gentle_deskew", "handwriting_enhancement", "preserve_strokes"]
+        parameters:
+          enhancement_level: "conservative"
+        conditions:
+          image_types: ["HANDWRITTEN_TEXT"]
+        priority: 1
+
+# Example 4: Table document processing
+table_processing_config:
+  content_optimization:
+    tables:
+      enhance_structure: true
+      line_enhancement: true
+      preserve_grid: true
+  
+  adaptive_processor:
+    custom_pipelines:
+      - name: "table_optimized"
+        steps: ["deskew", "enhance_structure", "line_enhancement", "cleanup"]
+        parameters:
+          enhancement_level: "medium"
+          preserve_structure: true
+        conditions:
+          image_types: ["TABLE_DOCUMENT"]
+        priority: 1
+
+# Example 5: Batch processing configuration
+batch_processing_config:
+  system:
+    enable_parallel: true
+    max_workers: 12
+    memory_limit: 4096
+  
+  adaptive_processor:
+    enable_quality_validation: false  # Skip for speed
+    processing_timeout: 30.0
+  
+  image_enhancer:
+    cache_enhanced_images: true
+    enable_ai_guidance: false
+  
+  monitoring:
+    enable_statistics: true
+    save_debug_images: false
+    track_processing_time: true
