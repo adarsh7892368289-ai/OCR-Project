@@ -1,342 +1,500 @@
 # src/core/engine_manager.py
 
-import cv2
+from typing import List, Dict, Any, Optional, Union
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
-import concurrent.futures
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import time
-import threading
-from collections import defaultdict
-import statistics
 
-from .base_engine import BaseOCREngine, OCRResult, DocumentResult
-from ..engines.tesseract_engine import TesseractEngine
-from ..engines.easyocr_engine import EasyOCREngine
-from ..engines.trocr_engine import TrOCREngine
+from .base_engine import BaseOCREngine, DocumentResult, TextType, BoundingBox
+from ..utils.config import Config
 
-class EngineManager:
-    """Manages multiple OCR engines and combines their results"""
+@dataclass
+class EnginePerformance:
+    """Track engine performance metrics"""
+    engine_name: str
+    avg_confidence: float
+    avg_processing_time: float
+    success_rate: float
+    best_for_text_types: List[TextType]
+    total_processed: int
+
+class OCREngineManager:
+    """Advanced OCR Engine Manager with intelligent engine selection"""
     
-    def __init__(self, config: Dict[str, Any] = None):
-        self.config = config or {}
+    def __init__(self, config: Config):
+        self.config = config
         self.engines: Dict[str, BaseOCREngine] = {}
-        self.engine_weights = {}
-        self.parallel_processing = self.config.get("parallel_processing", True)
-        self.max_workers = self.config.get("max_workers", 3)
-        self.confidence_threshold = self.config.get("confidence_threshold", 0.5)
-        self.voting_strategy = self.config.get("voting_strategy", "weighted_confidence")
+        self.initialized_engines: List[str] = []
+        self.logger = logging.getLogger("OCR.EngineManager")
+        self.performance_history: Dict[str, EnginePerformance] = {}
         
-    def initialize_engines(self, engine_configs: Dict[str, Dict[str, Any]]) -> Dict[str, bool]:
-        """Initialize specified OCR engines"""
-        initialization_results = {}
+        # Engine selection strategy
+        self.selection_strategy = config.get("engine.selection_strategy", "adaptive")
+        self.parallel_processing = config.get("parallel_processing", True)
+        self.max_workers = config.get("max_workers", 3)
         
-        for engine_name, engine_config in engine_configs.items():
-            try:
-                print(f"Initializing {engine_name}...")
-                
-                if engine_name.lower() == "tesseract":
-                    engine = TesseractEngine(engine_config)
-                elif engine_name.lower() == "easyocr":
-                    engine = EasyOCREngine(engine_config)
-                elif engine_name.lower() == "trocr":
-                    engine = TrOCREngine(engine_config)
-                else:
-                    print(f"Unknown engine: {engine_name}")
-                    initialization_results[engine_name] = False
-                    continue
-                    
-                success = engine.initialize()
-                if success:
-                    self.engines[engine_name] = engine
-                    # Set default weights based on engine characteristics
-                    self.engine_weights[engine_name] = self._get_default_weight(engine_name)
-                    
-                initialization_results[engine_name] = success
-                print(f"{engine_name} initialization: {'Success' if success else 'Failed'}")
-                
-            except Exception as e:
-                print(f"Error initializing {engine_name}: {e}")
-                initialization_results[engine_name] = False
-                
-        return initialization_results
-        
-    def _get_default_weight(self, engine_name: str) -> float:
-        """Get default weight for engine based on its characteristics"""
-        weights = {
-            "tesseract": 1.2,  # High weight for printed text
-            "easyocr": 1.0,    # Balanced weight
-            "trocr": 1.5,      # Higher weight for handwritten text
-            "paddleocr": 1.1,  # Good for multilingual
-            "keras_ocr": 0.9   # Lower weight, used as backup
+        # Engine priorities for different scenarios
+        self.engine_priorities = {
+            TextType.PRINTED: ["paddleocr", "tesseract", "easyocr", "trocr"],
+            TextType.HANDWRITTEN: ["trocr", "easyocr", "paddleocr"],
+            TextType.MIXED: ["paddleocr", "easyocr", "trocr", "tesseract"],
+            TextType.UNKNOWN: ["paddleocr", "easyocr", "trocr", "tesseract"]
         }
-        return weights.get(engine_name.lower(), 1.0)
-        
-    def process_image(self, image: np.ndarray, **kwargs) -> DocumentResult:
-        """Process image with all available engines"""
-        if not self.engines:
-            raise RuntimeError("No OCR engines initialized")
+    
+    def register_engine(self, engine: BaseOCREngine) -> bool:
+        """Register an OCR engine"""
+        try:
+            if engine.name in self.engines:
+                self.logger.warning(f"Engine {engine.name} already registered, overwriting")
             
+            self.engines[engine.name] = engine
+            
+            # Initialize performance tracking
+            self.performance_history[engine.name] = EnginePerformance(
+                engine_name=engine.name,
+                avg_confidence=0.0,
+                avg_processing_time=0.0,
+                success_rate=0.0,
+                best_for_text_types=[],
+                total_processed=0
+            )
+            
+            self.logger.info(f"Registered engine: {engine.name}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to register engine {engine.name}: {e}")
+            return False
+    
+    def initialize_engines(self, engine_names: Optional[List[str]] = None) -> Dict[str, bool]:
+        """Initialize specified engines or all registered engines"""
+        if engine_names is None:
+            engine_names = list(self.engines.keys())
+        
+        results = {}
+        
+        for engine_name in engine_names:
+            if engine_name not in self.engines:
+                self.logger.error(f"Engine {engine_name} not registered")
+                results[engine_name] = False
+                continue
+            
+            try:
+                engine = self.engines[engine_name]
+                if engine.initialize():
+                    self.initialized_engines.append(engine_name)
+                    results[engine_name] = True
+                    self.logger.info(f"Initialized engine: {engine_name}")
+                else:
+                    results[engine_name] = False
+                    self.logger.error(f"Failed to initialize engine: {engine_name}")
+                    
+            except Exception as e:
+                results[engine_name] = False
+                self.logger.error(f"Exception initializing {engine_name}: {e}")
+        
+        return results
+    
+    def get_available_engines(self) -> List[str]:
+        """Get list of available (initialized) engines"""
+        return self.initialized_engines.copy()
+    
+    def select_best_engine(self, 
+                          image: np.ndarray,
+                          text_type: Optional[TextType] = None,
+                          language: str = "en",
+                          quality_priority: bool = True) -> Optional[str]:
+        """Intelligently select the best engine for the given parameters"""
+        
+        if not self.initialized_engines:
+            self.logger.error("No engines available")
+            return None
+        
+        # Detect text type if not provided
+        if text_type is None:
+            text_type = self._detect_text_type(image)
+        
+        if self.selection_strategy == "adaptive":
+            return self._adaptive_engine_selection(text_type, language, quality_priority)
+        elif self.selection_strategy == "performance":
+            return self._performance_based_selection(text_type, language)
+        elif self.selection_strategy == "round_robin":
+            return self._round_robin_selection()
+        else:
+            # Default to priority-based selection
+            return self._priority_based_selection(text_type)
+    
+    def _detect_text_type(self, image: np.ndarray) -> TextType:
+        """Detect text type from image characteristics"""
+        # Use the first available engine's detection method
+        if self.initialized_engines:
+            engine_name = self.initialized_engines[0]
+            engine = self.engines[engine_name]
+            return engine.detect_text_type(image)
+        
+        return TextType.UNKNOWN
+    
+    def _adaptive_engine_selection(self, 
+                                 text_type: TextType,
+                                 language: str,
+                                 quality_priority: bool) -> str:
+        """Adaptive engine selection based on performance history"""
+        
+        available_engines = [name for name in self.engine_priorities[text_type] 
+                           if name in self.initialized_engines]
+        
+        if not available_engines:
+            return self.initialized_engines[0] if self.initialized_engines else None
+        
+        # Score engines based on performance and suitability
+        engine_scores = {}
+        
+        for engine_name in available_engines:
+            score = 0.0
+            perf = self.performance_history[engine_name]
+            
+            # Base score from confidence and success rate
+            if perf.total_processed > 0:
+                confidence_score = perf.avg_confidence * 0.4
+                success_score = perf.success_rate * 0.3
+                
+                # Speed score (inverse of processing time)
+                if quality_priority:
+                    speed_score = 0.1 / (perf.avg_processing_time + 0.1)
+                else:
+                    speed_score = 0.3 / (perf.avg_processing_time + 0.1)
+                
+                score = confidence_score + success_score + speed_score
+            else:
+                # New engine - give it a moderate score
+                score = 0.5
+            
+            # Bonus for text type specialization
+            engine = self.engines[engine_name]
+            if text_type == TextType.HANDWRITTEN and engine.supports_handwriting:
+                score *= 1.2
+            
+            # Language support bonus
+            if language in engine.get_supported_languages():
+                score *= 1.1
+            
+            engine_scores[engine_name] = score
+        
+        # Return the highest scoring engine
+        return max(engine_scores.items(), key=lambda x: x[1])[0]
+    
+    def _performance_based_selection(self, text_type: TextType, language: str) -> str:
+        """Select engine based on historical performance"""
+        best_engine = None
+        best_score = 0.0
+        
+        for engine_name in self.initialized_engines:
+            perf = self.performance_history[engine_name]
+            if perf.total_processed > 0:
+                # Combined score of confidence and success rate
+                score = (perf.avg_confidence * 0.7 + perf.success_rate * 0.3)
+                
+                if score > best_score:
+                    best_score = score
+                    best_engine = engine_name
+        
+        return best_engine or self.initialized_engines[0]
+    
+    def _priority_based_selection(self, text_type: TextType) -> str:
+        """Select engine based on predefined priorities"""
+        for engine_name in self.engine_priorities[text_type]:
+            if engine_name in self.initialized_engines:
+                return engine_name
+        
+        return self.initialized_engines[0]
+    
+    def _round_robin_selection(self) -> str:
+        """Simple round-robin selection"""
+        if not hasattr(self, '_round_robin_index'):
+            self._round_robin_index = 0
+        
+        engine = self.initialized_engines[self._round_robin_index % len(self.initialized_engines)]
+        self._round_robin_index += 1
+        return engine
+    
+    def process_image(self, 
+                     image: np.ndarray,
+                     engine_name: Optional[str] = None,
+                     **kwargs) -> DocumentResult:
+        """Process image with specified or auto-selected engine"""
+        
+        if engine_name is None:
+            engine_name = self.select_best_engine(image, **kwargs)
+        
+        if engine_name not in self.initialized_engines:
+            raise ValueError(f"Engine {engine_name} not available")
+        
+        engine = self.engines[engine_name]
         start_time = time.time()
         
-        # Analyze image to determine optimal engine selection
-        image_analysis = self._analyze_image(image)
-        selected_engines = self._select_engines(image_analysis, **kwargs)
+        try:
+            result = engine.process_image(image, **kwargs)
+            
+            # Update performance tracking
+            self._update_performance(engine_name, result, time.time() - start_time, True)
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Engine {engine_name} failed: {e}")
+            
+            # Update performance tracking for failure
+            self._update_performance(engine_name, None, time.time() - start_time, False)
+            
+            # Try fallback engine
+            return self._try_fallback(image, engine_name, **kwargs)
+    
+    def process_image_multi_engine(self, 
+                                 image: np.ndarray,
+                                 engine_names: Optional[List[str]] = None,
+                                 **kwargs) -> Dict[str, DocumentResult]:
+        """Process image with multiple engines for comparison"""
         
-        print(f"Selected engines: {list(selected_engines.keys())}")
+        if engine_names is None:
+            engine_names = self.initialized_engines[:3]  # Use top 3 engines
         
-        # Process with selected engines
-        if self.parallel_processing and len(selected_engines) > 1:
-            engine_results = self._process_parallel(image, selected_engines, **kwargs)
+        results = {}
+        
+        if self.parallel_processing:
+            # Parallel processing
+            with ThreadPoolExecutor(max_workers=min(len(engine_names), self.max_workers)) as executor:
+                future_to_engine = {
+                    executor.submit(self._process_with_engine, engine_name, image, **kwargs): engine_name
+                    for engine_name in engine_names if engine_name in self.initialized_engines
+                }
+                
+                for future in as_completed(future_to_engine):
+                    engine_name = future_to_engine[future]
+                    try:
+                        result = future.result(timeout=30)  # 30 second timeout
+                        results[engine_name] = result
+                    except Exception as e:
+                        self.logger.error(f"Engine {engine_name} failed in parallel processing: {e}")
         else:
-            engine_results = self._process_sequential(image, selected_engines, **kwargs)
+            # Sequential processing
+            for engine_name in engine_names:
+                if engine_name in self.initialized_engines:
+                    try:
+                        result = self.process_image(image, engine_name, **kwargs)
+                        results[engine_name] = result
+                    except Exception as e:
+                        self.logger.error(f"Engine {engine_name} failed: {e}")
+        
+        return results
+    
+    def _process_with_engine(self, engine_name: str, image: np.ndarray, **kwargs) -> DocumentResult:
+        """Helper method for parallel processing"""
+        return self.process_image(image, engine_name, **kwargs)
+    
+    def _try_fallback(self, image: np.ndarray, failed_engine: str, **kwargs) -> DocumentResult:
+        """Try fallback engines when primary engine fails"""
+        
+        available_engines = [e for e in self.initialized_engines if e != failed_engine]
+        
+        if not available_engines:
+            # Create empty result if no fallback available
+            from .base_engine import DocumentResult, DocumentStructure
+            return DocumentResult(
+                full_text="",
+                results=[],
+                text_regions=[],
+                document_structure=DocumentStructure(),
+                processing_time=0.0,
+                engine_name="failed",
+                image_stats={},
+                confidence_score=0.0
+            )
+        
+        # Try the best alternative
+        fallback_engine = available_engines[0]
+        self.logger.info(f"Trying fallback engine: {fallback_engine}")
+        
+        try:
+            return self.process_image(image, fallback_engine, **kwargs)
+        except Exception as e:
+            self.logger.error(f"Fallback engine {fallback_engine} also failed: {e}")
+            # Return empty result
+            from .base_engine import DocumentResult, DocumentStructure
+            return DocumentResult(
+                full_text="",
+                results=[],
+                text_regions=[],
+                document_structure=DocumentStructure(),
+                processing_time=0.0,
+                engine_name="failed",
+                image_stats={},
+                confidence_score=0.0
+            )
+    
+    def _update_performance(self, 
+                          engine_name: str, 
+                          result: Optional[DocumentResult],
+                          processing_time: float,
+                          success: bool):
+        """Update engine performance statistics"""
+        
+        perf = self.performance_history[engine_name]
+        
+        # Update running averages
+        total = perf.total_processed
+        
+        if success and result:
+            # Update confidence average
+            new_confidence = result.confidence_score
+            perf.avg_confidence = ((perf.avg_confidence * total + new_confidence) / 
+                                 (total + 1))
             
-        # Combine results
-        final_result = self._combine_results(engine_results, image_analysis)
-        
-        # Update processing time
-        total_time = time.time() - start_time
-        final_result.processing_time = total_time
-        
-        print(f"Total processing time: {total_time:.2f}s")
-        print(f"Final confidence: {final_result.confidence_score:.3f}")
-        
-        return final_result
-        
-    def _analyze_image(self, image: np.ndarray) -> Dict[str, Any]:
-        """Analyze image characteristics to guide engine selection"""
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            # Update success rate
+            perf.success_rate = ((perf.success_rate * total + 1.0) / (total + 1))
         else:
-            gray = image.copy()
+            # Update success rate for failure
+            perf.success_rate = (perf.success_rate * total / (total + 1))
+        
+        # Update processing time average
+        perf.avg_processing_time = ((perf.avg_processing_time * total + processing_time) / 
+                                   (total + 1))
+        
+        perf.total_processed += 1
+    
+    def get_engine_performance(self) -> Dict[str, EnginePerformance]:
+        """Get performance statistics for all engines"""
+        return self.performance_history.copy()
+    
+    def get_best_engine_for_type(self, text_type: TextType) -> Optional[str]:
+        """Get the best performing engine for a specific text type"""
+        candidates = [name for name in self.engine_priorities[text_type] 
+                     if name in self.initialized_engines]
+        
+        if not candidates:
+            return None
+        
+        best_engine = None
+        best_score = 0.0
+        
+        for engine_name in candidates:
+            perf = self.performance_history[engine_name]
+            if perf.total_processed > 0:
+                score = perf.avg_confidence * perf.success_rate
+                if score > best_score:
+                    best_score = score
+                    best_engine = engine_name
+        
+        return best_engine or candidates[0]
+    
+    def benchmark_engines(self, 
+                         test_images: List[np.ndarray],
+                         ground_truth: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
+        """Benchmark all engines against test images"""
+        
+        benchmark_results = {}
+        
+        for engine_name in self.initialized_engines:
+            self.logger.info(f"Benchmarking engine: {engine_name}")
             
-        analysis = {
-            "width": image.shape[1],
-            "height": image.shape[0],
-            "aspect_ratio": image.shape[1] / image.shape[0],
-            "mean_brightness": np.mean(gray),
-            "brightness_std": np.std(gray),
-            "has_handwritten": self._detect_handwritten_probability(gray),
-            "text_density": self._estimate_text_density(gray),
-            "image_quality": self._assess_image_quality(gray)
-        }
-        
-        return analysis
-        
-    def _detect_handwritten_probability(self, gray_image: np.ndarray) -> float:
-        """Estimate probability of handwritten text presence"""
-        # Use edge detection and contour analysis
-        edges = cv2.Canny(gray_image, 50, 150)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return 0.0
+            results = []
+            total_time = 0.0
             
-        # Analyze contour characteristics
-        irregularity_scores = []
-        for contour in contours:
-            if cv2.contourArea(contour) > 100:  # Filter small contours
-                # Calculate contour irregularity
-                perimeter = cv2.arcLength(contour, True)
-                area = cv2.contourArea(contour)
-                if perimeter > 0:
-                    circularity = 4 * np.pi * area / (perimeter * perimeter)
-                    irregularity = 1.0 - circularity
-                    irregularity_scores.append(irregularity)
+            for i, image in enumerate(test_images):
+                try:
+                    start_time = time.time()
+                    result = self.process_image(image, engine_name)
+                    processing_time = time.time() - start_time
                     
-        if irregularity_scores:
-            avg_irregularity = np.mean(irregularity_scores)
-            # Higher irregularity suggests handwritten text
-            handwritten_prob = min(1.0, avg_irregularity * 2)
-        else:
-            handwritten_prob = 0.5  # Default when uncertain
+                    results.append(result)
+                    total_time += processing_time
+                    
+                except Exception as e:
+                    self.logger.error(f"Benchmark failed for {engine_name} on image {i}: {e}")
+                    continue
             
-        return handwritten_prob
-        
-    def _estimate_text_density(self, gray_image: np.ndarray) -> float:
-        """Estimate text density in the image"""
-        # Use morphological operations to detect text regions
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        morph = cv2.morphologyEx(gray_image, cv2.MORPH_CLOSE, kernel)
-        
-        # Threshold
-        _, thresh = cv2.threshold(morph, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Calculate text area ratio
-        text_pixels = np.sum(thresh < 128)  # Assuming dark text on light background
-        total_pixels = thresh.size
-        
-        return text_pixels / total_pixels
-        
-    def _assess_image_quality(self, gray_image: np.ndarray) -> float:
-        """Assess overall image quality for OCR"""
-        # Calculate Laplacian variance (focus measure)
-        laplacian_var = cv2.Laplacian(gray_image, cv2.CV_64F).var()
-        
-        # Normalize to 0-1 range (higher is better)
-        quality_score = min(1.0, laplacian_var / 1000.0)
-        
-        return quality_score
-        
-    def _select_engines(self, image_analysis: Dict[str, Any], **kwargs):
-        selected = {}
-        handwritten_prob = image_analysis.get("has_handwritten", 0.5)
-        
-        # Always include TrOCR for any text (it works well for printed text too)
-        if "trocr" in self.engines:
-            selected["trocr"] = self.engines["trocr"]
-        
-        # Add EasyOCR for mixed content
-        if "easyocr" in self.engines:
-            selected["easyocr"] = self.engines["easyocr"]
-        
-        # Add Tesseract only for clearly printed text
-        if handwritten_prob < 0.5 and "tesseract" in self.engines:
-            selected["tesseract"] = self.engines["tesseract"]
-        
-        return selected
-        
-    def _process_parallel(self, image: np.ndarray, engines: Dict[str, BaseOCREngine], **kwargs) -> Dict[str, DocumentResult]:
-        """Process image with multiple engines in parallel"""
-        results = {}
-        
-        def process_engine(engine_name: str, engine: BaseOCREngine) -> Tuple[str, DocumentResult]:
-            try:
-                print(f"Processing with {engine_name}...")
-                result = engine.process_image(image, **kwargs)
-                print(f"{engine_name} completed in {result.processing_time:.2f}s")
-                return engine_name, result
-            except Exception as e:
-                print(f"Error in {engine_name}: {e}")
-                return engine_name, DocumentResult(
-                    full_text="", results=[], processing_time=0.0,
-                    engine_name=engine_name, image_stats={}, confidence_score=0.0
-                )
+            if results:
+                # Calculate metrics
+                avg_confidence = sum(r.confidence_score for r in results) / len(results)
+                avg_time = total_time / len(results)
+                success_rate = len(results) / len(test_images)
                 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_engine = {
-                executor.submit(process_engine, name, engine): name 
-                for name, engine in engines.items()
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_engine):
-                engine_name, result = future.result()
-                results[engine_name] = result
+                metrics = {
+                    'avg_confidence': avg_confidence,
+                    'avg_processing_time': avg_time,
+                    'success_rate': success_rate,
+                    'total_processed': len(results)
+                }
                 
-        return results
-        
-    def _process_sequential(self, image: np.ndarray, engines: Dict[str, BaseOCREngine], **kwargs) -> Dict[str, DocumentResult]:
-        """Process image with engines sequentially"""
-        results = {}
-        
-        for engine_name, engine in engines.items():
-            try:
-                print(f"Processing with {engine_name}...")
-                result = engine.process_image(image, **kwargs)
-                results[engine_name] = result
-                print(f"{engine_name} completed in {result.processing_time:.2f}s")
-            except Exception as e:
-                print(f"Error in {engine_name}: {e}")
-                results[engine_name] = DocumentResult(
-                    full_text="", results=[], processing_time=0.0,
-                    engine_name=engine_name, image_stats={}, confidence_score=0.0
-                )
+                # Calculate accuracy if ground truth provided
+                if ground_truth:
+                    accuracy = self._calculate_accuracy(results, ground_truth)
+                    metrics['accuracy'] = accuracy
                 
-        return results
+                benchmark_results[engine_name] = metrics
         
-    def _combine_results(self, engine_results: Dict[str, DocumentResult], image_analysis: Dict[str, Any]) -> DocumentResult:
-        """Combine results from multiple engines using intelligent voting"""
-        if not engine_results:
-            return DocumentResult("", [], 0.0, "combined", {}, 0.0)
-            
-        # Filter out failed results
-        valid_results = {
-            name: result for name, result in engine_results.items()
-            if result.confidence_score > 0.1 and result.full_text.strip()
+        return benchmark_results
+    
+    def _calculate_accuracy(self, results: List[DocumentResult], ground_truth: List[str]) -> float:
+        """Calculate accuracy against ground truth"""
+        from difflib import SequenceMatcher
+        
+        accuracies = []
+        
+        for i, result in enumerate(results):
+            if i < len(ground_truth):
+                predicted = result.full_text.strip().lower()
+                actual = ground_truth[i].strip().lower()
+                
+                # Use sequence matching for similarity
+                similarity = SequenceMatcher(None, predicted, actual).ratio()
+                accuracies.append(similarity)
+        
+        return sum(accuracies) / len(accuracies) if accuracies else 0.0
+    
+    def export_performance_report(self, output_path: str):
+        """Export detailed performance report"""
+        import json
+        from datetime import datetime
+        
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'total_engines': len(self.engines),
+            'initialized_engines': len(self.initialized_engines),
+            'performance_data': {}
         }
         
-        if not valid_results:
-            # Return best available result even if low confidence
-            best_result = max(engine_results.values(), key=lambda r: r.confidence_score)
-            return best_result
-            
-        if len(valid_results) == 1:
-            return list(valid_results.values())[0]
-            
-        # Use voting strategy
-        if self.voting_strategy == "weighted_confidence":
-            combined_result = self._weighted_confidence_voting(valid_results, image_analysis)
-        elif self.voting_strategy == "best_confidence":
-            combined_result = max(valid_results.values(), key=lambda r: r.confidence_score)
-        else:
-            combined_result = self._simple_majority_voting(valid_results)
-            
-        return combined_result
-        
-    def _weighted_confidence_voting(self, results: Dict[str, DocumentResult], image_analysis: Dict[str, Any]) -> DocumentResult:
-        """Combine results using weighted confidence voting"""
-        # Adjust weights based on image characteristics
-        adjusted_weights = self._adjust_weights_for_image(image_analysis)
-        
-        # Calculate weighted scores
-        weighted_scores = {}
-        for engine_name, result in results.items():
-            base_weight = adjusted_weights.get(engine_name, 1.0)
-            confidence_weight = result.confidence_score
-            weighted_scores[engine_name] = base_weight * confidence_weight
-            
-        # Select best result based on weighted score
-        best_engine = max(weighted_scores.keys(), key=lambda e: weighted_scores[e])
-        best_result = results[best_engine]
-        
-        # Create combined result with metadata from all engines
-        processing_times = [r.processing_time for r in results.values()]
-        
-        return DocumentResult(
-            full_text=best_result.full_text,
-            results=best_result.results,
-            processing_time=sum(processing_times),
-            engine_name=f"combined({best_engine})",
-            image_stats=best_result.image_stats,
-            confidence_score=best_result.confidence_score
-        )
-        
-    def _adjust_weights_for_image(self, image_analysis: Dict[str, Any]) -> Dict[str, float]:
-        """Adjust engine weights based on image characteristics"""
-        adjusted = self.engine_weights.copy()
-        
-        handwritten_prob = image_analysis.get("has_handwritten", 0.5)
-        
-        # Boost TrOCR weight for handwritten text
-        if "trocr" in adjusted:
-            adjusted["trocr"] *= (1.0 + handwritten_prob)
-            
-        # Boost Tesseract for printed text
-        if "tesseract" in adjusted:
-            adjusted["tesseract"] *= (1.0 + (1.0 - handwritten_prob))
-            
-        return adjusted
-        
-    def _simple_majority_voting(self, results: Dict[str, DocumentResult]) -> DocumentResult:
-        """Simple majority voting based on confidence"""
-        return max(results.values(), key=lambda r: r.confidence_score)
-        
-    def get_engine_info(self) -> Dict[str, Dict[str, Any]]:
-        """Get information about loaded engines"""
-        info = {}
-        for name, engine in self.engines.items():
-            info[name] = {
-                "name": engine.name,
-                "initialized": engine.is_initialized,
-                "supported_languages": engine.get_supported_languages(),
-                "weight": self.engine_weights.get(name, 1.0)
+        for engine_name, perf in self.performance_history.items():
+            report['performance_data'][engine_name] = {
+                'avg_confidence': perf.avg_confidence,
+                'avg_processing_time': perf.avg_processing_time,
+                'success_rate': perf.success_rate,
+                'total_processed': perf.total_processed,
+                'best_for_text_types': [t.value for t in perf.best_for_text_types]
             }
-        return info
         
-    def cleanup(self):
-        """Cleanup all engines"""
-        for engine in self.engines.values():
+        with open(output_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        self.logger.info(f"Performance report exported to {output_path}")
+    
+    def cleanup_engines(self):
+        """Cleanup all initialized engines"""
+        for engine_name in self.initialized_engines:
             try:
-                engine.cleanup()
+                self.engines[engine_name].cleanup()
+                self.logger.info(f"Cleaned up engine: {engine_name}")
             except Exception as e:
-                print(f"Error during cleanup: {e}")
-        self.engines.clear()
+                self.logger.error(f"Failed to cleanup engine {engine_name}: {e}")
+        
+        self.initialized_engines.clear()
+    
+    def __enter__(self):
+        # Initialize default engines
+        default_engines = self.config.get("engines", {}).keys()
+        self.initialize_engines(list(default_engines))
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup_engines()

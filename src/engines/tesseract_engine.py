@@ -1,5 +1,3 @@
-# src/engines/tesseract_engine.py
-
 import cv2
 import numpy as np
 import pytesseract
@@ -8,8 +6,33 @@ import time
 import re
 from PIL import Image
 import os
-if os.name == 'nt': 
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+import subprocess
+
+# Fix Tesseract path detection
+def find_tesseract():
+    """Find Tesseract installation automatically"""
+    possible_paths = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        r'C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'.format(os.getenv('USERNAME', '')),
+        'tesseract',  # Linux/Mac default
+        '/usr/bin/tesseract',
+        '/usr/local/bin/tesseract'
+    ]
+    
+    for path in possible_paths:
+        try:
+            if os.name == 'nt':  # Windows
+                if os.path.exists(path):
+                    return path
+            else:  # Linux/Mac
+                result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return result.stdout.strip()
+        except:
+            continue
+    return None
+
 from ..core.base_engine import BaseOCREngine, OCRResult, DocumentResult
 
 class TesseractEngine(BaseOCREngine):
@@ -36,24 +59,22 @@ class TesseractEngine(BaseOCREngine):
             lang = "+".join(lang)
         config_parts.append(f"-l {lang}")
         
-        # Additional configurations
-        if self.config.get("whitelist"):
-            config_parts.append(f"-c tessedit_char_whitelist={self.config['whitelist']}")
-        if self.config.get("blacklist"):
-            config_parts.append(f"-c tessedit_char_blacklist={self.config['blacklist']}")
-            
         return " ".join(config_parts)
         
     def initialize(self) -> bool:
         """Initialize Tesseract engine"""
         try:
-            # Test if Tesseract is available
-            pytesseract.get_tesseract_version()
+            # Auto-find Tesseract
+            tesseract_cmd = find_tesseract()
+            if tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+                print(f"Found Tesseract at: {tesseract_cmd}")
+            else:
+                print("Tesseract not found. Please install from: https://github.com/UB-Mannheim/tesseract/wiki")
+                return False
             
-            # Set Tesseract command path if provided
-            if "tesseract_cmd" in self.config:
-                pytesseract.pytesseract.tesseract_cmd = self.config["tesseract_cmd"]
-                
+            # Test if Tesseract works
+            pytesseract.get_tesseract_version()
             self.supported_languages = self._get_available_languages()
             self.is_initialized = True
             return True
@@ -77,15 +98,15 @@ class TesseractEngine(BaseOCREngine):
         """Process image with Tesseract OCR"""
         start_time = time.time()
         
-        # Preprocess image
-        processed_image = self.preprocess_image(image)
-        
-        # Enhanced preprocessing for better OCR
-        processed_image = self._enhance_image(processed_image)
-        
         try:
+            # Enhanced preprocessing
+            processed_image = self._enhance_image(image)
+            
             # Convert numpy array to PIL Image
-            pil_image = Image.fromarray(processed_image)
+            if len(processed_image.shape) == 3:
+                pil_image = Image.fromarray(cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB))
+            else:
+                pil_image = Image.fromarray(processed_image)
             
             # Get detailed OCR data
             data = pytesseract.image_to_data(
@@ -127,16 +148,17 @@ class TesseractEngine(BaseOCREngine):
             
     def _enhance_image(self, image: np.ndarray) -> np.ndarray:
         """Enhanced image preprocessing for better OCR"""
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+            
         # Noise reduction
-        denoised = cv2.fastNlMeansDenoising(image)
-        
-        # Morphological operations to clean text
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-        morphed = cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, kernel)
+        denoised = cv2.fastNlMeansDenoising(gray)
         
         # Enhance contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(morphed)
+        enhanced = clahe.apply(denoised)
         
         # Threshold the image
         _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -219,14 +241,3 @@ class TesseractEngine(BaseOCREngine):
             "mean_brightness": np.mean(image),
             "std_brightness": np.std(image)
         }
-        
-    def extract_with_layout(self, image: np.ndarray) -> DocumentResult:
-        """Extract text while preserving layout structure"""
-        # Use PSM 6 for uniform block of text with layout
-        original_config = self.tesseract_config
-        self.tesseract_config = self.tesseract_config.replace("--psm 6", "--psm 6")
-        
-        result = self.process_image(image)
-        self.tesseract_config = original_config
-        
-        return result

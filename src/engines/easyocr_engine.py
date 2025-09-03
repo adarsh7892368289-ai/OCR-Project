@@ -1,11 +1,11 @@
-# src/engines/easyocr_engine.py
-
+# ============= src/engines/easyocr_engine.py =============
 import cv2
 import numpy as np
 import easyocr
 from typing import List, Dict, Any, Tuple
 import time
 import os
+from PIL import Image
 
 from ..core.base_engine import BaseOCREngine, OCRResult, DocumentResult
 
@@ -44,7 +44,6 @@ class EasyOCREngine(BaseOCREngine):
             
     def get_supported_languages(self) -> List[str]:
         """Get supported languages"""
-        # EasyOCR supported languages
         return [
             'en', 'ch_sim', 'ch_tra', 'ja', 'ko', 'th', 'vi', 'ar', 'hi', 'ur', 
             'fa', 'ru', 'bg', 'uk', 'be', 'te', 'kn', 'ta', 'bn', 'as', 'mr', 
@@ -65,16 +64,16 @@ class EasyOCREngine(BaseOCREngine):
             # Enhanced preprocessing
             processed_image = self._preprocess_for_easyocr(image)
             
-            # EasyOCR processing
+            # EasyOCR processing with optimized parameters
             ocr_results = self.reader.readtext(
                 processed_image,
                 detail=1,  # Get detailed results with bounding boxes
-                paragraph=kwargs.get("paragraph", False),
-                width_ths=kwargs.get("width_ths", 0.7),
-                height_ths=kwargs.get("height_ths", 0.7),
-                decoder=kwargs.get("decoder", "greedy"),
-                beamWidth=kwargs.get("beamWidth", 5),
-                batch_size=kwargs.get("batch_size", 1)
+                paragraph=False,  # Process word by word for better accuracy
+                width_ths=0.7,
+                height_ths=0.7,
+                decoder="greedy",
+                beamWidth=5,
+                batch_size=1
             )
             
             # Parse results
@@ -121,25 +120,26 @@ class EasyOCREngine(BaseOCREngine):
             # Convert grayscale to RGB
             processed = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
             
-        # Resize if image is too large (EasyOCR works better with reasonable sizes)
+        # Resize if image is too large
         height, width = processed.shape[:2]
-        max_dim = 2048
+        max_dim = 1920  # Reduced for better performance
         
         if max(height, width) > max_dim:
             scale = max_dim / max(height, width)
             new_width = int(width * scale)
             new_height = int(height * scale)
+            # Use LANCZOS4 equivalent (Image.ANTIALIAS is deprecated)
             processed = cv2.resize(processed, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
             
-        # Enhance contrast and sharpening for better text detection
+        # Enhance for OCR
         processed = self._enhance_for_ocr(processed)
         
         return processed
         
     def _enhance_for_ocr(self, image: np.ndarray) -> np.ndarray:
         """Enhance image for better OCR results"""
-        # Convert to LAB color space for better contrast adjustment
         if len(image.shape) == 3:
+            # Convert to LAB color space for better contrast adjustment
             lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
             l, a, b = cv2.split(lab)
             
@@ -153,36 +153,30 @@ class EasyOCREngine(BaseOCREngine):
         else:
             enhanced = image
             
-        # Slight sharpening
-        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-        sharpened = cv2.filter2D(enhanced, -1, kernel * 0.1)
-        
-        # Blend original and sharpened
-        result = cv2.addWeighted(enhanced, 0.7, sharpened, 0.3, 0)
-        
-        return result
+        return enhanced
         
     def _parse_easyocr_results(self, ocr_results: List) -> List[OCRResult]:
         """Parse EasyOCR results into standardized format"""
         results = []
         
         for detection in ocr_results:
-            bbox_points, text, confidence = detection
-            
-            if text.strip() and confidence > 0.1:  # Filter low confidence
-                # Convert polygon to bounding box
-                bbox = self._polygon_to_bbox(bbox_points)
+            if len(detection) >= 3:
+                bbox_points, text, confidence = detection
                 
-                result = OCRResult(
-                    text=text.strip(),
-                    confidence=confidence,
-                    bbox=bbox,
-                    word_level=True
-                )
-                
-                if self.validate_result(result):
-                    results.append(result)
+                if text.strip() and confidence > 0.1:  # Filter low confidence
+                    # Convert polygon to bounding box
+                    bbox = self._polygon_to_bbox(bbox_points)
                     
+                    result = OCRResult(
+                        text=text.strip(),
+                        confidence=confidence,
+                        bbox=bbox,
+                        word_level=True
+                    )
+                    
+                    if self.validate_result(result):
+                        results.append(result)
+                        
         return results
         
     def _polygon_to_bbox(self, points: List[List[float]]) -> Tuple[int, int, int, int]:
@@ -207,7 +201,7 @@ class EasyOCREngine(BaseOCREngine):
         lines = []
         current_line = []
         last_y = -1
-        y_threshold = 20  # pixels
+        y_threshold = 30  # Increased threshold for better line grouping
         
         for result in sorted_results:
             y_pos = result.bbox[1]
@@ -243,10 +237,4 @@ class EasyOCREngine(BaseOCREngine):
             "mean_brightness": np.mean(image),
             "std_brightness": np.std(image)
         }
-        
-    def cleanup(self):
-        """Cleanup EasyOCR resources"""
-        if self.reader:
-            # EasyOCR doesn't have explicit cleanup, but we can clear the reference
-            self.reader = None
-            self.model_loaded = False
+
