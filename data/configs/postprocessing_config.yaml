@@ -1,0 +1,262 @@
+# Post-processing Configuration
+# File Location: data/configs/postprocessing_config.yaml
+
+# Post-processing Pipeline Configuration
+postprocessing_pipeline:
+  # Stage enablement
+  enable_text_correction: true
+  enable_confidence_filtering: true
+  enable_layout_analysis: true
+  enable_result_formatting: true
+  
+  # Processing methods
+  correction_method: "auto"  # auto, spellcheck, context, ml
+  confidence_threshold: 0.5
+  adaptive_confidence: true
+  layout_detection_method: "hybrid"  # traditional, deep_learning, hybrid
+  default_output_format: "json"
+  structure_level: "enhanced"  # basic, enhanced, comprehensive, analytical
+  
+  # Performance settings
+  parallel_processing: false
+  max_workers: 4
+  timeout_seconds: 300
+
+# Text Corrector Configuration
+text_corrector:
+  # Correction methods
+  enable_spellcheck: true
+  enable_grammar_check: true
+  enable_context_correction: true
+  enable_ml_correction: false
+  
+  # Spellcheck settings
+  spellcheck:
+    dictionary_path: "data/dictionaries/en_US.dic"
+    custom_dictionary_path: "data/dictionaries/custom.dic"
+    min_word_length: 3
+    max_edit_distance: 2
+    confidence_threshold: 0.6
+    
+  # Grammar correction
+  grammar_check:
+    enable_grammar_rules: true
+    fix_punctuation: true
+    fix_capitalization: true
+    fix_spacing: true
+    
+  # Context correction
+  context_correction:
+    window_size: 5
+    use_ngrams: true
+    ngram_size: 3
+    context_weight: 0.7
+    
+  # Domain-specific corrections
+  domain_corrections:
+    invoice:
+      common_terms: ["invoice", "total", "amount", "tax", "subtotal"]
+      date_formats: ["%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"]
+      number_patterns: ["currency", "percentage", "quantity"]
+    receipt:
+      common_terms: ["receipt", "purchase", "payment", "change", "tax"]
+      merchant_patterns: true
+      item_patterns: true
+    form:
+      field_detection: true
+      validation_patterns: true
+
+# Confidence Filter Configuration  
+confidence_filter:
+  # Base thresholds
+  base_threshold: 0.5
+  character_threshold: 0.3
+  word_threshold: 0.4
+  
+  # Quality levels
+  excellent_threshold: 0.95
+  good_threshold: 0.8
+  moderate_threshold: 0.6
+  poor_threshold: 0.4
+  
+  # Advanced filtering
+  enable_adaptive_thresholds: true
+  enable_outlier_detection: true
+  enable_consistency_check: true
+  enable_context_filtering: true
+  enable_length_weighting: true
+  
+  # Statistical parameters
+  outlier_z_threshold: 2.0
+  min_word_length: 2
+  max_variance_threshold: 0.3
+
+# Layout Analyzer Configuration
+layout_analyzer:
+  # Detection methods
+  enable_traditional_methods: true
+  enable_deep_learning: true
+  detection_method: "hybrid"  # traditional, deep_learning, hybrid
+  
+  # Traditional methods
+  traditional:
+    enable_connected_components: true
+    enable_contour_analysis: true
+    enable_morphological_ops: true
+    min_text_height: 8
+    max_text_height: 200
+    aspect_ratio_threshold: 0.1
+    
+  # Deep learning methods
+  deep_learning:
+    model_type: "layoutlm"  # layoutlm, detectron2, custom
+    model_path: "models/layout/layoutlm-base"
+    confidence_threshold: 0.7
+    nms_threshold: 0.5
+    
+  # Block classification
+  block_classification:
+    enable_font_analysis: true
+    enable_position_analysis: true
+    enable_content_analysis: true
+    title_font_size_ratio: 1.5
+    header_position_threshold: 0.2
+    
+  # Reading order detection
+  reading_order:
+    method: "spatial"  # spatial, ml_based, hybrid
+    column_detection: true
+    paragraph_grouping: true
+    table_handling: "separate"  # separate, inline, skip
+    
+  # Table detection
+  table_detection:
+    enable_table_detection: true
+    min_rows: 2
+    min_columns: 2
+    line_detection_threshold: 0.8
+    cell_detection_method: "lines"  # lines, whitespace, ml
+
+# Result Formatter Configuration
+result_formatter:
+  # Default settings
+  default_format: "json"
+  default_structure_level: "enhanced"
+  include_debug_info: false
+  pretty_formatting: true
+  
+  # Format-specific settings
+  json:
+    include_metadata: true
+    include_confidence: true
+    include_layout_info: true
+    compact_output: false
+    
+  xml:
+    include_schema: true
+    validate_output: true
+    pretty_print: true
+    encoding: "utf-8"
+    
+  html:
+    include_css: true
+    css_style: "modern"  # modern, classic, minimal
+    include_charts: false
+    responsive_design: true
+    
+  csv:
+    delimiter: ","
+    include_headers: true
+    escape_special_chars: true
+    encoding: "utf-8"
+    
+  pdf:
+    page_size: "letter"  # letter, a4, legal
+    font_family: "Arial"
+    font_size: 12
+    include_images: false
+    
+  markdown:
+    include_toc: false
+    code_syntax_highlighting: true
+    include_metadata_table: true
+
+# Domain-specific Processing
+domain_processing:
+  # Invoice processing
+  invoice:
+    extract_invoice_number: true
+    extract_vendor_info: true
+    extract_line_items: true
+    extract_totals: true
+    validate_calculations: true
+    date_format_detection: true
+    
+  # Receipt processing  
+  receipt:
+    extract_merchant: true
+    extract_items: true
+    extract_totals: true
+    extract_payment_method: true
+    extract_transaction_date: true
+    
+  # Form processing
+  form:
+    field_detection: true
+    checkbox_detection: true
+    signature_detection: false
+    completion_validation: true
+    
+  # Document processing
+  document:
+    structure_analysis: true
+    section_detection: true
+    heading_hierarchy: true
+    reference_extraction: false
+
+# Performance and Caching
+performance:
+  # Caching
+  enable_caching: true
+  cache_directory: "data/cache/postprocessing"
+  cache_expiry_hours: 24
+  max_cache_size_mb: 500
+  
+  # Memory management
+  max_memory_usage_mb: 2048
+  enable_memory_monitoring: true
+  gc_threshold: 1000
+  
+  # Parallel processing
+  enable_multiprocessing: false
+  max_processes: 4
+  chunk_size: 10
+
+# Logging and Debugging  
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/postprocessing.log"
+  max_log_size_mb: 100
+  backup_count: 5
+  
+  # Component-specific logging
+  text_corrector_level: "INFO"
+  confidence_filter_level: "INFO" 
+  layout_analyzer_level: "INFO"
+  result_formatter_level: "INFO"
+
+# Quality Assurance
+quality_assurance:
+  # Validation
+  enable_output_validation: true
+  validate_text_encoding: true
+  validate_structure: true
+  
+  # Quality metrics
+  calculate_quality_metrics: true
+  quality_report_path: "logs/quality_reports"
+  
+  # Error handling
+  retry_on_failure: true
+  max_retries: 3
+  fallback_to_basic: true
