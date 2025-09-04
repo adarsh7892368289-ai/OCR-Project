@@ -498,3 +498,12 @@ class OCREngineManager:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.cleanup_engines()
+# Alias for backward compatibility  
+EngineManager = OCREngineManager
+
+# Export main classes
+__all__ = [
+    'OCREngineManager',
+    'EngineManager',
+    'EnginePerformance'
+]

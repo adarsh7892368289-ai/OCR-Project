@@ -147,7 +147,7 @@ class SimpleOCR:
             final_result = {
                 "success": True,
                 "image_path": str(image_path),
-                "extracted_text": ocr_result.text,
+                "extracted_text": ocr_result.full_text,
                 "confidence": ocr_result.confidence,
                 "total_processing_time": total_time,
                 "processing_stages": {
@@ -170,7 +170,7 @@ class SimpleOCR:
                 "detailed_results": {
                     "regions": [
                         {
-                            "text": region.text,
+                            "text": region.full_text,
                             "confidence": region.confidence,
                             "bbox": {
                                 "x": region.bbox.x,

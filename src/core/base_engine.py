@@ -91,7 +91,7 @@ class TextRegion:
     @property
     def is_valid(self) -> bool:
         """Check if region contains valid text"""
-        return (len(self.text.strip()) > 0 and 
+        return (len(self.full_text.strip()) > 0 and 
                 self.confidence > 0.0 and 
                 self.bbox.area > 0)
 
@@ -290,7 +290,7 @@ class BaseOCREngine(ABC):
         weighted_confidence = 0
         
         for result in results:
-            text_length = len(result.text.strip())
+            text_length = len(result.full_text.strip())
             area = result.bbox.area
             weight = text_length * np.sqrt(area)  # Combined weight
             
@@ -305,14 +305,14 @@ class BaseOCREngine(ABC):
         if result.confidence < self.config.get('min_confidence', 0.1):
             return False
         
-        if len(result.text.strip()) == 0:
+        if len(result.full_text.strip()) == 0:
             return False
         
         if result.bbox.area <= 0:
             return False
         
         # Text quality checks
-        text = result.text.strip()
+        text = result.full_text.strip()
         
         # Check for reasonable character distribution
         if len(text) > 2:
@@ -426,3 +426,19 @@ class BaseOCREngine(ABC):
     
     def __repr__(self) -> str:
         return self.__str__()
+    
+# Alias for backward compatibility
+OCREngine = BaseOCREngine
+
+# Also export the main classes
+__all__ = [
+    'BaseOCREngine',
+    'OCREngine', 
+    'DocumentResult',
+    'OCRResult',
+    'TextRegion',
+    'BoundingBox',
+    'TextType',
+    'DetectionMethod',
+    'DocumentStructure'
+]

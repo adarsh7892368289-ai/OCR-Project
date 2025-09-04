@@ -35,9 +35,9 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 try:
-    from core.base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult, DocumentStructure, TextType
-    from utils.image_utils import ImageUtils
-    from utils.text_utils import TextUtils
+    from ..core.base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult, DocumentStructure, TextType
+    from ..utils.image_utils import ImageUtils
+    from ..utils.text_utils import TextUtils
 except ImportError as e:
     print(f"Import error in TrOCR engine: {e}")
     print("Please ensure the file structure is correct and all files are in place")
@@ -296,7 +296,7 @@ class TrOCREngine(BaseOCREngine):
             
             # Create comprehensive document result
             document_result = DocumentResult(
-                full_text=ocr_result.text,
+                full_text=ocr_result.full_text,
                 results=[ocr_result],
                 text_regions=ocr_result.text_regions,
                 document_structure=DocumentStructure(),  # Will be enhanced in later steps
@@ -305,7 +305,7 @@ class TrOCREngine(BaseOCREngine):
                 image_stats=image_stats,
                 confidence_score=ocr_result.confidence,
                 detected_languages=[kwargs.get('language', 'en')],
-                text_type=self._detect_text_type_from_content(ocr_result.text),
+                text_type=self._detect_text_type_from_content(ocr_result.full_text),
                 preprocessing_steps=['trocr_optimization', 'contrast_normalization', 'denoising'],
                 postprocessing_steps=['confidence_filtering', 'text_cleaning']
             )

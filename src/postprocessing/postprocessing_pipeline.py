@@ -187,7 +187,7 @@ class PostProcessingPipeline:
                     filter_result = self._apply_confidence_filtering(current_result)
                     # Create new OCR result with filtered regions
                     filtered_ocr_result = OCRResult(
-                        text=' '.join([r.text for r in filter_result.filtered_regions]),
+                        text=' '.join([r.full_text for r in filter_result.filtered_regions]),
                         confidence=filter_result.overall_confidence,
                         regions=filter_result.filtered_regions,
                         processing_time=current_result.processing_time,
@@ -326,7 +326,7 @@ class PostProcessingPipeline:
         
         stats = {
             'original_stats': {
-                'text_length': len(original_result.text) if original_result.text else 0,
+                'text_length': len(original_result.full_text) if original_result.full_text else 0,
                 'region_count': len(original_result.regions),
                 'average_confidence': original_result.confidence,
                 'processing_time': original_result.processing_time
@@ -349,7 +349,7 @@ class PostProcessingPipeline:
         if pipeline_result.corrected_result:
             stats['text_correction'] = {
                 'corrections_made': self._count_text_differences(
-                    original_result.text, pipeline_result.corrected_result.text
+                    original_result.full_text, pipeline_result.corrected_result.full_text
                 ),
                 'confidence_improvement': (
                     pipeline_result.corrected_result.confidence - original_result.confidence

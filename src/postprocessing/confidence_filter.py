@@ -214,7 +214,7 @@ class EnhancedConfidenceFilter:
             if should_keep:
                 # Update region with adjusted confidence
                 updated_region = TextRegion(
-                    text=region.text,
+                    text=region.full_text,
                     bbox=region.bbox,
                     confidence=analysis.adjusted_confidence,
                     text_type=region.text_type,
@@ -227,7 +227,7 @@ class EnhancedConfidenceFilter:
         
         # Create filtered result
         filtered_result = OCRResult(
-            text=' '.join(region.text for region in filtered_regions),
+            text=' '.join(region.full_text for region in filtered_regions),
             confidence=(
                 sum(region.confidence for region in filtered_regions) / len(filtered_regions)
                 if filtered_regions else 0.0
@@ -346,7 +346,7 @@ class EnhancedConfidenceFilter:
         
         # Length factor
         if self.enable_length_factor:
-            length_factor = self._calculate_length_factor(region.text)
+            length_factor = self._calculate_length_factor(region.full_text)
             factors['length'] = length_factor
             adjusted_confidence *= (1 + 0.1 * length_factor)
             
@@ -357,7 +357,7 @@ class EnhancedConfidenceFilter:
         
         # Dictionary factor
         if self.enable_dictionary_factor:
-            dict_factor = self._calculate_dictionary_factor(region.text)
+            dict_factor = self._calculate_dictionary_factor(region.full_text)
             factors['dictionary'] = dict_factor
             adjusted_confidence *= (1 + 0.15 * dict_factor)
             
@@ -379,7 +379,7 @@ class EnhancedConfidenceFilter:
         
         # Pattern factor
         if self.enable_pattern_factor:
-            pattern_factor = self._calculate_pattern_factor(region.text)
+            pattern_factor = self._calculate_pattern_factor(region.full_text)
             factors['pattern'] = pattern_factor
             adjusted_confidence *= (1 + 0.1 * pattern_factor)
             
@@ -405,7 +405,7 @@ class EnhancedConfidenceFilter:
         should_filter = (
             adjusted_confidence < self.base_confidence_threshold or
             quality_score < -0.5 or
-            len(region.text.strip()) < self.min_region_size
+            len(region.full_text.strip()) < self.min_region_size
         )
         
         return ConfidenceAnalysis(
@@ -484,8 +484,8 @@ class EnhancedConfidenceFilter:
         similarities = []
         for neighbor in neighbors:
             # Simple similarity based on character patterns
-            region_chars = set(region.text.lower())
-            neighbor_chars = set(neighbor.text.lower())
+            region_chars = set(region.full_text.lower())
+            neighbor_chars = set(neighbor.full_text.lower())
             
             if region_chars and neighbor_chars:
                 similarity = len(region_chars & neighbor_chars) / len(region_chars | neighbor_chars)
@@ -583,12 +583,12 @@ class EnhancedConfidenceFilter:
             return False
         
         # Minimum text length
-        if len(region.text.strip()) < self.min_region_size:
+        if len(region.full_text.strip()) < self.min_region_size:
             return False
         
         # Check noise ratio
-        noise_chars = sum(1 for c in region.text if not c.isalnum() and not c.isspace())
-        total_chars = len(region.text)
+        noise_chars = sum(1 for c in region.full_text if not c.isalnum() and not c.isspace())
+        total_chars = len(region.full_text)
         if total_chars > 0 and noise_chars / total_chars > self.max_noise_ratio:
             return False
         
@@ -703,3 +703,4 @@ class EnhancedConfidenceFilter:
         
         self.logger.info(f"Optimized threshold: {best_threshold:.3f} (F1: {best_f1_score:.3f})")
         return best_threshold
+AdvancedConfidenceFilter = EnhancedConfidenceFilter

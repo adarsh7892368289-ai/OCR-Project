@@ -80,8 +80,8 @@ class TextBlock:
     alignment: str = "left"  # left, center, right, justify
     
     def __post_init__(self):
-        if not self.text:
-            self.text = ' '.join(region.text for region in self.regions)
+        if not self.full_text:
+            self.full_text = ' '.join(region.full_text for region in self.regions)
         if self.confidence == 0.0:
             self.confidence = (
                 sum(region.confidence for region in self.regions) / len(self.regions)
@@ -103,7 +103,7 @@ class TableStructure:
         """Get text content of a specific cell"""
         if 0 <= row < len(self.cells) and 0 <= col < len(self.cells[row]):
             cell = self.cells[row][col]
-            return cell.text if cell else ""
+            return cell.full_text if cell else ""
         return ""
     
     def to_dict(self) -> Dict[str, Any]:
@@ -114,7 +114,7 @@ class TableStructure:
             'confidence': self.confidence,
             'has_header': self.has_header,
             'cell_data': [
-                [cell.text if cell else "" for cell in row]
+                [cell.full_text if cell else "" for cell in row]
                 for row in self.cells
             ]
         }
@@ -387,7 +387,7 @@ class EnhancedLayoutAnalyzer:
     
     def _determine_block_type(self, block: TextBlock) -> TextBlockType:
         """Determine the type of a text block"""
-        text = block.text.strip()
+        text = block.full_text.strip()
         
         if not text:
             return TextBlockType.UNKNOWN
@@ -450,7 +450,7 @@ class EnhancedLayoutAnalyzer:
         table_blocks = [
             block for block in text_blocks 
             if block.block_type == TextBlockType.TABLE_CELL or
-            (len(block.text.split()) < 10 and len(block.regions) == 1)
+            (len(block.full_text.split()) < 10 and len(block.regions) == 1)
         ]
         
         if len(table_blocks) < self.min_table_cells:
@@ -610,8 +610,8 @@ class EnhancedLayoutAnalyzer:
         second_row = cells[1]
         
         # Check if first row has different characteristics
-        first_row_texts = [cell.text if cell else "" for cell in first_row]
-        second_row_texts = [cell.text if cell else "" for cell in second_row]
+        first_row_texts = [cell.full_text if cell else "" for cell in first_row]
+        second_row_texts = [cell.full_text if cell else "" for cell in second_row]
         
         # Simple heuristics for header detection
         first_has_numbers = any(re.search(r'\d+', text) for text in first_row_texts)
@@ -733,7 +733,7 @@ class EnhancedLayoutAnalyzer:
         # Check for form-like structure
         form_indicators = sum(
             1 for block in text_blocks
-            if len(block.text.split()) < 5 and ':' in block.text
+            if len(block.full_text.split()) < 5 and ':' in block.full_text
         )
         
         if form_indicators > len(text_blocks) * 0.3:
@@ -845,7 +845,7 @@ class EnhancedLayoutAnalyzer:
         for block in analysis.text_blocks:
             css_class = f"text-block {block.block_type.value}"
             html_parts.append(f'<div class="{css_class}" data-column="{block.column_index}">')
-            html_parts.append(f'<p>{block.text}</p>')
+            html_parts.append(f'<p>{block.full_text}</p>')
             html_parts.append('</div>')
         
         for table in analysis.tables:
@@ -853,7 +853,7 @@ class EnhancedLayoutAnalyzer:
             for row in table.cells:
                 html_parts.append('<tr>')
                 for cell in row:
-                    cell_text = cell.text if cell else ""
+                    cell_text = cell.full_text if cell else ""
                     html_parts.append(f'<td>{cell_text}</td>')
                 html_parts.append('</tr>')
             html_parts.append('</table>')
@@ -870,7 +870,7 @@ class EnhancedLayoutAnalyzer:
         
         for i, block in enumerate(analysis.text_blocks):
             xml_parts.append(f'<text-block id="{i}" type="{block.block_type.value}" column="{block.column_index}">')
-            xml_parts.append(f'<text>{block.text}</text>')
+            xml_parts.append(f'<text>{block.full_text}</text>')
             xml_parts.append(f'<confidence>{block.confidence}</confidence>')
             xml_parts.append('</text-block>')
         
@@ -879,7 +879,7 @@ class EnhancedLayoutAnalyzer:
             for row_idx, row in enumerate(table.cells):
                 xml_parts.append(f'<row index="{row_idx}">')
                 for col_idx, cell in enumerate(row):
-                    cell_text = cell.text if cell else ""
+                    cell_text = cell.full_text if cell else ""
                     xml_parts.append(f'<cell index="{col_idx}">{cell_text}</cell>')
                 xml_parts.append('</row>')
             xml_parts.append('</table>')
@@ -888,3 +888,5 @@ class EnhancedLayoutAnalyzer:
         xml_parts.append('</document>')
         
         return '\n'.join(xml_parts)
+
+LayoutAnalyzer = EnhancedLayoutAnalyzer

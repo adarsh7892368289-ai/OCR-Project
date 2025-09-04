@@ -839,3 +839,6 @@ class EnhancedTextCorrector:
         except Exception as e:
             self.logger.error(f"Error exporting corrections: {e}")
             return False
+        
+# Add alias for backward compatibility
+TextCorrector = EnhancedTextCorrector

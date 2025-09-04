@@ -325,9 +325,9 @@ class OCRSystemSetup:
             
             result = engine.process_image(image)
             
-            if result and result.text.strip():
+            if result and result.full_text.strip():
                 print(f"✅ OCR successful! Extracted text:")
-                print(f"   '{result.text[:100]}...'")
+                print(f"   '{result.full_text[:100]}...'")
                 self.test_results['sample_ocr'] = True
                 return True
             else:
@@ -358,7 +358,7 @@ class OCRSystemSetup:
                 if result:
                     print("✅ Full pipeline test successful!")
                     print(f"   Confidence: {result.confidence:.2f}")
-                    print(f"   Text length: {len(result.text)} characters")
+                    print(f"   Text length: {len(result.full_text)} characters")
                     self.test_results['full_pipeline'] = True
                     return True
                     

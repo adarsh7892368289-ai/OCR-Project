@@ -470,15 +470,15 @@ async def enhanced_ocr(
             if results["success"] and results.get("combined_result"):
                 response_data = {
                     "success": True,
-                    "text": results["combined_result"].text,
+                    "text": results["combined_result"].full_text,
                     "confidence": results["combined_result"].confidence,
                     "processing_time": results["processing_time"],
                     "engines_used": results["engines_used"],
                     "preprocessing_info": results.get("preprocessing_results", {}),
                     "metadata": results["metadata"],
                     "warnings": results.get("warnings", []),
-                    "word_count": len(results["combined_result"].text.split()),
-                    "line_count": results["combined_result"].text.count('\n') + 1
+                    "word_count": len(results["combined_result"].full_text.split()),
+                    "line_count": results["combined_result"].full_text.count('\n') + 1
                 }
                 
                 if output_format == "detailed":
@@ -622,7 +622,7 @@ async def batch_ocr(
                     if result["success"] and result.get("combined_result"):
                         ocr_response = OCRResponse(
                             success=True,
-                            text=result["combined_result"].text,
+                            text=result["combined_result"].full_text,
                             confidence=result["combined_result"].confidence,
                             processing_time=result["processing_time"],
                             engines_used=result["engines_used"],
@@ -1085,7 +1085,7 @@ async def demo_page():
                             <h3>OCR Results</h3>
                             <div style="margin: 15px 0;">
                                 <strong>Extracted Text:</strong>
-                                <pre>${result.text}</pre>
+                                <pre>${result.full_text}</pre>
                             </div>
                             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0;">
                                 <div><strong>Confidence:</strong> ${(result.confidence * 100).toFixed(1)}%</div>
@@ -1148,7 +1148,7 @@ async def demo_page():
                                 <details style="margin: 10px 0; padding: 10px; border: 1px solid #ddd; border-radius: 5px;">
                                     <summary><strong>Image ${idx + 1}</strong> - ${res.success ? 'Success' : 'Failed'} (${(res.confidence * 100).toFixed(1)}%)</summary>
                                     <div style="margin-top: 10px;">
-                                        ${res.success ? `<pre>${res.text}</pre>` : `<p style="color: #f44336;">Processing failed</p>`}
+                                        ${res.success ? `<pre>${res.full_text}</pre>` : `<p style="color: #f44336;">Processing failed</p>`}
                                         <small>Processing time: ${res.processing_time.toFixed(2)}s</small>
                                     </div>
                                 </details>

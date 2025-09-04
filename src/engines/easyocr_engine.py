@@ -223,7 +223,7 @@ class EasyOCREngine(BaseOCREngine):
         for line in lines:
             # Sort words in line by X position
             line_sorted = sorted(line, key=lambda r: r.bbox[0])
-            line_text = " ".join(result.text for result in line_sorted)
+            line_text = " ".join(result.full_text for result in line_sorted)
             full_text_lines.append(line_text)
             
         return "\n".join(full_text_lines)

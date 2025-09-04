@@ -128,6 +128,14 @@ class EngineConfig:
     timeout: float = 30.0
     retry_count: int = 2
     fallback_engines: List[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """Base post-init method for all engine configs"""
+        pass
+    
+    def __post_init__(self):
+        """Base post-init method for all engine configs"""
+        pass
 
 @dataclass
 class TesseractConfig(EngineConfig):
@@ -306,7 +314,7 @@ class OCRConfig:
     engine_selection_strategy: EngineStrategy = EngineStrategy.ADAPTIVE
     enable_multi_engine: bool = False
     engine_consensus_threshold: float = 0.8
-    default_engine: str = "paddleocr"
+    default_engine: str = "tesseract"  # Changed from paddleocr to tesseract
     
     def __post_init__(self):
         if not self.engines:
@@ -585,3 +593,32 @@ class Config:
     
     def __repr__(self) -> str:
         return self.__str__()
+
+class ConfigManager:
+    """Simplified ConfigManager for backward compatibility"""
+    
+    def __init__(self, config_path: Optional[str] = None):
+        self.config = Config(config_path)
+    
+    def get_config(self) -> Dict[str, Any]:
+        """Get the complete configuration dictionary"""
+        return self.config.config_data
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get configuration value using dot notation"""
+        return self.config.get(key, default)
+    
+    def get_engine_config(self, engine_name: str) -> Dict[str, Any]:
+        """Get configuration for a specific engine"""
+        return self.config.get_engine_config(engine_name)
+    
+    def load_config(self, config_path: str):
+        """Load configuration from file"""
+        self.config.load_from_file(config_path)
+    
+    def validate_config(self) -> List[str]:
+        """Validate configuration and return issues"""
+        return self.config.validate_current_config()
+
+# Don't instantiate globally to avoid import issues during startup
+# # config_manager = ConfigManager()  # Disabled to avoid import issues

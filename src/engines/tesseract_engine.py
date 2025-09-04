@@ -8,12 +8,14 @@ from PIL import Image
 import os
 import subprocess
 
-# Fix Tesseract path detection
+
+pytesseract.pytesseract.tesseract_cmd = r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+
 def find_tesseract():
     """Find Tesseract installation automatically"""
     possible_paths = [
         r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+        r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
         r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
         r'C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'.format(os.getenv('USERNAME', '')),
         'tesseract',  # Linux/Mac default
@@ -34,7 +36,15 @@ def find_tesseract():
             continue
     return None
 
-from ..core.base_engine import BaseOCREngine, OCRResult, DocumentResult
+from ..core.base_engine import (
+    BaseOCREngine, 
+    OCRResult, 
+    DocumentResult, 
+    TextRegion,
+    BoundingBox,
+    DocumentStructure,
+    TextType
+)
 
 class TesseractEngine(BaseOCREngine):
     """Tesseract OCR Engine - Excellent for printed text"""
@@ -93,15 +103,20 @@ class TesseractEngine(BaseOCREngine):
             
     def get_supported_languages(self) -> List[str]:
         """Get supported languages"""
-        return self.supported_languages
+        return getattr(self, 'supported_languages', ["eng"])
         
-    def process_image(self, image: np.ndarray, **kwargs) -> DocumentResult:
+    def process_image(self, image, **kwargs) -> DocumentResult:
         """Process image with Tesseract OCR"""
         start_time = time.time()
         
         try:
-            # Enhanced preprocessing
-            processed_image = self._enhance_image(image)
+            # Handle different input types
+            if hasattr(image, 'shape'):  # numpy array
+                processed_image = self._enhance_image(image)
+            elif hasattr(image, 'mode'):  # PIL Image
+                processed_image = self._enhance_image(np.array(image))
+            else:
+                raise ValueError(f"Unsupported image type: {type(image)}")
             
             # Convert numpy array to PIL Image
             if len(processed_image.shape) == 3:
@@ -122,25 +137,36 @@ class TesseractEngine(BaseOCREngine):
             # Get full text
             full_text = self._extract_full_text(results)
             
+            # Create text regions from results
+            text_regions = self._create_text_regions(results)
+            
+            # Create document structure
+            document_structure = DocumentStructure()
+            
             # Calculate statistics
             processing_time = time.time() - start_time
             confidence_score = self.calculate_confidence(results)
-            image_stats = self._calculate_image_stats(image)
             
             return DocumentResult(
                 full_text=full_text,
                 results=results,
+                text_regions=text_regions,
+                document_structure=document_structure,
                 processing_time=processing_time,
                 engine_name=self.name,
-                image_stats=image_stats,
+                image_stats={},
                 confidence_score=confidence_score
             )
             
         except Exception as e:
             print(f"Tesseract processing error: {e}")
+            
+            # Return properly constructed empty result
             return DocumentResult(
                 full_text="",
                 results=[],
+                text_regions=[],
+                document_structure=DocumentStructure(),
                 processing_time=time.time() - start_time,
                 engine_name=self.name,
                 image_stats={},
@@ -175,24 +201,42 @@ class TesseractEngine(BaseOCREngine):
             conf = float(data['conf'][i])
             
             if text and conf > 0:  # Filter empty text and invalid confidence
-                bbox = (
-                    int(data['left'][i]),
-                    int(data['top'][i]),
-                    int(data['width'][i]),
-                    int(data['height'][i])
+                bbox = BoundingBox(
+                    x=int(data['left'][i]),
+                    y=int(data['top'][i]),
+                    width=int(data['width'][i]),
+                    height=int(data['height'][i]),
+                    confidence=conf / 100.0
                 )
                 
                 result = OCRResult(
                     text=text,
                     confidence=conf / 100.0,  # Convert to 0-1 range
                     bbox=bbox,
-                    word_level=True
+                    level="word"
                 )
                 
-                if self.validate_result(result):
+                # Simple validation - check if result has required attributes
+                if hasattr(result, 'text') and result.text.strip():
                     results.append(result)
                     
         return results
+    
+    def _create_text_regions(self, results: List[OCRResult]) -> List[TextRegion]:
+        """Create text regions from OCR results"""
+        text_regions = []
+        
+        for i, result in enumerate(results):
+            region = TextRegion(
+                bbox=result.bbox,
+                text=result.text,  # FIXED: Use .text instead of .full_text
+                confidence=result.confidence,
+                text_type=TextType.PRINTED,
+                reading_order=i
+            )
+            text_regions.append(region)
+            
+        return text_regions
         
     def _extract_full_text(self, results: List[OCRResult]) -> str:
         """Extract full text from OCR results"""
@@ -200,7 +244,7 @@ class TesseractEngine(BaseOCREngine):
             return ""
             
         # Sort results by position (top to bottom, left to right)
-        sorted_results = sorted(results, key=lambda r: (r.bbox[1], r.bbox[0]))
+        sorted_results = sorted(results, key=lambda r: (r.bbox.y, r.bbox.x))
         
         # Group results by lines based on Y position
         lines = []
@@ -209,7 +253,7 @@ class TesseractEngine(BaseOCREngine):
         line_threshold = 10  # pixels
         
         for result in sorted_results:
-            y_pos = result.bbox[1]
+            y_pos = result.bbox.y
             
             if current_y == -1 or abs(y_pos - current_y) <= line_threshold:
                 current_line.append(result)
@@ -227,18 +271,19 @@ class TesseractEngine(BaseOCREngine):
         full_text_lines = []
         for line in lines:
             # Sort words in line by X position
-            line_sorted = sorted(line, key=lambda r: r.bbox[0])
-            line_text = " ".join(result.text for result in line_sorted)
+            line_sorted = sorted(line, key=lambda r: r.bbox.x)
+            line_text = " ".join(result.text for result in line_sorted)  # FIXED: Use .text
             full_text_lines.append(line_text)
             
         return "\n".join(full_text_lines)
         
-    def _calculate_image_stats(self, image: np.ndarray) -> Dict[str, Any]:
-        """Calculate image statistics"""
-        return {
-            "width": image.shape[1],
-            "height": image.shape[0],
-            "channels": len(image.shape),
-            "mean_brightness": np.mean(image),
-            "std_brightness": np.std(image)
-        }
+    def calculate_confidence(self, results: List[OCRResult]) -> float:
+        """Calculate overall confidence score"""
+        if not results:
+            return 0.0
+        
+        confidences = [result.confidence for result in results if result.confidence > 0]
+        if not confidences:
+            return 0.0
+            
+        return sum(confidences) / len(confidences)
