@@ -1,23 +1,12 @@
-"""
-Post-processing Pipeline - Step 5 Integration
-Orchestrates all post-processing components
-
-File Location: src/postprocessing/postprocessing_pipeline.py
-
-Features:
-- Coordinates text correction, confidence filtering, layout analysis, and result formatting
-- Configurable pipeline stages
-- Performance monitoring
-- Error handling and fallback mechanisms
-"""
+# src/postprocessing/postprocessing_pipeline.py
 
 import time
 from typing import Dict, List, Optional, Any, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import logging
 
-from ..core.base_engine import OCRResult, DocumentResult
+from ..core.base_engine import OCRResult, DocumentResult, DocumentStructure, TextRegion
 from ..utils.config import ConfigManager
 from ..utils.logger import get_logger
 
@@ -25,7 +14,6 @@ from .text_corrector import TextCorrector
 from .confidence_filter import AdvancedConfidenceFilter
 from .layout_analyzer import LayoutAnalyzer
 from .result_formatter import EnhancedResultFormatter, OutputFormat, StructureLevel
-
 
 @dataclass
 class PipelineConfig:
@@ -52,18 +40,18 @@ class PipelineConfig:
 @dataclass
 class PipelineResult:
     """Result of post-processing pipeline"""
-    original_result: OCRResult
-    corrected_result: Optional[OCRResult] = None
-    filtered_result: Optional[OCRResult] = None
-    layout_analysis: Optional[Any] = None  # LayoutAnalysis type
-    formatted_results: Dict[str, Any] = None
+    # Changed from OCRResult to DocumentResult for consistency
+    original_document_result: DocumentResult 
+    corrected_results: List[OCRResult] = field(default_factory=list)
+    filtered_results: List[OCRResult] = field(default_factory=list)
+    layout_analysis: Optional[DocumentStructure] = None 
+    formatted_results: Dict[str, Any] = field(default_factory=dict)
     
-    processing_times: Dict[str, float] = None
-    pipeline_stats: Dict[str, Any] = None
+    processing_times: Dict[str, float] = field(default_factory=dict)
+    pipeline_stats: Dict[str, Any] = field(default_factory=dict)
     total_processing_time: float = 0.0
     success: bool = True
     error_message: Optional[str] = None
-
 
 class PostProcessingPipeline:
     """
@@ -71,9 +59,17 @@ class PostProcessingPipeline:
     """
     
     def __init__(self, config_path: Optional[str] = None):
-        self.config_manager = ConfigManager(config_path)
-        self.config = self._load_pipeline_config()
+        # Initialize logger FIRST
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        
+        # Store config path for use in _load_pipeline_config
+        self.config_path = config_path or "data/configs/postprocessing_config.yaml"
+        
+        # Initialize config manager
+        self.config_manager = ConfigManager(config_path)
+        
+        # Now load config (logger is available for error handling)
+        self.config = self._load_pipeline_config()
         
         # Initialize components
         self._init_components()
@@ -90,8 +86,33 @@ class PostProcessingPipeline:
     
     def _load_pipeline_config(self) -> PipelineConfig:
         """Load pipeline configuration"""
-        pipeline_config = self.config_manager.get_section('postprocessing_pipeline', {})
+        try:
+            # Load the config file first
+            if hasattr(self, 'config_path') and self.config_path:
+                self.config_manager.load_config(self.config_path)
+            
+            # Try to get the postprocessing_pipeline section using dot notation
+            pipeline_config = self.config_manager.get('postprocessing_pipeline', {})
+            
+            # If that doesn't work, try getting the full config and extracting the section
+            if not pipeline_config:
+                full_config = self.config_manager.get_config()
+                pipeline_config = full_config.get('postprocessing_pipeline', {})
+            
+            # If still empty, log warning and use empty dict (defaults will be used)
+            if not pipeline_config:
+                if hasattr(self, 'logger'):
+                    self.logger.warning("Could not find postprocessing_pipeline section in config, using defaults")
+                pipeline_config = {}
+            
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.error(f"Error loading pipeline config: {e}")
+            else:
+                print(f"Error loading pipeline config: {e}")
+            pipeline_config = {}
         
+        # Create and return PipelineConfig object with loaded values or defaults
         return PipelineConfig(
             enable_text_correction=pipeline_config.get('enable_text_correction', True),
             enable_confidence_filtering=pipeline_config.get('enable_confidence_filtering', True),
@@ -107,7 +128,7 @@ class PostProcessingPipeline:
             max_workers=pipeline_config.get('max_workers', 4),
             timeout_seconds=pipeline_config.get('timeout_seconds', 300)
         )
-    
+        
     def _init_components(self):
         """Initialize post-processing components"""
         try:
@@ -137,25 +158,25 @@ class PostProcessingPipeline:
     
     def process(
         self,
-        ocr_result: OCRResult,
+        document_result: DocumentResult,
         domain: Optional[str] = None,
         output_formats: Optional[List[str]] = None,
         custom_config: Optional[Dict[str, Any]] = None
     ) -> PipelineResult:
         """
-        Process OCR result through complete post-processing pipeline
+        Process OCR result through a complete post-processing pipeline.
         
         Args:
-            ocr_result: Original OCR result
+            document_result: The complete DocumentResult object from the engine manager.
             domain: Document domain (invoice, receipt, etc.)
             output_formats: Desired output formats
             custom_config: Custom configuration overrides
             
         Returns:
-            PipelineResult with all processing stages
+            PipelineResult with all processing stages applied.
         """
         start_time = time.time()
-        pipeline_result = PipelineResult(original_result=ocr_result)
+        pipeline_result = PipelineResult(original_document_result=document_result)
         processing_times = {}
         
         try:
@@ -165,71 +186,53 @@ class PostProcessingPipeline:
             if custom_config:
                 self._apply_custom_config(custom_config)
             
-            current_result = ocr_result
+            current_results = document_result.results
             
             # Stage 1: Text Correction
-            if self.config.enable_text_correction:
+            corrected_results = current_results
+            if self.config.enable_text_correction and hasattr(self, 'text_corrector'):
                 stage_start = time.time()
-                try:
-                    corrected_result = self._apply_text_correction(current_result, domain)
-                    pipeline_result.corrected_result = corrected_result
-                    current_result = corrected_result
-                    processing_times['text_correction'] = time.time() - stage_start
-                    self.logger.info(f"Text correction completed in {processing_times['text_correction']:.3f}s")
-                except Exception as e:
-                    self.logger.error(f"Text correction failed: {e}")
-                    processing_times['text_correction'] = time.time() - stage_start
+                corrected_results = [
+                    self._apply_text_correction(ocr_r) for ocr_r in current_results
+                ]
+                pipeline_result.corrected_results = corrected_results
+                processing_times['text_correction'] = time.time() - stage_start
+                self.logger.info(f"Text correction completed in {processing_times['text_correction']:.3f}s")
             
             # Stage 2: Confidence Filtering
-            if self.config.enable_confidence_filtering:
+            filtered_results = corrected_results
+            if self.config.enable_confidence_filtering and hasattr(self, 'confidence_filter'):
                 stage_start = time.time()
-                try:
-                    filter_result = self._apply_confidence_filtering(current_result)
-                    # Create new OCR result with filtered regions
-                    filtered_ocr_result = OCRResult(
-                        text=' '.join([r.full_text for r in filter_result.filtered_regions]),
-                        confidence=filter_result.overall_confidence,
-                        regions=filter_result.filtered_regions,
-                        processing_time=current_result.processing_time,
-                        engine_name=current_result.engine_name,
-                        metadata={**current_result.metadata, 'confidence_filtered': True}
-                    )
-                    pipeline_result.filtered_result = filtered_ocr_result
-                    current_result = filtered_ocr_result
-                    processing_times['confidence_filtering'] = time.time() - stage_start
-                    self.logger.info(f"Confidence filtering completed in {processing_times['confidence_filtering']:.3f}s")
-                except Exception as e:
-                    self.logger.error(f"Confidence filtering failed: {e}")
-                    processing_times['confidence_filtering'] = time.time() - stage_start
+                # We need to filter based on the document_result's overall confidence
+                overall_confidence = document_result.confidence_score
+                filtered_results = self._apply_confidence_filtering(corrected_results, overall_confidence)
+                pipeline_result.filtered_results = filtered_results
+                processing_times['confidence_filtering'] = time.time() - stage_start
+                self.logger.info(f"Confidence filtering completed in {processing_times['confidence_filtering']:.3f}s")
             
             # Stage 3: Layout Analysis
-            if self.config.enable_layout_analysis:
+            layout_analysis = document_result.document_structure
+            if self.config.enable_layout_analysis and hasattr(self, 'layout_analyzer'):
                 stage_start = time.time()
-                try:
-                    layout_analysis = self._apply_layout_analysis(current_result, domain)
-                    pipeline_result.layout_analysis = layout_analysis
-                    processing_times['layout_analysis'] = time.time() - stage_start
-                    self.logger.info(f"Layout analysis completed in {processing_times['layout_analysis']:.3f}s")
-                except Exception as e:
-                    self.logger.error(f"Layout analysis failed: {e}")
-                    processing_times['layout_analysis'] = time.time() - stage_start
+                # Pass the filtered results to the layout analyzer
+                layout_analysis = self._apply_layout_analysis(filtered_results, domain)
+                pipeline_result.layout_analysis = layout_analysis
+                processing_times['layout_analysis'] = time.time() - stage_start
+                self.logger.info(f"Layout analysis completed in {processing_times['layout_analysis']:.3f}s")
             
             # Stage 4: Result Formatting
-            if self.config.enable_result_formatting:
+            formatted_results = {}
+            if self.config.enable_result_formatting and hasattr(self, 'result_formatter'):
                 stage_start = time.time()
-                try:
-                    formatted_results = self._apply_result_formatting(
-                        current_result, 
-                        pipeline_result.layout_analysis, 
-                        domain, 
-                        output_formats
-                    )
-                    pipeline_result.formatted_results = formatted_results
-                    processing_times['result_formatting'] = time.time() - stage_start
-                    self.logger.info(f"Result formatting completed in {processing_times['result_formatting']:.3f}s")
-                except Exception as e:
-                    self.logger.error(f"Result formatting failed: {e}")
-                    processing_times['result_formatting'] = time.time() - stage_start
+                formatted_results = self._apply_result_formatting(
+                    filtered_results, 
+                    layout_analysis, 
+                    domain, 
+                    output_formats
+                )
+                pipeline_result.formatted_results = formatted_results
+                processing_times['result_formatting'] = time.time() - stage_start
+                self.logger.info(f"Result formatting completed in {processing_times['result_formatting']:.3f}s")
             
             # Calculate total processing time
             total_time = time.time() - start_time
@@ -238,14 +241,14 @@ class PostProcessingPipeline:
             
             # Generate pipeline statistics
             pipeline_result.pipeline_stats = self._generate_pipeline_stats(
-                ocr_result, pipeline_result, processing_times
+                document_result, pipeline_result, processing_times
             )
             
             # Update global statistics
             self._update_statistics(pipeline_result, total_time)
             
             self.logger.info(f"Post-processing pipeline completed successfully in {total_time:.3f}s")
-            
+        
         except Exception as e:
             pipeline_result.success = False
             pipeline_result.error_message = str(e)
@@ -254,71 +257,91 @@ class PostProcessingPipeline:
             self.processing_stats['failed_processing'] += 1
         
         return pipeline_result
+
+    def _apply_text_correction(self, ocr_result: OCRResult) -> OCRResult:
+        """Apply text correction to a single OCRResult - handles unified object structure."""
+        try:
+            # Check if the object has a 'full_text' attribute (your DocumentResult fix)
+            text_to_correct = getattr(ocr_result, 'full_text', getattr(ocr_result, 'text', ''))
+            
+            if not text_to_correct.strip():
+                self.logger.warning("No text content found in OCR result")
+                return ocr_result
+            
+            corrected_text = self.text_corrector.correct(text_to_correct, self.config.correction_method)
+            
+            # Create a new OCRResult with the corrected text, preserving other attributes
+            if corrected_text != text_to_correct:
+                return OCRResult(
+                    full_text=corrected_text,
+                    confidence=ocr_result.confidence, # Confidence could be recalculated here
+                    bbox=ocr_result.bbox,
+                    text_regions=ocr_result.text_regions,
+                    level=ocr_result.level,
+                    language=ocr_result.language,
+                    text_type=ocr_result.text_type,
+                    rotation_angle=ocr_result.rotation_angle,
+                    processing_metadata=ocr_result.processing_metadata
+                )
+            return ocr_result
+        except Exception as e:
+            self.logger.error(f"Text correction failed for single result: {e}")
+            return ocr_result
+
+    def _apply_confidence_filtering(self, ocr_results: List[OCRResult], overall_confidence: float) -> List[OCRResult]:
+        """Apply confidence filtering to a list of OCR results."""
+        filtered_results = []
+        for ocr_result in ocr_results:
+            # Check individual OCRResult confidence
+            if ocr_result.confidence >= self.config.confidence_threshold:
+                filtered_results.append(ocr_result)
+        return filtered_results
     
-    def _apply_text_correction(self, ocr_result: OCRResult, domain: Optional[str]) -> OCRResult:
-        """Apply text correction"""
-        if self.config.correction_method == "auto":
-            return self.text_corrector.correct_text(ocr_result, method="auto", domain=domain)
-        else:
-            return self.text_corrector.correct_text(ocr_result, method=self.config.correction_method, domain=domain)
-    
-    def _apply_confidence_filtering(self, ocr_result: OCRResult):
-        """Apply confidence filtering"""
-        return self.confidence_filter.filter_by_confidence(
-            ocr_result,
-            min_confidence=self.config.confidence_threshold,
-            adaptive=self.config.adaptive_confidence
-        )
-    
-    def _apply_layout_analysis(self, ocr_result: OCRResult, domain: Optional[str]):
-        """Apply layout analysis"""
-        return self.layout_analyzer.analyze_layout(
-            ocr_result,
-            method=self.config.layout_detection_method,
-            domain=domain
-        )
-    
-    def _apply_result_formatting(
-        self, 
-        ocr_result: OCRResult, 
-        layout_analysis, 
-        domain: Optional[str],
-        output_formats: Optional[List[str]]
-    ) -> Dict[str, Any]:
-        """Apply result formatting"""
+    def _apply_layout_analysis(self, ocr_results: List[OCRResult], domain: Optional[str]):
+        """Apply layout analysis to a list of OCR results."""
+        try:
+            if not ocr_results:
+                return DocumentStructure() # Return an empty structure
+
+            # The layout analyzer needs the original full image to work correctly
+            # It's better to refactor the LayoutAnalyzer to accept a list of OCRResults directly
+            # For now, let's pass the list of OCRResults to it
+            return self.layout_analyzer.analyze_layout(ocr_results, domain)
+        except Exception as e:
+            self.logger.error(f"Layout analysis failed: {e}")
+            return DocumentStructure()
+            
+    def _apply_result_formatting(self, ocr_results: List[OCRResult], layout_analysis: Optional[DocumentStructure], domain: Optional[str], output_formats: Optional[List[str]]) -> Dict[str, Any]:
+        """Apply result formatting to a list of OCR results."""
+        formats_to_generate = output_formats or [self.config.default_output_format]
         formatted_results = {}
         
-        formats_to_generate = output_formats or [self.config.default_output_format]
-        structure_level = StructureLevel(self.config.structure_level)
+        # Aggregate text from all results for formatting
+        full_text = " ".join([r.full_text for r in ocr_results if r.full_text])
         
         for format_name in formats_to_generate:
             try:
-                output_format = OutputFormat(format_name)
-                result = self.result_formatter.format_result(
-                    ocr_result=ocr_result,
+                # The formatter needs to handle a list of regions and a DocumentStructure
+                formatted_content = self.result_formatter.format_result(
+                    ocr_results=ocr_results,
                     layout_analysis=layout_analysis,
-                    domain=domain,
-                    output_format=output_format,
-                    structure_level=structure_level
+                    output_format=format_name,
+                    structure_level=self.config.structure_level
                 )
-                formatted_results[format_name] = result
-            except ValueError:
-                self.logger.warning(f"Unknown output format: {format_name}")
+                formatted_results[format_name] = formatted_content
             except Exception as e:
                 self.logger.error(f"Error formatting as {format_name}: {e}")
-        
+                formatted_results[format_name] = {
+                    'content': full_text,
+                    'format': format_name,
+                    'error': str(e),
+                    'confidence': 0.0 # Fallback confidence
+                }
         return formatted_results
-    
-    def _apply_custom_config(self, custom_config: Dict[str, Any]):
-        """Apply custom configuration overrides"""
-        for key, value in custom_config.items():
-            if hasattr(self.config, key):
-                setattr(self.config, key, value)
-                self.logger.debug(f"Applied custom config: {key} = {value}")
-    
+
     def _generate_pipeline_stats(
         self, 
-        original_result: OCRResult, 
+        original_result: DocumentResult, 
         pipeline_result: PipelineResult,
         processing_times: Dict[str, float]
     ) -> Dict[str, Any]:
@@ -327,8 +350,8 @@ class PostProcessingPipeline:
         stats = {
             'original_stats': {
                 'text_length': len(original_result.full_text) if original_result.full_text else 0,
-                'region_count': len(original_result.regions),
-                'average_confidence': original_result.confidence,
+                'region_count': len(original_result.results),
+                'average_confidence': original_result.confidence_score,
                 'processing_time': original_result.processing_time
             },
             'pipeline_performance': {
@@ -346,26 +369,26 @@ class PostProcessingPipeline:
         }
         
         # Add stage-specific stats
-        if pipeline_result.corrected_result:
+        if pipeline_result.corrected_results:
+            original_full_text = " ".join([r.full_text for r in original_result.results])
+            corrected_full_text = " ".join([r.full_text for r in pipeline_result.corrected_results])
             stats['text_correction'] = {
-                'corrections_made': self._count_text_differences(
-                    original_result.full_text, pipeline_result.corrected_result.full_text
-                ),
+                'corrections_made': self._count_text_differences(original_full_text, corrected_full_text),
                 'confidence_improvement': (
-                    pipeline_result.corrected_result.confidence - original_result.confidence
-                )
+                    sum(r.confidence for r in pipeline_result.corrected_results) / len(pipeline_result.corrected_results) - original_result.confidence_score
+                ) if pipeline_result.corrected_results else 0
             }
         
-        if pipeline_result.filtered_result:
+        if pipeline_result.filtered_results:
             stats['confidence_filtering'] = {
-                'regions_kept': len(pipeline_result.filtered_result.regions),
-                'regions_rejected': len(original_result.regions) - len(pipeline_result.filtered_result.regions),
-                'acceptance_rate': len(pipeline_result.filtered_result.regions) / len(original_result.regions) if original_result.regions else 0
+                'regions_kept': len(pipeline_result.filtered_results),
+                'regions_rejected': len(original_result.results) - len(pipeline_result.filtered_results),
+                'acceptance_rate': len(pipeline_result.filtered_results) / len(original_result.results) if original_result.results else 0
             }
         
         if pipeline_result.layout_analysis:
             stats['layout_analysis'] = {
-                'blocks_detected': len(pipeline_result.layout_analysis.blocks) if hasattr(pipeline_result.layout_analysis, 'blocks') else 0,
+                'blocks_detected': len(pipeline_result.layout_analysis.paragraphs) if hasattr(pipeline_result.layout_analysis, 'paragraphs') else 0,
                 'document_type': getattr(pipeline_result.layout_analysis, 'document_type', 'unknown'),
                 'reading_order_length': len(getattr(pipeline_result.layout_analysis, 'reading_order', []))
             }
@@ -375,13 +398,13 @@ class PostProcessingPipeline:
                 'formats_generated': len(pipeline_result.formatted_results),
                 'formats': list(pipeline_result.formatted_results.keys()),
                 'total_output_size': sum(
-                    len(str(result.content)) if hasattr(result, 'content') else 0 
+                    len(str(result['content'])) if isinstance(result, dict) and 'content' in result else 0
                     for result in pipeline_result.formatted_results.values()
                 )
             }
         
         return stats
-    
+        
     def _count_text_differences(self, original: str, corrected: str) -> int:
         """Count approximate differences between original and corrected text"""
         if not original or not corrected:

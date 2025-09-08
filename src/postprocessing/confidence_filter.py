@@ -214,7 +214,7 @@ class EnhancedConfidenceFilter:
             if should_keep:
                 # Update region with adjusted confidence
                 updated_region = TextRegion(
-                    text=region.full_text,
+                    text=getattr(region, 'text', getattr(region, 'full_text', str(region))),
                     bbox=region.bbox,
                     confidence=analysis.adjusted_confidence,
                     text_type=region.text_type,

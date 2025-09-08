@@ -86,14 +86,25 @@ class AdaptivePreprocessor:
         Args:
             config_path: Path to configuration file
         """
-        # Load configuration
+        # Load configuration - FIXED VERSION
         self.config_manager = ConfigManager()
+        
         if config_path:
-            self.config = self.config_manager.load_config(config_path)
+            try:
+                self.config_manager.load_config(config_path)
+                self.config = self.config_manager.get_config()  # ✅ GET the loaded config
+            except Exception as e:
+                logger.warning(f"Failed to load config from {config_path}: {e}")
+                self.config = self._get_default_config()
         else:
             self.config = self._get_default_config()
         
-        # Initialize components
+        # Ensure config is not None
+        if self.config is None:
+            logger.warning("Config is None, using default config")
+            self.config = self._get_default_config()
+        
+        # Initialize components - now self.config is guaranteed to be a dict
         self.quality_analyzer = IntelligentQualityAnalyzer(
             self.config.get("quality_analyzer", {})
         )
@@ -104,7 +115,7 @@ class AdaptivePreprocessor:
             self.config.get("skew_corrector", {})
         )
         
-        # Processing pipelines
+        # Rest of initialization...
         self.pipelines = self._initialize_pipelines()
         self.custom_pipelines = {}
         

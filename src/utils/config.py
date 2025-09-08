@@ -128,20 +128,11 @@ class EngineConfig:
     timeout: float = 30.0
     retry_count: int = 2
     fallback_engines: List[str] = field(default_factory=list)
-    
-    def __post_init__(self):
-        """Base post-init method for all engine configs"""
-        pass
-    
-    def __post_init__(self):
-        """Base post-init method for all engine configs"""
-        pass
 
 @dataclass
 class TesseractConfig(EngineConfig):
     """Tesseract-specific configuration"""
     def __post_init__(self):
-        super().__post_init__()
         default_config = {
             "psm": 6,
             "oem": 3,
@@ -157,7 +148,6 @@ class TesseractConfig(EngineConfig):
 class EasyOCRConfig(EngineConfig):
     """EasyOCR-specific configuration"""
     def __post_init__(self):
-        super().__post_init__()
         default_config = {
             "languages": ["en"],
             "gpu": True,
@@ -186,7 +176,6 @@ class EasyOCRConfig(EngineConfig):
 class PaddleOCRConfig(EngineConfig):
     """PaddleOCR-specific configuration"""
     def __post_init__(self):
-        super().__post_init__()
         default_config = {
             "ocr_version": "PP-OCRv4",
             "lang": "en",
@@ -216,7 +205,6 @@ class PaddleOCRConfig(EngineConfig):
 class TrOCRConfig(EngineConfig):
     """TrOCR-specific configuration"""
     def __post_init__(self):
-        super().__post_init__()
         default_config = {
             "model_name": "microsoft/trocr-base-printed",
             "processor_name": None,  # Use same as model_name if None
@@ -314,7 +302,7 @@ class OCRConfig:
     engine_selection_strategy: EngineStrategy = EngineStrategy.ADAPTIVE
     enable_multi_engine: bool = False
     engine_consensus_threshold: float = 0.8
-    default_engine: str = "tesseract"  # Changed from paddleocr to tesseract
+    default_engine: str = "tesseract"
     
     def __post_init__(self):
         if not self.engines:
@@ -329,83 +317,122 @@ class Config:
     """Enhanced Configuration manager for OCR system"""
     
     def __init__(self, config_path: Optional[str] = None):
-        self.config_data = {}
+        self.config_data: Dict[str, Any] = {}
         self.config_file_path = config_path
         self.default_config = OCRConfig()
         
         # Environment variable overrides
         self._env_prefix = "OCR_"
         
-        if config_path:
-            self.load_from_file(config_path)
-        else:
-            # Load default configuration
+        try:
+            if config_path and Path(config_path).exists():
+                self.load_from_file(config_path)
+            else:
+                # Load default configuration
+                self._load_defaults()
+        except Exception as e:
+            # Fallback to defaults if config loading fails
+            print(f"Warning: Failed to load config from {config_path}: {e}")
             self._load_defaults()
             
         # Apply environment variable overrides
-        self._apply_env_overrides()
+        try:
+            self._apply_env_overrides()
+        except Exception as e:
+            print(f"Warning: Failed to apply environment overrides: {e}")
     
     def _load_defaults(self):
         """Load default configuration"""
-        self.config_data = asdict(self.default_config)
+        try:
+            self.config_data = asdict(self.default_config)
+        except Exception as e:
+            # Ultra-safe fallback
+            self.config_data = {
+                "engines": {
+                    "tesseract": {"enabled": True, "priority": 1, "config": {}, "timeout": 30.0, "retry_count": 2, "fallback_engines": []},
+                    "easyocr": {"enabled": True, "priority": 2, "config": {}, "timeout": 30.0, "retry_count": 2, "fallback_engines": []},
+                    "paddleocr": {"enabled": True, "priority": 3, "config": {}, "timeout": 30.0, "retry_count": 2, "fallback_engines": []},
+                    "trocr": {"enabled": True, "priority": 4, "config": {}, "timeout": 30.0, "retry_count": 2, "fallback_engines": []}
+                },
+                "system": {"log_level": "INFO", "parallel_processing": True, "max_workers": 4},
+                "preprocessing": {"enhancement_level": "medium"},
+                "postprocessing": {"min_confidence": 0.3},
+                "detection": {"method": "deep_learning", "model_name": "craft"},
+                "output": {"preserve_formatting": True},
+                "engine_selection_strategy": "adaptive",
+                "default_engine": "tesseract"
+            }
     
     def load_from_file(self, config_path: str):
         """Load configuration from file with enhanced error handling"""
-        config_path = Path(config_path)
+        # FIXED: Convert string to Path object properly
+        config_path_obj = Path(config_path)
         
-        if not config_path.exists():
+        if not config_path_obj.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
         
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                if config_path.suffix.lower() in ['.yaml', '.yml']:
-                    loaded_config = yaml.safe_load(f) or {}
-                elif config_path.suffix.lower() == '.json':
+            with open(config_path_obj, 'r', encoding='utf-8') as f:
+                # FIXED: Use config_path_obj.suffix instead of config_path.suffix
+                if config_path_obj.suffix.lower() in ['.yaml', '.yml']:
+                    try:
+                        import yaml
+                        loaded_config = yaml.safe_load(f) or {}
+                    except ImportError:
+                        raise RuntimeError("PyYAML not installed but YAML config file provided")
+                elif config_path_obj.suffix.lower() == '.json':
                     loaded_config = json.load(f)
                 else:
-                    raise ValueError(f"Unsupported configuration file format: {config_path.suffix}")
+                    raise ValueError(f"Unsupported configuration file format: {config_path_obj.suffix}")
             
             # Validate configuration structure
-            self._validate_config(loaded_config)
+            if loaded_config:
+                self._validate_config(loaded_config)
+                
+                # Merge with defaults
+                default_dict = asdict(self.default_config)
+                self.config_data = self._deep_merge(default_dict, loaded_config)
+            else:
+                self._load_defaults()
             
-            # Merge with defaults
-            default_dict = asdict(self.default_config)
-            self.config_data = self._deep_merge(default_dict, loaded_config)
-            
-            self.config_file_path = str(config_path)
+            # FIXED: Store the original string path, not Path object
+            self.config_file_path = config_path
             
         except Exception as e:
             raise RuntimeError(f"Error loading configuration from {config_path}: {e}")
     
     def _validate_config(self, config: Dict[str, Any]):
         """Validate configuration structure and values"""
-        # Basic structure validation
         if not isinstance(config, dict):
             raise ValueError("Configuration must be a dictionary")
         
         # Validate engine selection strategy
         if "engine_selection_strategy" in config:
             strategy = config["engine_selection_strategy"]
-            if strategy not in [s.value for s in EngineStrategy]:
-                raise ValueError(f"Invalid engine selection strategy: {strategy}")
+            valid_strategies = [s.value for s in EngineStrategy]
+            if strategy not in valid_strategies:
+                print(f"Warning: Invalid engine selection strategy '{strategy}', using 'adaptive'")
+                config["engine_selection_strategy"] = "adaptive"
         
         # Validate processing levels
-        if "preprocessing" in config and "enhancement_level" in config["preprocessing"]:
-            level = config["preprocessing"]["enhancement_level"]
-            if level not in [l.value for l in ProcessingLevel]:
-                raise ValueError(f"Invalid preprocessing level: {level}")
-        
-        # Add more validation as needed
+        if "preprocessing" in config and isinstance(config["preprocessing"], dict):
+            if "enhancement_level" in config["preprocessing"]:
+                level = config["preprocessing"]["enhancement_level"]
+                valid_levels = [l.value for l in ProcessingLevel]
+                if level not in valid_levels:
+                    print(f"Warning: Invalid preprocessing level '{level}', using 'medium'")
+                    config["preprocessing"]["enhancement_level"] = "medium"
     
     def _apply_env_overrides(self):
         """Apply environment variable overrides"""
         for key, value in os.environ.items():
             if key.startswith(self._env_prefix):
-                config_key = key[len(self._env_prefix):].lower().replace('_', '.')
-                
-                # Convert string values to appropriate types
-                converted_value = self._convert_env_value(value)
-                self.set(config_key, converted_value)
+                try:
+                    config_key = key[len(self._env_prefix):].lower().replace('_', '.')
+                    converted_value = self._convert_env_value(value)
+                    self.set(config_key, converted_value)
+                except Exception as e:
+                    print(f"Warning: Failed to apply env override {key}: {e}")
     
     def _convert_env_value(self, value: str) -> Any:
         """Convert environment variable string to appropriate type"""
@@ -443,7 +470,6 @@ class Config:
                 if isinstance(result[key], dict) and isinstance(value, dict):
                     result[key] = self._deep_merge(result[key], value)
                 elif isinstance(result[key], list) and isinstance(value, list):
-                    # For lists, replace completely or merge based on context
                     result[key] = value
                 else:
                     result[key] = value
@@ -453,143 +479,196 @@ class Config:
         return result
     
     def get(self, key: str, default: Any = None) -> Any:
-        """Get configuration value using dot notation with type safety"""
-        keys = key.split('.')
-        value = self.config_data
-        
+        """Get configuration value using dot notation with bulletproof error handling"""
+        if not key:
+            return default
+            
         try:
+            keys = key.split('.')
+            value = self.config_data
+            
             for k in keys:
                 if isinstance(value, dict) and k in value:
                     value = value[k]
                 else:
                     return default
-            return value
-        except (KeyError, TypeError):
+                    
+            return value if value is not None else default
+            
+        except (KeyError, TypeError, AttributeError, ValueError):
             return default
     
     def set(self, key: str, value: Any):
         """Set configuration value using dot notation"""
-        keys = key.split('.')
-        config = self.config_data
-        
-        # Navigate to the parent dictionary
-        for k in keys[:-1]:
-            if k not in config:
-                config[k] = {}
-            elif not isinstance(config[k], dict):
-                config[k] = {}
-            config = config[k]
-        
-        config[keys[-1]] = value
+        if not key:
+            return
+            
+        try:
+            keys = key.split('.')
+            config = self.config_data
+            
+            # Navigate to the parent dictionary
+            for k in keys[:-1]:
+                if k not in config:
+                    config[k] = {}
+                elif not isinstance(config[k], dict):
+                    config[k] = {}
+                config = config[k]
+            
+            config[keys[-1]] = value
+        except Exception as e:
+            print(f"Warning: Failed to set config {key}={value}: {e}")
     
     def get_engine_config(self, engine_name: str) -> Dict[str, Any]:
-        """Get configuration for a specific engine"""
-        engine_config = self.get(f"engines.{engine_name}", {})
-        
-        # Merge with engine-specific defaults
-        if engine_name == "tesseract":
-            default = asdict(TesseractConfig())
-        elif engine_name == "easyocr":
-            default = asdict(EasyOCRConfig())
-        elif engine_name == "paddleocr":
-            default = asdict(PaddleOCRConfig())
-        elif engine_name == "trocr":
-            default = asdict(TrOCRConfig())
-        else:
-            default = asdict(EngineConfig())
-        
-        return self._deep_merge(default, engine_config)
+        """Get configuration for a specific engine with safe fallbacks"""
+        try:
+            engine_config = self.get(f"engines.{engine_name}", {})
+            
+            # Provide safe defaults for any engine
+            default_engine_config = {
+                "enabled": True,
+                "priority": 1,
+                "config": {},
+                "timeout": 30.0,
+                "retry_count": 2,
+                "fallback_engines": []
+            }
+            
+            # Merge with engine-specific defaults
+            if engine_name == "tesseract":
+                try:
+                    specific_default = asdict(TesseractConfig())
+                except:
+                    specific_default = default_engine_config.copy()
+                    specific_default["config"] = {"psm": 6, "oem": 3, "lang": "eng"}
+            elif engine_name == "easyocr":
+                try:
+                    specific_default = asdict(EasyOCRConfig())
+                except:
+                    specific_default = default_engine_config.copy()
+                    specific_default["config"] = {"languages": ["en"], "gpu": True}
+            elif engine_name == "paddleocr":
+                try:
+                    specific_default = asdict(PaddleOCRConfig())
+                except:
+                    specific_default = default_engine_config.copy()
+                    specific_default["config"] = {"lang": "en", "use_gpu": True}
+            elif engine_name == "trocr":
+                try:
+                    specific_default = asdict(TrOCRConfig())
+                except:
+                    specific_default = default_engine_config.copy()
+                    specific_default["config"] = {"model_name": "microsoft/trocr-base-printed"}
+            else:
+                specific_default = default_engine_config
+            
+            return self._deep_merge(specific_default, engine_config)
+            
+        except Exception as e:
+            print(f"Warning: Failed to get engine config for {engine_name}: {e}")
+            return {
+                "enabled": True,
+                "priority": 1,
+                "config": {},
+                "timeout": 30.0,
+                "retry_count": 2,
+                "fallback_engines": []
+            }
     
     def save_to_file(self, config_path: Optional[str] = None):
         """Save current configuration to file"""
-        if config_path is None:
-            if self.config_file_path is None:
-                raise ValueError("No config file path specified")
-            config_path = self.config_file_path
-        
-        config_path = Path(config_path)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Remove None values and empty dicts for cleaner output
-        clean_config = self._clean_config_for_output(self.config_data)
-        
-        with open(config_path, 'w', encoding='utf-8') as f:
-            if config_path.suffix.lower() in ['.yaml', '.yml']:
-                yaml.dump(clean_config, f, default_flow_style=False, indent=2, sort_keys=False)
-            elif config_path.suffix.lower() == '.json':
-                json.dump(clean_config, f, indent=2, sort_keys=False, ensure_ascii=False)
+        try:
+            import os
+            
+            target_path: str
+            if config_path is not None:
+                target_path = config_path
+            elif self.config_file_path is not None:
+                target_path = self.config_file_path
             else:
-                raise ValueError(f"Unsupported configuration file format: {config_path.suffix}")
+                raise ValueError("No config file path specified")
+            
+            # Create directory if it doesn't exist
+            target_dir = os.path.dirname(target_path)
+            if target_dir and not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+            
+            # Remove None values and empty dicts for cleaner output
+            clean_config = self._clean_config_for_output(self.config_data)
+            
+            # FIXED: Use string splitting instead of suffix attribute on string
+            file_ext = target_path.lower().split('.')[-1] if '.' in target_path else ''
+            
+            with open(target_path, 'w', encoding='utf-8') as f:
+                if file_ext in ['yaml', 'yml']:
+                    try:
+                        import yaml
+                        yaml.dump(clean_config, f, default_flow_style=False, indent=2, sort_keys=False)
+                    except ImportError:
+                        # Fallback to JSON if PyYAML not available
+                        json.dump(clean_config, f, indent=2, sort_keys=False, ensure_ascii=False)
+                elif file_ext == 'json':
+                    json.dump(clean_config, f, indent=2, sort_keys=False, ensure_ascii=False)
+                else:
+                    raise ValueError(f"Unsupported configuration file format: .{file_ext}")
+        except Exception as e:
+            print(f"Warning: Failed to save config to {config_path}: {e}")
     
     def _clean_config_for_output(self, config: Any) -> Any:
         """Clean configuration for output by removing None values and empty containers"""
         if isinstance(config, dict):
             cleaned = {}
             for k, v in config.items():
-                cleaned_value = self._clean_config_for_output(v)
-                if cleaned_value is not None and cleaned_value != {} and cleaned_value != []:
-                    cleaned[k] = cleaned_value
+                try:
+                    cleaned_value = self._clean_config_for_output(v)
+                    if cleaned_value is not None and cleaned_value != {} and cleaned_value != []:
+                        cleaned[k] = cleaned_value
+                except:
+                    if v is not None:
+                        cleaned[k] = v
             return cleaned
         elif isinstance(config, list):
             return [self._clean_config_for_output(item) for item in config if item is not None]
         else:
             return config
     
-    def create_engine_config_template(self, output_path: str):
-        """Create a template configuration file with all options"""
-        template_config = asdict(OCRConfig())
-        
-        # Add comments/descriptions (if using YAML)
-        if output_path.endswith(('.yaml', '.yml')):
-            # Add detailed comments to template
-            template_config['_comments'] = {
-                'description': 'OCR System Configuration Template',
-                'engines': 'Configure individual OCR engines',
-                'preprocessing': 'Image preprocessing options',
-                'postprocessing': 'Text postprocessing options',
-                'system': 'System-level settings'
-            }
-        
-        with open(output_path, 'w') as f:
-            if output_path.endswith(('.yaml', '.yml')):
-                yaml.dump(template_config, f, default_flow_style=False, indent=2)
-            else:
-                json.dump(template_config, f, indent=2)
-    
     def validate_current_config(self) -> List[str]:
         """Validate current configuration and return list of issues"""
         issues = []
         
-        # Check required fields
-        required_fields = ['engines', 'preprocessing', 'postprocessing']
-        for field in required_fields:
-            if not self.get(field):
-                issues.append(f"Missing required configuration section: {field}")
-        
-        # Validate engine configurations
-        engines = self.get('engines', {})
-        if not engines:
-            issues.append("No engines configured")
-        
-        for engine_name, engine_config in engines.items():
-            if not engine_config.get('enabled', True):
-                continue
+        try:
+            # Check required fields
+            required_fields = ['engines']
+            for field in required_fields:
+                if not self.get(field):
+                    issues.append(f"Missing required configuration section: {field}")
             
-            # Engine-specific validation
-            if engine_name == "tesseract":
-                lang = engine_config.get('config', {}).get('lang')
-                if not lang:
-                    issues.append(f"Tesseract engine missing language configuration")
-        
-        # Validate numeric ranges
-        confidence = self.get('postprocessing.min_confidence', 0.0)
-        if not 0.0 <= confidence <= 1.0:
-            issues.append(f"Invalid confidence threshold: {confidence} (must be 0.0-1.0)")
+            # Validate engine configurations
+            engines = self.get('engines', {})
+            if not engines:
+                issues.append("No engines configured")
+            
+            # Validate numeric ranges
+            confidence = self.get('postprocessing.min_confidence', 0.3)
+            try:
+                confidence = float(confidence)
+                if not 0.0 <= confidence <= 1.0:
+                    issues.append(f"Invalid confidence threshold: {confidence} (must be 0.0-1.0)")
+            except (ValueError, TypeError):
+                issues.append(f"Invalid confidence threshold type: {type(confidence)}")
+                
+        except Exception as e:
+            issues.append(f"Configuration validation error: {e}")
         
         return issues
     
     def __str__(self) -> str:
-        return f"OCRConfig(engines={list(self.get('engines', {}).keys())}, strategy={self.get('engine_selection_strategy')})"
+        try:
+            engines = list(self.get('engines', {}).keys())
+            strategy = self.get('engine_selection_strategy', 'unknown')
+            return f"OCRConfig(engines={engines}, strategy={strategy})"
+        except:
+            return "OCRConfig(error accessing config)"
     
     def __repr__(self) -> str:
         return self.__str__()
@@ -598,27 +677,90 @@ class ConfigManager:
     """Simplified ConfigManager for backward compatibility"""
     
     def __init__(self, config_path: Optional[str] = None):
-        self.config = Config(config_path)
+        try:
+            self.config = Config(config_path)
+        except Exception as e:
+            print(f"Warning: ConfigManager initialization failed, using minimal config: {e}")
+            # Create minimal config as fallback
+            self.config = Config()
     
     def get_config(self) -> Dict[str, Any]:
         """Get the complete configuration dictionary"""
-        return self.config.config_data
+        try:
+            return self.config.config_data
+        except:
+            return {}
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value using dot notation"""
-        return self.config.get(key, default)
+        try:
+            return self.config.get(key, default)
+        except:
+            return default
+    
+    def get_section(self, section_name: str, default: Any = None) -> Any:
+        """Get a configuration section using dot notation (backward compatibility method)"""
+        try:
+            # First try dot notation
+            result = self.get(section_name, default)
+            if result != default:
+                return result
+            
+            # If dot notation fails, try getting from full config dict
+            full_config = self.get_config()
+            return full_config.get(section_name, default)
+            
+        except Exception:
+            return default
     
     def get_engine_config(self, engine_name: str) -> Dict[str, Any]:
         """Get configuration for a specific engine"""
-        return self.config.get_engine_config(engine_name)
+        try:
+            return self.config.get_engine_config(engine_name)
+        except:
+            return {
+                "enabled": True,
+                "priority": 1,
+                "config": {},
+                "timeout": 30.0,
+                "retry_count": 2,
+                "fallback_engines": []
+            }
     
     def load_config(self, config_path: str):
         """Load configuration from file"""
-        self.config.load_from_file(config_path)
+        try:
+            self.config.load_from_file(config_path)
+        except Exception as e:
+            print(f"Warning: Failed to load config from {config_path}: {e}")
     
     def validate_config(self) -> List[str]:
         """Validate configuration and return issues"""
-        return self.config.validate_current_config()
+        try:
+            return self.config.validate_current_config()
+        except:
+            return ["Configuration validation failed"]
 
-# Don't instantiate globally to avoid import issues during startup
-# # config_manager = ConfigManager()  # Disabled to avoid import issues
+# Safe module-level functions
+def create_default_config() -> Config:
+    """Create a default configuration instance"""
+    try:
+        return Config()
+    except Exception as e:
+        print(f"Error creating default config: {e}")
+        # Return minimal working config
+        config = Config.__new__(Config)
+        config.config_data = {
+            "engines": {"tesseract": {"enabled": True}},
+            "system": {"log_level": "INFO"},
+            "default_engine": "tesseract"
+        }
+        return config
+
+def load_config(config_path: Optional[str] = None) -> Config:
+    """Load configuration with fallback to defaults"""
+    try:
+        return Config(config_path)
+    except Exception as e:
+        print(f"Warning: Failed to load config, using defaults: {e}")
+        return create_default_config()

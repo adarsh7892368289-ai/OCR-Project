@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import time
 
-from .base_engine import BaseOCREngine, DocumentResult, TextType, BoundingBox
+from .base_engine import BaseOCREngine, DocumentResult, TextType, BoundingBox, OCRResult, DocumentStructure, TextRegion
 from ..utils.config import Config
 
 @dataclass
@@ -30,10 +30,10 @@ class OCREngineManager:
         self.logger = logging.getLogger("OCR.EngineManager")
         self.performance_history: Dict[str, EnginePerformance] = {}
         
-        # Engine selection strategy
-        self.selection_strategy = config.get("engine.selection_strategy", "adaptive")
-        self.parallel_processing = config.get("parallel_processing", True)
-        self.max_workers = config.get("max_workers", 3)
+        # FIXED: Get configuration values with proper defaults
+        self.selection_strategy = config.get("engine_selection_strategy", "adaptive")
+        self.parallel_processing = config.get("system.parallel_processing", True)
+        self.max_workers = config.get("system.max_workers", 3)
         
         # Engine priorities for different scenarios
         self.engine_priorities = {
@@ -139,7 +139,7 @@ class OCREngineManager:
     def _adaptive_engine_selection(self, 
                                  text_type: TextType,
                                  language: str,
-                                 quality_priority: bool) -> str:
+                                 quality_priority: bool) -> Optional[str]:
         """Adaptive engine selection based on performance history"""
         
         available_engines = [name for name in self.engine_priorities[text_type] 
@@ -183,9 +183,10 @@ class OCREngineManager:
             engine_scores[engine_name] = score
         
         # Return the highest scoring engine
-        return max(engine_scores.items(), key=lambda x: x[1])[0]
+        best_engine = max(engine_scores.items(), key=lambda x: x[1])[0]
+        return best_engine
     
-    def _performance_based_selection(self, text_type: TextType, language: str) -> str:
+    def _performance_based_selection(self, text_type: TextType, language: str) -> Optional[str]:
         """Select engine based on historical performance"""
         best_engine = None
         best_score = 0.0
@@ -200,18 +201,21 @@ class OCREngineManager:
                     best_score = score
                     best_engine = engine_name
         
-        return best_engine or self.initialized_engines[0]
+        return best_engine or (self.initialized_engines[0] if self.initialized_engines else None)
     
-    def _priority_based_selection(self, text_type: TextType) -> str:
+    def _priority_based_selection(self, text_type: TextType) -> Optional[str]:
         """Select engine based on predefined priorities"""
         for engine_name in self.engine_priorities[text_type]:
             if engine_name in self.initialized_engines:
                 return engine_name
         
-        return self.initialized_engines[0]
+        return self.initialized_engines[0] if self.initialized_engines else None
     
-    def _round_robin_selection(self) -> str:
+    def _round_robin_selection(self) -> Optional[str]:
         """Simple round-robin selection"""
+        if not self.initialized_engines:
+            return None
+            
         if not hasattr(self, '_round_robin_index'):
             self._round_robin_index = 0
         
@@ -220,95 +224,223 @@ class OCREngineManager:
         return engine
     
     def process_image(self, 
-                     image: np.ndarray,
+                     image: np.ndarray, 
                      engine_name: Optional[str] = None,
                      **kwargs) -> DocumentResult:
-        """Process image with specified or auto-selected engine"""
+        """
+        FIXED: Process a single image with compatible return structure
+        """
+        if not self.initialized_engines:
+            self.logger.error("No engines initialized")
+            raise RuntimeError("No OCR engines available")
         
-        if engine_name is None:
-            engine_name = self.select_best_engine(image, **kwargs)
+        # Select engine
+        selected_engine_name = engine_name or self.select_best_engine(image, **kwargs)
+        if not selected_engine_name:
+            raise RuntimeError("Failed to select OCR engine")
         
-        if engine_name not in self.initialized_engines:
-            raise ValueError(f"Engine {engine_name} not available")
+        selected_engine = self.engines[selected_engine_name]
         
-        engine = self.engines[engine_name]
         start_time = time.time()
         
         try:
-            result = engine.process_image(image, **kwargs)
+            # Process with engine
+            result = selected_engine.process_image(image, **kwargs)
+            processing_time = time.time() - start_time
             
-            # Update performance tracking
-            self._update_performance(engine_name, result, time.time() - start_time, True)
+            # FIXED: Ensure result compatibility
+            if result is None:
+                # Create empty result
+                result = DocumentResult(
+                    pages=[],
+                    metadata={"engine": selected_engine_name},
+                    processing_time=processing_time,
+                    engine_name=selected_engine_name,
+                    confidence_score=0.0
+                )
+            
+            # Update performance
+            self._update_performance(selected_engine_name, result, processing_time, True)
             
             return result
             
         except Exception as e:
-            self.logger.error(f"Engine {engine_name} failed: {e}")
+            processing_time = time.time() - start_time
+            self.logger.error(f"Engine {selected_engine_name} failed: {e}")
             
-            # Update performance tracking for failure
-            self._update_performance(engine_name, None, time.time() - start_time, False)
+            # Update performance for failure
+            self._update_performance(selected_engine_name, None, processing_time, False)
             
-            # Try fallback engine
-            return self._try_fallback(image, engine_name, **kwargs)
+            # Try fallback
+            return self._try_fallback(image, selected_engine_name, **kwargs)
     
-    def process_image_multi_engine(self, 
-                                 image: np.ndarray,
+    def process_regions(self, 
+                        regions_data: List[Dict[str, Any]],
+                        full_image_stats: Dict[str, Any],
+                        text_type: Optional[TextType] = None,
+                        engine_name: Optional[str] = None,
+                        **kwargs) -> DocumentResult:
+        """
+        FIXED: Process regions with proper error handling and return structure
+        """
+        if not regions_data:
+            self.logger.warning("No regions to process")
+            return DocumentResult(
+                pages=[],
+                metadata={"engine": engine_name or "none", "image_stats": full_image_stats},
+                processing_time=0.0,
+                engine_name=engine_name or "none",
+                confidence_score=0.0
+            )
+        
+        start_time = time.time()
+        
+        # Select engine
+        selected_engine_name = engine_name or self.select_best_engine(
+            regions_data[0]['image'], text_type, **kwargs
+        )
+        
+        if not selected_engine_name or selected_engine_name not in self.initialized_engines:
+            raise ValueError(f"Engine {selected_engine_name} not available")
+            
+        selected_engine = self.engines[selected_engine_name]
+        
+        self.logger.info(f"Processing {len(regions_data)} regions with {selected_engine_name}")
+        
+        all_ocr_results: List[OCRResult] = []
+        total_confidence = 0.0
+        successful_regions = 0
+        
+        # FIXED: Process regions with proper error handling
+        for i, region_data in enumerate(regions_data):
+            try:
+                region_image = region_data['image']
+                region_metadata = region_data.get('metadata', {})
+                
+                # Process single region
+                ocr_result = self._process_single_region(selected_engine, region_image, region_metadata)
+                
+                if ocr_result and ocr_result.text.strip():
+                    # Create text region for compatibility
+                    bbox_data = region_metadata.get('bbox', {})
+                    bbox = BoundingBox(
+                        x=bbox_data.get('x', 0),
+                        y=bbox_data.get('y', 0),
+                        width=bbox_data.get('width', region_image.shape[1]),
+                        height=bbox_data.get('height', region_image.shape[0]),
+                        confidence=ocr_result.confidence
+                    )
+                    
+                    # FIXED: Create OCRResult with correct constructor parameters
+                    final_result = OCRResult(
+                        text=ocr_result.text,
+                        confidence=ocr_result.confidence,
+                        regions=[TextRegion(
+                            text=ocr_result.text,
+                            confidence=ocr_result.confidence,
+                            bbox=bbox
+                        )],
+                        processing_time=ocr_result.processing_time,
+                        bbox=bbox,
+                        metadata={"region_index": i, "engine": selected_engine_name}
+                    )
+                    
+                    all_ocr_results.append(final_result)
+                    total_confidence += ocr_result.confidence
+                    successful_regions += 1
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to process region {i}: {e}")
+                continue
+        
+        processing_time = time.time() - start_time
+        
+        # FIXED: Create properly formatted DocumentResult
+        full_text = " ".join([r.text for r in all_ocr_results])
+        avg_confidence = total_confidence / successful_regions if successful_regions > 0 else 0.0
+        
+        final_result = DocumentResult(
+            pages=all_ocr_results,  # FIXED: Use 'pages' parameter name
+            metadata={
+                "engine": selected_engine_name,
+                "image_stats": full_image_stats,
+                "regions_processed": len(regions_data),
+                "successful_regions": successful_regions
+            },
+            processing_time=processing_time,
+            engine_name=selected_engine_name,
+            confidence_score=avg_confidence
+        )
+        
+        # Update performance
+        self._update_performance(selected_engine_name, final_result, processing_time, successful_regions > 0)
+        
+        return final_result
+        
+    def _process_single_region(self, engine: BaseOCREngine, image: np.ndarray, metadata: Dict[str, Any]) -> Optional[OCRResult]:
+        """FIXED: Process single region with proper error handling"""
+        try:
+            # Process image with engine
+            doc_result = engine.process_image(image)
+            
+            if doc_result and hasattr(doc_result, 'pages') and doc_result.pages:
+                return doc_result.pages[0]  # Return first OCR result
+            elif doc_result and hasattr(doc_result, 'results') and doc_result.results:
+                return doc_result.results[0]  # Backward compatibility
+            else:
+                # Create minimal result if engine returns nothing useful
+                return OCRResult(
+                    text="",
+                    confidence=0.0,
+                    regions=[],
+                    processing_time=0.0,
+                    metadata={"engine": engine.name, "status": "no_text"}
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Engine {engine.name} failed on region: {e}")
+            return None
+    
+    def process_regions_multi_engine(self,
+                                 regions_data: List[Dict[str, Any]],
+                                 full_image_stats: Dict[str, Any],
                                  engine_names: Optional[List[str]] = None,
                                  **kwargs) -> Dict[str, DocumentResult]:
-        """Process image with multiple engines for comparison"""
-        
+        """Process regions with multiple engines for comparison"""
+        if not regions_data:
+            return {}
+
         if engine_names is None:
             engine_names = self.initialized_engines[:3]  # Use top 3 engines
         
         results = {}
         
-        if self.parallel_processing:
-            # Parallel processing
-            with ThreadPoolExecutor(max_workers=min(len(engine_names), self.max_workers)) as executor:
-                future_to_engine = {
-                    executor.submit(self._process_with_engine, engine_name, image, **kwargs): engine_name
-                    for engine_name in engine_names if engine_name in self.initialized_engines
-                }
-                
-                for future in as_completed(future_to_engine):
-                    engine_name = future_to_engine[future]
-                    try:
-                        result = future.result(timeout=30)  # 30 second timeout
-                        results[engine_name] = result
-                    except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed in parallel processing: {e}")
-        else:
-            # Sequential processing
-            for engine_name in engine_names:
-                if engine_name in self.initialized_engines:
-                    try:
-                        result = self.process_image(image, engine_name, **kwargs)
-                        results[engine_name] = result
-                    except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed: {e}")
+        for engine_name in engine_names:
+            if engine_name in self.initialized_engines:
+                try:
+                    result = self.process_regions(
+                        regions_data,
+                        full_image_stats,
+                        engine_name=engine_name,
+                        **kwargs
+                    )
+                    results[engine_name] = result
+                except Exception as e:
+                    self.logger.error(f"Multi-engine processing failed for {engine_name}: {e}")
         
         return results
     
-    def _process_with_engine(self, engine_name: str, image: np.ndarray, **kwargs) -> DocumentResult:
-        """Helper method for parallel processing"""
-        return self.process_image(image, engine_name, **kwargs)
-    
     def _try_fallback(self, image: np.ndarray, failed_engine: str, **kwargs) -> DocumentResult:
-        """Try fallback engines when primary engine fails"""
-        
+        """FIXED: Try fallback engines with proper return structure"""
         available_engines = [e for e in self.initialized_engines if e != failed_engine]
         
         if not available_engines:
-            # Create empty result if no fallback available
-            from .base_engine import DocumentResult, DocumentStructure
+            # Return empty result
             return DocumentResult(
-                full_text="",
-                results=[],
-                text_regions=[],
-                document_structure=DocumentStructure(),
+                pages=[],
+                metadata={"engine": "failed", "fallback_attempted": True},
                 processing_time=0.0,
                 engine_name="failed",
-                image_stats={},
                 confidence_score=0.0
             )
         
@@ -320,16 +452,11 @@ class OCREngineManager:
             return self.process_image(image, fallback_engine, **kwargs)
         except Exception as e:
             self.logger.error(f"Fallback engine {fallback_engine} also failed: {e}")
-            # Return empty result
-            from .base_engine import DocumentResult, DocumentStructure
             return DocumentResult(
-                full_text="",
-                results=[],
-                text_regions=[],
-                document_structure=DocumentStructure(),
+                pages=[],
+                metadata={"engine": "failed", "fallback_failed": True},
                 processing_time=0.0,
                 engine_name="failed",
-                image_stats={},
                 confidence_score=0.0
             )
     
@@ -388,97 +515,6 @@ class OCREngineManager:
         
         return best_engine or candidates[0]
     
-    def benchmark_engines(self, 
-                         test_images: List[np.ndarray],
-                         ground_truth: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
-        """Benchmark all engines against test images"""
-        
-        benchmark_results = {}
-        
-        for engine_name in self.initialized_engines:
-            self.logger.info(f"Benchmarking engine: {engine_name}")
-            
-            results = []
-            total_time = 0.0
-            
-            for i, image in enumerate(test_images):
-                try:
-                    start_time = time.time()
-                    result = self.process_image(image, engine_name)
-                    processing_time = time.time() - start_time
-                    
-                    results.append(result)
-                    total_time += processing_time
-                    
-                except Exception as e:
-                    self.logger.error(f"Benchmark failed for {engine_name} on image {i}: {e}")
-                    continue
-            
-            if results:
-                # Calculate metrics
-                avg_confidence = sum(r.confidence_score for r in results) / len(results)
-                avg_time = total_time / len(results)
-                success_rate = len(results) / len(test_images)
-                
-                metrics = {
-                    'avg_confidence': avg_confidence,
-                    'avg_processing_time': avg_time,
-                    'success_rate': success_rate,
-                    'total_processed': len(results)
-                }
-                
-                # Calculate accuracy if ground truth provided
-                if ground_truth:
-                    accuracy = self._calculate_accuracy(results, ground_truth)
-                    metrics['accuracy'] = accuracy
-                
-                benchmark_results[engine_name] = metrics
-        
-        return benchmark_results
-    
-    def _calculate_accuracy(self, results: List[DocumentResult], ground_truth: List[str]) -> float:
-        """Calculate accuracy against ground truth"""
-        from difflib import SequenceMatcher
-        
-        accuracies = []
-        
-        for i, result in enumerate(results):
-            if i < len(ground_truth):
-                predicted = result.full_text.strip().lower()
-                actual = ground_truth[i].strip().lower()
-                
-                # Use sequence matching for similarity
-                similarity = SequenceMatcher(None, predicted, actual).ratio()
-                accuracies.append(similarity)
-        
-        return sum(accuracies) / len(accuracies) if accuracies else 0.0
-    
-    def export_performance_report(self, output_path: str):
-        """Export detailed performance report"""
-        import json
-        from datetime import datetime
-        
-        report = {
-            'timestamp': datetime.now().isoformat(),
-            'total_engines': len(self.engines),
-            'initialized_engines': len(self.initialized_engines),
-            'performance_data': {}
-        }
-        
-        for engine_name, perf in self.performance_history.items():
-            report['performance_data'][engine_name] = {
-                'avg_confidence': perf.avg_confidence,
-                'avg_processing_time': perf.avg_processing_time,
-                'success_rate': perf.success_rate,
-                'total_processed': perf.total_processed,
-                'best_for_text_types': [t.value for t in perf.best_for_text_types]
-            }
-        
-        with open(output_path, 'w') as f:
-            json.dump(report, f, indent=2)
-        
-        self.logger.info(f"Performance report exported to {output_path}")
-    
     def cleanup_engines(self):
         """Cleanup all initialized engines"""
         for engine_name in self.initialized_engines:
@@ -491,13 +527,18 @@ class OCREngineManager:
         self.initialized_engines.clear()
     
     def __enter__(self):
-        # Initialize default engines
-        default_engines = self.config.get("engines", {}).keys()
-        self.initialize_engines(list(default_engines))
+        # FIXED: Get engine list from config properly
+        engine_configs = self.config.get("engines", {})
+        enabled_engines = [name for name, config in engine_configs.items() 
+                          if config.get("enabled", True)]
+        
+        if enabled_engines:
+            self.initialize_engines(enabled_engines)
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.cleanup_engines()
+
 # Alias for backward compatibility  
 EngineManager = OCREngineManager
 

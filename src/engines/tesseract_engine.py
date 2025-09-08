@@ -1,15 +1,22 @@
 import cv2
 import numpy as np
 import pytesseract
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import time
 import re
 from PIL import Image
 import os
 import subprocess
 
-
-pytesseract.pytesseract.tesseract_cmd = r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+from ..core.base_engine import (
+    BaseOCREngine, 
+    OCRResult, 
+    DocumentResult, 
+    TextRegion,
+    BoundingBox,
+    DocumentStructure,
+    TextType
+)
 
 def find_tesseract():
     """Find Tesseract installation automatically"""
@@ -36,20 +43,10 @@ def find_tesseract():
             continue
     return None
 
-from ..core.base_engine import (
-    BaseOCREngine, 
-    OCRResult, 
-    DocumentResult, 
-    TextRegion,
-    BoundingBox,
-    DocumentStructure,
-    TextType
-)
-
 class TesseractEngine(BaseOCREngine):
     """Tesseract OCR Engine - Excellent for printed text"""
     
-    def __init__(self, config: Dict[str, Any] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__("Tesseract", config)
         self.tesseract_config = self._build_tesseract_config()
         
@@ -140,21 +137,26 @@ class TesseractEngine(BaseOCREngine):
             # Create text regions from results
             text_regions = self._create_text_regions(results)
             
-            # Create document structure
-            document_structure = DocumentStructure()
-            
             # Calculate statistics
             processing_time = time.time() - start_time
             confidence_score = self.calculate_confidence(results)
             
+            # Create OCR result for the page
+            page_result = OCRResult(
+                text=full_text,
+                confidence=confidence_score,
+                regions=text_regions,
+                processing_time=processing_time,
+                bbox=None,
+                level="page"
+            )
+            
+            # Create document result with correct constructor
             return DocumentResult(
-                full_text=full_text,
-                results=results,
-                text_regions=text_regions,
-                document_structure=document_structure,
+                pages=[page_result],
+                metadata={'image_stats': {}},
                 processing_time=processing_time,
                 engine_name=self.name,
-                image_stats={},
                 confidence_score=confidence_score
             )
             
@@ -162,14 +164,18 @@ class TesseractEngine(BaseOCREngine):
             print(f"Tesseract processing error: {e}")
             
             # Return properly constructed empty result
+            empty_page = OCRResult(
+                text="",
+                confidence=0.0,
+                regions=[],
+                processing_time=time.time() - start_time
+            )
+            
             return DocumentResult(
-                full_text="",
-                results=[],
-                text_regions=[],
-                document_structure=DocumentStructure(),
+                pages=[empty_page],
+                metadata={'error': str(e)},
                 processing_time=time.time() - start_time,
                 engine_name=self.name,
-                image_stats={},
                 confidence_score=0.0
             )
             
@@ -209,28 +215,29 @@ class TesseractEngine(BaseOCREngine):
                     confidence=conf / 100.0
                 )
                 
+                # Create OCRResult with correct parameter names
                 result = OCRResult(
                     text=text,
-                    confidence=conf / 100.0,  # Convert to 0-1 range
+                    confidence=conf / 100.0,
                     bbox=bbox,
                     level="word"
                 )
                 
-                # Simple validation - check if result has required attributes
+                # Check text attribute
                 if hasattr(result, 'text') and result.text.strip():
                     results.append(result)
                     
         return results
-    
+
     def _create_text_regions(self, results: List[OCRResult]) -> List[TextRegion]:
         """Create text regions from OCR results"""
         text_regions = []
         
         for i, result in enumerate(results):
             region = TextRegion(
-                bbox=result.bbox,
-                text=result.text,  # FIXED: Use .text instead of .full_text
+                text=result.text,
                 confidence=result.confidence,
+                bbox=result.bbox,
                 text_type=TextType.PRINTED,
                 reading_order=i
             )
@@ -244,7 +251,7 @@ class TesseractEngine(BaseOCREngine):
             return ""
             
         # Sort results by position (top to bottom, left to right)
-        sorted_results = sorted(results, key=lambda r: (r.bbox.y, r.bbox.x))
+        sorted_results = sorted(results, key=lambda r: (r.bbox.y if r.bbox else 0, r.bbox.x if r.bbox else 0))
         
         # Group results by lines based on Y position
         lines = []
@@ -253,16 +260,17 @@ class TesseractEngine(BaseOCREngine):
         line_threshold = 10  # pixels
         
         for result in sorted_results:
-            y_pos = result.bbox.y
-            
-            if current_y == -1 or abs(y_pos - current_y) <= line_threshold:
-                current_line.append(result)
-                current_y = y_pos
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = [result]
-                current_y = y_pos
+            if result.bbox:  # Check if bbox exists
+                y_pos = result.bbox.y
+                
+                if current_y == -1 or abs(y_pos - current_y) <= line_threshold:
+                    current_line.append(result)
+                    current_y = y_pos
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = [result]
+                    current_y = y_pos
                 
         if current_line:
             lines.append(current_line)
@@ -271,9 +279,10 @@ class TesseractEngine(BaseOCREngine):
         full_text_lines = []
         for line in lines:
             # Sort words in line by X position
-            line_sorted = sorted(line, key=lambda r: r.bbox.x)
-            line_text = " ".join(result.text for result in line_sorted)  # FIXED: Use .text
-            full_text_lines.append(line_text)
+            line_sorted = sorted(line, key=lambda r: r.bbox.x if r.bbox else 0)
+            line_text = " ".join(result.text for result in line_sorted if result.text)
+            if line_text.strip():  # Only add non-empty lines
+                full_text_lines.append(line_text)
             
         return "\n".join(full_text_lines)
         
