@@ -1080,3 +1080,5 @@ def batch_process_images(images: List[np.ndarray],
     results = preprocessor.process_batch(images, options, progress_callback)
     preprocessor.shutdown()
     return [result.processed_image for result in results]
+
+AdaptiveProcessor = AdaptivePreprocessor

@@ -1,0 +1,37 @@
+{
+  "image_path": "default",
+  "original_shape": [
+    1392,
+    2586,
+    3
+  ],
+  "enhanced_shape": [
+    1392,
+    2586,
+    3
+  ],
+  "quality_metrics": {
+    "overall_score": 0.651279338441295,
+    "sharpness_score": 0.6273632212001089,
+    "contrast_score": 0.2846305544747776,
+    "brightness_score": 0.5,
+    "noise_level": 0.008595527387132831,
+    "image_type": "ImageType.TABLE_DOCUMENT",
+    "quality_level": "ImageQuality.GOOD"
+  },
+  "enhancement": {
+    "applied": "balanced",
+    "skipped": false,
+    "operations": [
+      "contrast_enhancement"
+    ],
+    "quality_improvement": 0.0,
+    "processing_time": 0.2626676559448242
+  },
+  "paddleocr": {
+    "results_count": 77,
+    "processing_time": 5.9242823123931885
+  },
+  "total_processing_time": 6.393051862716675,
+  "timestamp": 1757411380.093786
+}

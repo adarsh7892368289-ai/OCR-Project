@@ -37,7 +37,7 @@ def test_optimized_preprocessing():
     print("=" * 80)
     
     # Load test image
-    image_path = project_root / "data" / "sample_images" / "img1.jpg"
+    image_path = project_root / "data" / "sample_images" / "img3.jpg"
     
     if not image_path.exists():
         # Try alternative paths
