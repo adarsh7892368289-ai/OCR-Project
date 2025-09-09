@@ -51,12 +51,12 @@ except ImportError as e:
     logger.warning(f"Failed to import EasyOCREngine: {e}")
 
 try:
-    from ..engines.paddle_engine import PaddleOCREngine
+    from ..engines.paddleocr_engine import PaddleOCREngine
     AVAILABLE_ENGINES['paddleocr'] = PaddleOCREngine
     logger.info("PaddleOCREngine imported successfully")
 except ImportError:
     try:
-        from ..engines.paddle_engine import PaddleOCREngine
+        from ..engines.paddleocr_engine import PaddleOCREngine
         AVAILABLE_ENGINES['paddleocr'] = PaddleOCREngine
         logger.info("PaddleOCREngine imported from paddle_engine")
     except ImportError as e:

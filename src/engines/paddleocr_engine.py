@@ -1,68 +1,76 @@
+import os
 import cv2
 import numpy as np
-import easyocr
-from typing import List, Dict, Any, Tuple, Optional
 import time
-from PIL import Image
+import warnings
+from typing import List, Dict, Any, Tuple, Optional
+
+# Suppress PaddlePaddle warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='paddle')
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 from ..core.base_engine import (
     BaseOCREngine, 
     OCRResult, 
+    BoundingBox, 
+    TextRegion, 
     DocumentResult, 
-    TextRegion,
-    BoundingBox,
     TextType
 )
 
-class EasyOCREngine(BaseOCREngine):
+class PaddleOCREngine(BaseOCREngine):
     """
-    Modern EasyOCR Engine - AI-Style Pipeline Architecture
+    Modern PaddleOCR Engine - AI-Style Pipeline Architecture
     
     Clean separation of concerns:
     - Takes preprocessed images from preprocessing pipeline
-    - Performs pure OCR extraction with EasyOCR
+    - Performs pure OCR extraction with PaddleOCR
     - Returns structured results for postprocessing pipeline
-    - Excellent for handwritten and printed text
+    - Excellent for printed text and document analysis
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__("EasyOCR", config)
-        self.reader = None
+        super().__init__("PaddleOCR", config)
+        self.ocr = None
         self.languages = self.config.get("languages", ["en"])
         self.gpu = self.config.get("gpu", True)
         self.model_storage_directory = self.config.get("model_dir", None)
         
         # Modern engine capabilities
-        self.supports_handwriting = True
+        self.supports_handwriting = False
         self.supports_multiple_languages = True
-        self.supports_orientation_detection = False  # EasyOCR handles this internally
-        self.supports_structure_analysis = False
+        self.supports_orientation_detection = True  # PaddleOCR has angle classification
+        self.supports_structure_analysis = True     # Good for structured documents
         
     def initialize(self) -> bool:
-        """Initialize EasyOCR reader with error resilience"""
+        """Initialize PaddleOCR with robust error handling"""
         try:
-            self.logger.info(f"Initializing EasyOCR with languages: {self.languages}")
+            self.logger.info(f"Initializing PaddleOCR with languages: {self.languages}")
             
-            self.reader = easyocr.Reader(
-                self.languages,
-                gpu=self.gpu,
-                model_storage_directory=self.model_storage_directory,
-                download_enabled=True,
-                detector=True,
-                recognizer=True,
-                verbose=False
+            # Import PaddleOCR
+            from paddleocr import PaddleOCR
+            
+            # Initialize with modern configuration
+            self.ocr = PaddleOCR(
+                use_angle_cls=True,  # Enable angle classification
+                lang='en',           # Default language
+                show_log=False       # Suppress verbose logs
             )
             
-            self.supported_languages = self.languages
+            self.supported_languages = self.get_supported_languages()
             self.is_initialized = True
             self.model_loaded = True
             
-            self.logger.info(f"EasyOCR initialized successfully (GPU: {self.gpu})")
+            self.logger.info("PaddleOCR initialized successfully")
             return True
             
+        except ImportError as e:
+            self.logger.error(f"PaddleOCR not installed: {e}")
+            self.logger.info("Install with: pip install paddlepaddle paddleocr")
+            return False
         except Exception as e:
-            self.logger.error(f"EasyOCR initialization failed: {e}")
-            self.reader = None
+            self.logger.error(f"PaddleOCR initialization failed: {e}")
+            self.ocr = None
             self.is_initialized = False
             self.model_loaded = False
             return False
@@ -70,17 +78,15 @@ class EasyOCREngine(BaseOCREngine):
     def get_supported_languages(self) -> List[str]:
         """Get comprehensive list of supported languages"""
         return [
-            'en', 'ch_sim', 'ch_tra', 'ja', 'ko', 'th', 'vi', 'ar', 'hi', 'ur', 
-            'fa', 'ru', 'bg', 'uk', 'be', 'te', 'kn', 'ta', 'bn', 'as', 'mr', 
-            'ne', 'si', 'my', 'km', 'lo', 'sa', 'fr', 'de', 'es', 'pt', 'it',
-            'nl', 'sv', 'da', 'no', 'fi', 'lt', 'lv', 'et', 'pl', 'cs', 'sk',
-            'sl', 'hu', 'ro', 'hr', 'sr', 'bs', 'mk', 'sq', 'mt', 'cy', 'ga',
-            'tr', 'az', 'uz', 'mn'
+            'en', 'ch', 'ta', 'te', 'ka', 'ja', 'ko', 'hi', 'ar', 'th', 'vi', 
+            'ms', 'ur', 'fa', 'bg', 'uk', 'be', 'ru', 'sr', 'hr', 'ro', 'hu', 
+            'pl', 'cs', 'sk', 'sl', 'hr', 'et', 'lv', 'lt', 'is', 'da', 'no', 
+            'sv', 'fi', 'fr', 'de', 'es', 'pt', 'it', 'nl', 'ca', 'eu', 'gl'
         ]
         
     def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> List[OCRResult]:
         """
-        Process preprocessed image with EasyOCR
+        Process preprocessed image with PaddleOCR
         
         Args:
             preprocessed_image: Image from preprocessing pipeline
@@ -93,31 +99,22 @@ class EasyOCREngine(BaseOCREngine):
         
         try:
             # Validate initialization
-            if not self.is_initialized or self.reader is None:
+            if not self.is_initialized or self.ocr is None:
                 if not self.initialize():
-                    raise RuntimeError("EasyOCR engine not initialized")
+                    raise RuntimeError("PaddleOCR engine not initialized")
             
             # Validate preprocessed input
             if not self.validate_image(preprocessed_image):
                 raise ValueError("Invalid preprocessed image")
             
-            # Convert preprocessed image to EasyOCR format
-            easyocr_image = self._prepare_for_easyocr(preprocessed_image)
+            # Convert preprocessed image to PaddleOCR format
+            paddle_image = self._prepare_for_paddleocr(preprocessed_image)
             
-            # Extract OCR data with optimized parameters
-            ocr_detections = self.reader.readtext(
-                easyocr_image,
-                detail=1,  # Get detailed results with bounding boxes
-                paragraph=False,  # Word-level processing
-                width_ths=0.7,
-                height_ths=0.7,
-                decoder="greedy",
-                beamWidth=5,
-                batch_size=1
-            )
+            # Extract OCR data with angle classification
+            paddle_results = self.ocr.ocr(paddle_image, cls=True)
             
             # Convert to OCRResult objects
-            results = self._extract_ocr_results(ocr_detections)
+            results = self._extract_ocr_results(paddle_results)
             
             # Update processing stats
             processing_time = time.time() - start_time
@@ -127,16 +124,16 @@ class EasyOCREngine(BaseOCREngine):
             return results
             
         except Exception as e:
-            self.logger.error(f"EasyOCR extraction failed: {e}")
+            self.logger.error(f"PaddleOCR extraction failed: {e}")
             self.processing_stats['errors'] += 1
             return []
     
-    def _prepare_for_easyocr(self, image: np.ndarray) -> np.ndarray:
+    def _prepare_for_paddleocr(self, image: np.ndarray) -> np.ndarray:
         """
-        Minimal conversion for EasyOCR compatibility
+        Minimal conversion for PaddleOCR compatibility
         Only format conversion, no enhancement (done by preprocessing pipeline)
         """
-        # EasyOCR expects RGB format
+        # PaddleOCR expects RGB format
         if len(image.shape) == 3:
             if image.shape[2] == 3:
                 # Assume BGR from OpenCV, convert to RGB
@@ -147,16 +144,24 @@ class EasyOCREngine(BaseOCREngine):
             # Convert grayscale to RGB
             return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     
-    def _extract_ocr_results(self, detections: List) -> List[OCRResult]:
+    def _extract_ocr_results(self, paddle_results: List) -> List[OCRResult]:
         """
-        Extract OCRResult objects from EasyOCR detections
+        Extract OCRResult objects from PaddleOCR results
         Minimal processing - just format conversion
         """
         results = []
         
-        for detection in detections:
-            if len(detection) >= 3:
-                bbox_points, text, confidence = detection
+        # PaddleOCR returns nested structure
+        if not paddle_results or not paddle_results[0]:
+            return results
+        
+        for detection in paddle_results[0]:
+            if len(detection) >= 2:
+                bbox_points, text_info = detection
+                
+                # Extract text and confidence
+                text = text_info[0] if text_info and len(text_info) > 0 else ""
+                confidence = text_info[1] if text_info and len(text_info) > 1 else 0.0
                 
                 # Filter very low confidence results
                 if not text.strip() or confidence <= 0.1:
@@ -175,9 +180,10 @@ class EasyOCREngine(BaseOCREngine):
                     bbox=bbox,
                     level="word",
                     metadata={
-                        'detection_method': 'easyocr',
+                        'detection_method': 'paddleocr',
                         'polygon_points': bbox_points,
-                        'original_confidence': confidence
+                        'original_confidence': confidence,
+                        'has_angle_classification': True
                     }
                 )
                 
@@ -216,26 +222,27 @@ class EasyOCREngine(BaseOCREngine):
                 'orientation_detection': self.supports_orientation_detection,
                 'structure_analysis': self.supports_structure_analysis
             },
-            'optimal_for': ['handwritten_text', 'mixed_text', 'multilingual', 'natural_scenes'],
+            'optimal_for': ['printed_text', 'documents', 'receipts', 'forms', 'structured_text'],
             'performance_profile': {
                 'accuracy': 'high',
-                'speed': 'medium',
+                'speed': 'fast',
                 'memory_usage': 'high' if self.gpu else 'medium',
                 'gpu_required': False,
                 'gpu_recommended': True
             },
             'model_info': {
-                'detection_model': 'CRAFT',
-                'recognition_model': 'CRNN',
+                'detection_model': 'DB',
+                'recognition_model': 'CRNN', 
+                'angle_classification': True,
                 'languages_loaded': self.languages,
                 'gpu_enabled': self.gpu
             }
         }
         
         try:
-            # Try to get EasyOCR version if available
-            import easyocr
-            info['version'] = getattr(easyocr, '__version__', 'unknown')
+            # Try to get PaddleOCR version if available
+            import paddle
+            info['version'] = getattr(paddle, '__version__', 'unknown')
         except:
             info['version'] = 'unknown'
             

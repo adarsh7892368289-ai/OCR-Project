@@ -1,9 +1,7 @@
-import cv2
 import numpy as np
 import pytesseract
 from typing import List, Dict, Any, Optional
 import time
-import re
 from PIL import Image
 import os
 import subprocess
@@ -14,7 +12,6 @@ from ..core.base_engine import (
     DocumentResult, 
     TextRegion,
     BoundingBox,
-    DocumentStructure,
     TextType
 )
 
@@ -44,24 +41,33 @@ def find_tesseract():
     return None
 
 class TesseractEngine(BaseOCREngine):
-    """Tesseract OCR Engine - Excellent for printed text"""
+    """
+    Modern Tesseract OCR Engine - AI-Style Architecture
+    
+    Clean separation of concerns:
+    - Takes preprocessed images as input
+    - Performs pure OCR extraction 
+    - Returns structured results for postprocessing
+    - No internal preprocessing or postprocessing
+    """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__("Tesseract", config)
         self.tesseract_config = self._build_tesseract_config()
+        self.supports_handwriting = False
+        self.supports_multiple_languages = True
+        self.supports_orientation_detection = True
+        self.supports_structure_analysis = True
         
     def _build_tesseract_config(self) -> str:
-        """Build Tesseract configuration string"""
-        config_parts = []
+        """Build optimized Tesseract configuration"""
+        config_parts = ["--oem 1"]  # LSTM neural net mode
         
-        # OCR Engine Mode (LSTM only)
-        config_parts.append("--oem 1")
-        
-        # Page Segmentation Mode
-        psm = self.config.get("psm", 6)  # Default: uniform block of text
+        # Page segmentation mode
+        psm = self.config.get("psm", 6)
         config_parts.append(f"--psm {psm}")
         
-        # Language
+        # Language configuration
         lang = self.config.get("lang", "eng")
         if isinstance(lang, list):
             lang = "+".join(lang)
@@ -72,227 +78,162 @@ class TesseractEngine(BaseOCREngine):
     def initialize(self) -> bool:
         """Initialize Tesseract engine"""
         try:
-            # Auto-find Tesseract
             tesseract_cmd = find_tesseract()
-            if tesseract_cmd:
-                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-                print(f"Found Tesseract at: {tesseract_cmd}")
-            else:
-                print("Tesseract not found. Please install from: https://github.com/UB-Mannheim/tesseract/wiki")
+            if not tesseract_cmd:
+                self.logger.error("Tesseract not found")
                 return False
-            
-            # Test if Tesseract works
-            pytesseract.get_tesseract_version()
+                
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            version = pytesseract.get_tesseract_version()
             self.supported_languages = self._get_available_languages()
+            
             self.is_initialized = True
+            self.model_loaded = True
+            
+            self.logger.info(f"Tesseract {version} initialized with {len(self.supported_languages)} languages")
             return True
+            
         except Exception as e:
-            print(f"Failed to initialize Tesseract: {e}")
+            self.logger.error(f"Tesseract initialization failed: {e}")
             return False
             
     def _get_available_languages(self) -> List[str]:
-        """Get available Tesseract languages"""
+        """Get available languages"""
         try:
             langs = pytesseract.get_languages()
             return [lang for lang in langs if lang != 'osd']
         except:
-            return ["eng"]  # Default fallback
+            return ["eng"]
             
     def get_supported_languages(self) -> List[str]:
         """Get supported languages"""
         return getattr(self, 'supported_languages', ["eng"])
         
-    def process_image(self, image, **kwargs) -> DocumentResult:
-        """Process image with Tesseract OCR"""
+    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> List[OCRResult]:
+        """
+        Process preprocessed image and extract text
+        
+        Args:
+            preprocessed_image: Image from preprocessing pipeline
+            **kwargs: Additional parameters
+            
+        Returns:
+            List[OCRResult]: Raw OCR results for postprocessing
+        """
         start_time = time.time()
         
         try:
-            # Handle different input types
-            if hasattr(image, 'shape'):  # numpy array
-                processed_image = self._enhance_image(image)
-            elif hasattr(image, 'mode'):  # PIL Image
-                processed_image = self._enhance_image(np.array(image))
-            else:
-                raise ValueError(f"Unsupported image type: {type(image)}")
+            if not self.validate_image(preprocessed_image):
+                raise ValueError("Invalid preprocessed image")
             
-            # Convert numpy array to PIL Image
-            if len(processed_image.shape) == 3:
-                pil_image = Image.fromarray(cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB))
-            else:
-                pil_image = Image.fromarray(processed_image)
+            # Convert to PIL Image for Tesseract
+            pil_image = self._numpy_to_pil(preprocessed_image)
             
-            # Get detailed OCR data
-            data = pytesseract.image_to_data(
-                pil_image, 
+            # Extract OCR data
+            ocr_data = pytesseract.image_to_data(
+                pil_image,
                 config=self.tesseract_config,
                 output_type=pytesseract.Output.DICT
             )
             
-            # Parse results
-            results = self._parse_tesseract_data(data)
+            # Convert to OCRResult objects
+            results = self._extract_ocr_results(ocr_data)
             
-            # Get full text
-            full_text = self._extract_full_text(results)
-            
-            # Create text regions from results
-            text_regions = self._create_text_regions(results)
-            
-            # Calculate statistics
+            # Update stats
             processing_time = time.time() - start_time
-            confidence_score = self.calculate_confidence(results)
+            self.processing_stats['total_processed'] += 1
+            self.processing_stats['total_time'] += processing_time
             
-            # Create OCR result for the page
-            page_result = OCRResult(
-                text=full_text,
-                confidence=confidence_score,
-                regions=text_regions,
-                processing_time=processing_time,
-                bbox=None,
-                level="page"
-            )
-            
-            # Create document result with correct constructor
-            return DocumentResult(
-                pages=[page_result],
-                metadata={'image_stats': {}},
-                processing_time=processing_time,
-                engine_name=self.name,
-                confidence_score=confidence_score
-            )
+            return results
             
         except Exception as e:
-            print(f"Tesseract processing error: {e}")
-            
-            # Return properly constructed empty result
-            empty_page = OCRResult(
-                text="",
-                confidence=0.0,
-                regions=[],
-                processing_time=time.time() - start_time
-            )
-            
-            return DocumentResult(
-                pages=[empty_page],
-                metadata={'error': str(e)},
-                processing_time=time.time() - start_time,
-                engine_name=self.name,
-                confidence_score=0.0
-            )
-            
-    def _enhance_image(self, image: np.ndarray) -> np.ndarray:
-        """Enhanced image preprocessing for better OCR"""
+            self.logger.error(f"OCR extraction failed: {e}")
+            self.processing_stats['errors'] += 1
+            return []
+    
+    def _numpy_to_pil(self, image: np.ndarray) -> Image.Image:
+        """Convert numpy array to PIL Image"""
         if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if image.shape[2] == 3:
+                # Assume BGR, convert to RGB
+                image_rgb = image[:, :, ::-1]  # BGR to RGB
+                return Image.fromarray(image_rgb)
+            else:
+                return Image.fromarray(image)
         else:
-            gray = image.copy()
-            
-        # Noise reduction
-        denoised = cv2.fastNlMeansDenoising(gray)
-        
-        # Enhance contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(denoised)
-        
-        # Threshold the image
-        _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        return thresh
-        
-    def _parse_tesseract_data(self, data: Dict) -> List[OCRResult]:
-        """Parse Tesseract output data into OCRResult objects"""
+            # Grayscale
+            return Image.fromarray(image)
+    
+    def _extract_ocr_results(self, data: Dict) -> List[OCRResult]:
+        """Extract OCRResult objects from Tesseract data"""
         results = []
         
         for i in range(len(data['text'])):
             text = data['text'][i].strip()
             conf = float(data['conf'][i])
             
-            if text and conf > 0:  # Filter empty text and invalid confidence
-                bbox = BoundingBox(
-                    x=int(data['left'][i]),
-                    y=int(data['top'][i]),
-                    width=int(data['width'][i]),
-                    height=int(data['height'][i]),
-                    confidence=conf / 100.0
-                )
+            if not text or conf <= 0:
+                continue
                 
-                # Create OCRResult with correct parameter names
-                result = OCRResult(
-                    text=text,
-                    confidence=conf / 100.0,
-                    bbox=bbox,
-                    level="word"
-                )
-                
-                # Check text attribute
-                if hasattr(result, 'text') and result.text.strip():
-                    results.append(result)
-                    
-        return results
-
-    def _create_text_regions(self, results: List[OCRResult]) -> List[TextRegion]:
-        """Create text regions from OCR results"""
-        text_regions = []
-        
-        for i, result in enumerate(results):
-            region = TextRegion(
-                text=result.text,
-                confidence=result.confidence,
-                bbox=result.bbox,
-                text_type=TextType.PRINTED,
-                reading_order=i
+            bbox = BoundingBox(
+                x=int(data['left'][i]),
+                y=int(data['top'][i]),
+                width=int(data['width'][i]),
+                height=int(data['height'][i]),
+                confidence=conf / 100.0
             )
-            text_regions.append(region)
             
-        return text_regions
-        
-    def _extract_full_text(self, results: List[OCRResult]) -> str:
-        """Extract full text from OCR results"""
-        if not results:
-            return ""
+            result = OCRResult(
+                text=text,
+                confidence=conf / 100.0,
+                bbox=bbox,
+                level="word",
+                metadata={
+                    'tesseract_level': data.get('level', [0])[i] if 'level' in data else 5,
+                    'block_num': data.get('block_num', [0])[i] if 'block_num' in data else 0,
+                    'par_num': data.get('par_num', [0])[i] if 'par_num' in data else 0,
+                    'line_num': data.get('line_num', [0])[i] if 'line_num' in data else 0,
+                    'word_num': data.get('word_num', [0])[i] if 'word_num' in data else 0
+                }
+            )
             
-        # Sort results by position (top to bottom, left to right)
-        sorted_results = sorted(results, key=lambda r: (r.bbox.y if r.bbox else 0, r.bbox.x if r.bbox else 0))
-        
-        # Group results by lines based on Y position
-        lines = []
-        current_line = []
-        current_y = -1
-        line_threshold = 10  # pixels
-        
-        for result in sorted_results:
-            if result.bbox:  # Check if bbox exists
-                y_pos = result.bbox.y
-                
-                if current_y == -1 or abs(y_pos - current_y) <= line_threshold:
-                    current_line.append(result)
-                    current_y = y_pos
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = [result]
-                    current_y = y_pos
-                
-        if current_line:
-            lines.append(current_line)
+            results.append(result)
             
-        # Combine lines into full text
-        full_text_lines = []
-        for line in lines:
-            # Sort words in line by X position
-            line_sorted = sorted(line, key=lambda r: r.bbox.x if r.bbox else 0)
-            line_text = " ".join(result.text for result in line_sorted if result.text)
-            if line_text.strip():  # Only add non-empty lines
-                full_text_lines.append(line_text)
-            
-        return "\n".join(full_text_lines)
+        return results
+    
+    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[List[OCRResult]]:
+        """Process multiple images efficiently"""
+        results = []
+        for image in images:
+            image_results = self.process_image(image, **kwargs)
+            results.append(image_results)
+        return results
+    
+    def get_engine_info(self) -> Dict[str, Any]:
+        """Get engine information"""
+        info = {
+            'name': self.name,
+            'version': None,
+            'type': 'traditional_ocr',
+            'supported_languages': self.get_supported_languages(),
+            'capabilities': {
+                'handwriting': self.supports_handwriting,
+                'multiple_languages': self.supports_multiple_languages,
+                'orientation_detection': self.supports_orientation_detection,
+                'structure_analysis': self.supports_structure_analysis
+            },
+            'optimal_for': ['printed_text', 'documents', 'books', 'forms'],
+            'performance_profile': {
+                'accuracy': 'high',
+                'speed': 'medium',
+                'memory_usage': 'low',
+                'gpu_required': False
+            }
+        }
         
-    def calculate_confidence(self, results: List[OCRResult]) -> float:
-        """Calculate overall confidence score"""
-        if not results:
-            return 0.0
-        
-        confidences = [result.confidence for result in results if result.confidence > 0]
-        if not confidences:
-            return 0.0
+        try:
+            info['version'] = str(pytesseract.get_tesseract_version())
+        except:
+            info['version'] = 'unknown'
             
-        return sum(confidences) / len(confidences)
+        return info
