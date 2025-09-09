@@ -16,11 +16,11 @@ from ..utils.logger import get_logger
 @dataclass
 class DocumentStructure:
     """Basic document structure representation"""
-    blocks: List[Any] = None
-    lines: List[Any] = None
-    paragraphs: List[Any] = None
+    blocks: Optional[List[Any]] = None
+    lines: Optional[List[Any]] = None
+    paragraphs: Optional[List[Any]] = None
     document_type: str = "unknown"
-    reading_order: List[int] = None
+    reading_order: Optional[List[int]] = None
     
     def __post_init__(self):
         if self.blocks is None:
@@ -40,7 +40,7 @@ class ProcessingContext:
     language: str = "en"
     document_type: str = "general"
     quality_score: float = 0.0
-    metadata: Dict[str, Any] = None
+    metadata: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
         if self.metadata is None:
@@ -177,7 +177,7 @@ class DocumentProcessor:
 
 
 # Commonly imported classes/functions that might be expected
-def create_processing_context(domain: str = None, language: str = "en") -> ProcessingContext:
+def create_processing_context(domain: Optional[str] = None, language: str = "en") -> ProcessingContext:
     """Helper function to create processing context"""
     return ProcessingContext(domain=domain, language=language)
 
@@ -212,41 +212,13 @@ def analyze_document_type(ocr_result: OCRResult) -> str:
         return 'contract'
     else:
         return 'general'
-# Add these classes to your src/postprocessing/document_processor.py file
-# (Add after the existing classes, before the import aliases section)
-
 from enum import Enum
 
 class ProcessingStage(Enum):
     """Processing stages for post-processing pipeline"""
     TEXT_CORRECTION = "text_correction"
     CONFIDENCE_FILTERING = "confidence_filtering"
-    LAYOUT_ANALYSIS = "layout_analysis" 
-    RESULT_FORMATTING = "result_formatting"
-    QUALITY_ASSESSMENT = "quality_assessment"
-    DOCUMENT_STRUCTURING = "document_structuring"
-
-# Add these classes to your src/postprocessing/document_processor.py file
-# (Add after the existing classes, before the import aliases section)
-
-from enum import Enum
-
-class ProcessingStage(Enum):
-    """Processing stages for post-processing pipeline"""
-    TEXT_CORRECTION = "text_correction"
-    CONFIDENCE_FILTERING = "confidence_filtering"
-    LAYOUT_ANALYSIS = "layout_analysis" 
-    RESULT_FORMATTING = "result_formatting"
-    QUALITY_ASSESSMENT = "quality_assessment"
-    DOCUMENT_STRUCTURING = "document_structuring"
-
-from enum import Enum
-
-class ProcessingStage(Enum):
-    """Processing stages for post-processing pipeline"""
-    TEXT_CORRECTION = "text_correction"
-    CONFIDENCE_FILTERING = "confidence_filtering"
-    LAYOUT_ANALYSIS = "layout_analysis" 
+    LAYOUT_ANALYSIS = "layout_analysis"
     RESULT_FORMATTING = "result_formatting"
     QUALITY_ASSESSMENT = "quality_assessment"
     DOCUMENT_STRUCTURING = "document_structuring"
@@ -288,7 +260,6 @@ __all__ = [
     'ProcessingStage',
     'DocumentType',
     'ProcessingPipeline',
-    'TextCorrector',
     'create_processing_context',
     'create_processing_result',
     'analyze_document_type'

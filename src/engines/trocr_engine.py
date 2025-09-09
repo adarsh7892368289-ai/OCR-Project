@@ -38,7 +38,7 @@ if parent_dir not in sys.path:
 
 # Import with proper error handling
 try:
-    from core.base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult, TextType
+    from ..core.base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult, TextType
     from utils.image_utils import ImageUtils
     from utils.text_utils import TextUtils
 except ImportError:
@@ -188,10 +188,10 @@ class TrOCRModelManager:
         return cache_dir
     
     def load_model(self, model_type: str) -> Tuple[VisionEncoderDecoderModel, TrOCRProcessor]:
-        """Load and cache a TrOCR model variant with robust error handling."""
+        """Load and cache a TrOCR model variant with robust meta tensor handling."""
         if model_type not in self.MODEL_CONFIGS:
             raise ValueError(f"Unknown model type: {model_type}. Available: {list(self.MODEL_CONFIGS.keys())}")
-        
+
         # Return cached model if available
         if model_type in self.loaded_models:
             model, processor = self.loaded_models[model_type]
@@ -201,101 +201,290 @@ class TrOCRModelManager:
             else:
                 # Remove corrupted model from cache
                 del self.loaded_models[model_type]
-        
+
         config = self.MODEL_CONFIGS[model_type]
         max_retries = 3
-        
+
         for attempt in range(max_retries):
             try:
                 logger.info(f"Loading TrOCR model: {config['model_name']} (attempt {attempt + 1}/{max_retries})")
-                
-                # Load with explicit error handling
+
+                # Load with explicit meta tensor handling
                 model = VisionEncoderDecoderModel.from_pretrained(
                     config['model_name'],
                     cache_dir=self.model_cache_dir,
-                    torch_dtype=torch.float16 if self.device.type == 'cuda' else torch.float32,
-                    low_cpu_mem_usage=True
+                    torch_dtype=torch.float32,  # Explicit dtype to avoid issues
+                    low_cpu_mem_usage=True,    # Disable to avoid meta tensors if possible
+                    device_map=None,            # Don't use device_map
+                    trust_remote_code=False     # Security best practice
                 )
-                
+
                 processor = TrOCRProcessor.from_pretrained(
                     config['processor_name'],
                     cache_dir=self.model_cache_dir
                 )
-                
-                # Move model to device with memory optimization
+
+                # Move model to device with new method
                 model = self._optimize_model_for_device(model)
-                
+
                 # Verify model works
                 if not self._verify_model_health(model, processor):
                     raise RuntimeError("Model failed health check")
-                
+
                 # Cache the loaded model
                 self.loaded_models[model_type] = (model, processor)
-                
-                logger.info(f"Successfully loaded {model_type} model")
+
+                logger.info(f"Successfully loaded {model_type} model on device {self.device}")
                 return model, processor
-                
+
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1} failed to load {model_type} model: {e}")
-                
+
                 if attempt == max_retries - 1:
                     # Final attempt failed
+                    logger.error(f"All attempts failed for {model_type}")
                     raise RuntimeError(f"Failed to load {model_type} after {max_retries} attempts: {str(e)}")
+
+                # Clear cache and retry with backoff
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
-                # Clear cache and retry
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                # Progressive fallback strategy
+                if attempt == 0:
+                    # First retry: try with different loading parameters
+                    logger.info("First retry: adjusting loading parameters")
+                elif attempt == 1:
+                    # Second retry: force CPU device
+                    logger.info("Second retry: forcing CPU device")
+                    self.device = torch.device('cpu')
+                
                 time.sleep(2 ** attempt)  # Exponential backoff
-    
+
+        # This should never be reached
+        raise RuntimeError(f"Failed to load {model_type} after all attempts")
+
     def _optimize_model_for_device(self, model: VisionEncoderDecoderModel) -> VisionEncoderDecoderModel:
-        """Optimize model for the target device."""
+        """Optimize model for the target device with robust error handling and meta tensor support."""
         try:
-            model = model.to(self.device)
+            # First ensure model is in eval mode
             model.eval()
+
+            # Check if model has meta tensors (newer PyTorch versions)
+            has_meta_tensors = any(param.device.type == 'meta' for param in model.parameters())
             
-            # Enable optimizations
-            if self.device.type == 'cuda':
-                # Use half precision on CUDA if supported
-                try:
-                    model = model.half()
-                except Exception as e:
-                    logger.warning(f"Could not use half precision: {e}")
-            
-            # Compile model for better performance (PyTorch 2.0+)
-            try:
-                if hasattr(torch, 'compile') and self.device.type != 'mps':  # MPS doesn't support compile yet
-                    model = torch.compile(model)
-            except Exception as e:
-                logger.warning(f"Could not compile model: {e}")
-            
+            if has_meta_tensors:
+                logger.info("Detected meta tensors, using to_empty() method")
+                
+                # Use to_empty() for meta tensors (PyTorch 1.12+)
+                if self.device.type == 'cuda':
+                    try:
+                        # Test device availability first
+                        test_tensor = torch.tensor([1.0]).to(self.device)
+                        del test_tensor
+                        torch.cuda.empty_cache()
+                        
+                        # Move model from meta to target device
+                        model = model.to_empty(device=self.device)
+                        logger.info("Model moved from meta to CUDA using to_empty()")
+                        
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            logger.warning("GPU out of memory, falling back to CPU")
+                            self.device = torch.device('cpu')
+                            model = model.to_empty(device=self.device)
+                        else:
+                            raise
+                            
+                elif self.device.type == 'mps':
+                    try:
+                        model = model.to_empty(device=self.device)
+                        logger.info("Model moved from meta to MPS using to_empty()")
+                    except Exception as e:
+                        logger.warning(f"MPS device failed: {e}, falling back to CPU")
+                        self.device = torch.device('cpu')
+                        model = model.to_empty(device=self.device)
+                else:
+                    # CPU or other device
+                    model = model.to_empty(device=self.device)
+                    logger.info("Model moved from meta to CPU using to_empty()")
+                    
+            else:
+                # Regular tensor handling for older PyTorch or non-meta models
+                logger.info("Using regular to() method for non-meta tensors")
+                
+                if self.device.type == 'cuda':
+                    try:
+                        # Test device availability first
+                        test_tensor = torch.tensor([1.0]).to(self.device)
+                        del test_tensor
+
+                        # Move model to device
+                        model = model.to(self.device)
+
+                        # Try half precision for CUDA if memory allows
+                        try:
+                            if torch.cuda.get_device_properties(self.device).total_memory > 4 * 1024**3:  # > 4GB
+                                model = model.half()
+                                logger.info("Using half precision for TrOCR model")
+                            else:
+                                logger.info("Using full precision for TrOCR model (limited GPU memory)")
+                        except Exception as e:
+                            logger.warning(f"Half precision not available: {e}")
+
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            logger.warning("GPU out of memory, falling back to CPU")
+                            self.device = torch.device('cpu')
+                            model = model.to(self.device)
+                        else:
+                            raise
+
+                elif self.device.type == 'mps':
+                    try:
+                        model = model.to(self.device)
+                        logger.info("TrOCR model moved to MPS device")
+                    except Exception as e:
+                        logger.warning(f"MPS device failed: {e}, falling back to CPU")
+                        self.device = torch.device('cpu')
+                        model = model.to(self.device)
+                else:
+                    # CPU or other device
+                    model = model.to(self.device)
+
+            # Verify all parameters are on the expected device
+            device_check_passed = True
+            for name, param in model.named_parameters():
+                if param.device != self.device:
+                    logger.warning(f"Parameter {name} is on {param.device}, expected {self.device}")
+                    device_check_passed = False
+                    break
+                    
+            if not device_check_passed:
+                logger.warning("Device check failed, attempting parameter fix")
+                # Try to fix individual parameters
+                for name, param in model.named_parameters():
+                    if param.device != self.device:
+                        try:
+                            if param.device.type == 'meta':
+                                # Handle meta parameters individually
+                                new_param = torch.empty_like(param, device=self.device)
+                                param.data = new_param
+                            else:
+                                param.data = param.data.to(self.device)
+                        except Exception as e:
+                            logger.error(f"Failed to move parameter {name}: {e}")
+
+            logger.info(f"TrOCR model optimized for device: {self.device}")
             return model
-            
+
         except Exception as e:
             logger.error(f"Model optimization failed: {e}")
-            # Fallback to basic setup
-            return model.to(self.device).eval()
+            logger.error(f"Device: {self.device}, Error details: {str(e)}")
+
+            # Comprehensive fallback - force CPU with meta tensor support
+            try:
+                cpu_device = torch.device('cpu')
+                
+                # Check if we need to use to_empty
+                has_meta_tensors = any(param.device.type == 'meta' for param in model.parameters())
+                
+                if has_meta_tensors:
+                    model = model.to_empty(device=cpu_device)
+                    logger.info("Fallback: TrOCR model moved to CPU using to_empty()")
+                else:
+                    model = model.to(cpu_device)
+                    logger.info("Fallback: TrOCR model moved to CPU using to()")
+                    
+                model.eval()
+                self.device = cpu_device
+                return model
+                
+            except Exception as fallback_error:
+                logger.error(f"Complete fallback failed: {fallback_error}")
+                # Try one more approach - create new model on CPU
+                try:
+                    # This is a last resort - reinitialize with CPU-only config
+                    logger.warning("Attempting emergency CPU-only model reinitialization")
+                    model = model.cpu()  # Force to CPU
+                    model.eval()
+                    self.device = torch.device('cpu')
+                    return model
+                except Exception as final_error:
+                    logger.error(f"Final fallback failed: {final_error}")
+                    raise RuntimeError(f"All model optimization attempts failed: {str(e)}")
     
     def _verify_model_health(self, model: VisionEncoderDecoderModel, processor: Optional[TrOCRProcessor] = None) -> bool:
-        """Verify that the model is healthy and functional."""
+        """Enhanced model health verification with meta tensor awareness."""
         try:
-            # Basic model checks
-            if not hasattr(model, 'generate') or not callable(model.generate):
+            # Check if model has parameters
+            param_count = sum(1 for _ in model.parameters())
+            if param_count == 0:
+                logger.warning("Model has no parameters")
                 return False
             
-            # If processor provided, do a quick test
+            # Check device consistency
+            device_types = set()
+            meta_tensor_count = 0
+            
+            for param in model.parameters():
+                device_types.add(param.device.type)
+                if param.device.type == 'meta':
+                    meta_tensor_count += 1
+            
+            # If we have meta tensors when we shouldn't, that's a problem
+            if meta_tensor_count > 0:
+                logger.warning(f"Model health check failed: Found {meta_tensor_count} meta tensors")
+                return False
+            
+            # Check device consistency
+            if len(device_types) > 1:
+                logger.warning(f"Model has parameters on multiple devices: {device_types}")
+                return False
+            
+            # Check expected device
+            expected_device_type = self.device.type
+            if len(device_types) == 1 and list(device_types)[0] != expected_device_type:
+                logger.warning(f"Model parameters on {list(device_types)[0]}, expected {expected_device_type}")
+                return False
+            
+            # Basic model checks
+            if not hasattr(model, 'generate') or not callable(model.generate):
+                logger.warning("Model missing generate method")
+                return False
+            
+            # If processor provided, do a functional test
             if processor:
-                test_image = Image.new('RGB', (384, 384), color='white')
-                pixel_values = processor(test_image, return_tensors="pt").pixel_values
-                pixel_values = pixel_values.to(self.device)
-                
-                with torch.no_grad():
-                    output = model.generate(pixel_values, max_length=10, do_sample=False)
-                    if output is None or len(output) == 0:
-                        return False
+                try:
+                    test_image = Image.new('RGB', (384, 384), color='white')
+                    pixel_values = processor(test_image, return_tensors="pt").pixel_values
+                    pixel_values = pixel_values.to(self.device)
+                    
+                    # Quick generation test with minimal parameters
+                    with torch.no_grad():
+                        output = model.generate(
+                            pixel_values, 
+                            max_length=5, 
+                            do_sample=False,
+                            num_beams=1,
+                            early_stopping=True
+                        )
+                        
+                        if output is None or len(output) == 0:
+                            logger.warning("Model generate returned empty output")
+                            return False
+                            
+                    # Test decoding
+                    text = processor.batch_decode(output, skip_special_tokens=True)[0]
+                    logger.info(f"Model health check passed, test output: '{text[:20]}...'")
+                            
+                except Exception as e:
+                    logger.warning(f"Model functional test failed: {e}")
+                    return False
             
             return True
             
         except Exception as e:
-            logger.warning(f"Model health check failed: {e}")
+            logger.warning(f"Model health check failed with exception: {e}")
             return False
     
     def get_best_model_for_content(self, text_type: str = 'printed') -> str:

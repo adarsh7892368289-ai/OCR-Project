@@ -63,28 +63,51 @@ class PaddleOCREngine(BaseOCREngine):
     def _initialize_paddleocr(self):
         """Initializes the PaddleOCR engine and handles common errors."""
         try:
+            self.logger.info("Starting PaddleOCR initialization...")
             # Critical fix for OMP: Error #15
             os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+            self.logger.info("Set KMP_DUPLICATE_LIB_OK=TRUE")
 
             from paddleocr import PaddleOCR
+            self.logger.info("PaddleOCR imported successfully")
 
-            # This will determine if a GPU is available and use it
-            use_gpu = len(os.getenv('CUDA_VISIBLE_DEVICES', '')) > 0
+            # Check PaddleOCR version and use appropriate parameters
+            try:
+                self.logger.info("Attempting modern API initialization...")
+                # Try newer PaddleOCR API first (v2.6+)
+                self.ocr = PaddleOCR(
+                    use_angle_cls=True,
+                    lang='en'
+                )
+                self.logger.info("PaddleOCR initialized successfully with modern API")
+                self.logger.info(f"PaddleOCR object created: {type(self.ocr)}")
+            except TypeError as te:
+                self.logger.warning(f"Modern API failed with TypeError: {te}")
+                # Fallback to older API if use_gpu parameter is not supported
+                try:
+                    self.logger.info("Attempting legacy API initialization...")
+                    self.ocr = PaddleOCR(
+                        use_angle_cls=True,
+                        lang='en'
+                    )
+                    self.logger.info("PaddleOCR initialized successfully with legacy API")
+                    self.logger.info(f"PaddleOCR object created: {type(self.ocr)}")
+                except Exception as fallback_error:
+                    self.logger.warning(f"Legacy API failed: {fallback_error}, trying minimal config")
+                    self.logger.info("Attempting minimal config initialization...")
+                    # Minimal configuration as last resort
+                    self.ocr = PaddleOCR(lang='en')
+                    self.logger.info("PaddleOCR initialized with minimal configuration")
+                    self.logger.info(f"PaddleOCR object created: {type(self.ocr)}")
 
-            # Suppress specific logging from PaddleOCR
-            self.ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang='en',
-                use_gpu=use_gpu,
-                show_log=False
-            )
-            self.logger.info(f"PaddleOCR initialized successfully. GPU enabled: {use_gpu}")
-
-        except ImportError:
-            self.logger.error("PaddleOCR or its dependencies are not installed. Run: pip install paddleocr paddlepaddle")
+        except ImportError as ie:
+            self.logger.error(f"PaddleOCR import failed: {ie}")
             self.ocr = None
         except Exception as e:
             self.logger.error(f"PaddleOCR initialization failed: {e}")
+            self.logger.error(f"Exception type: {type(e)}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             self.ocr = None
 
     def extract_text(self, image_path: str) -> List[Dict[str, Any]]:
@@ -293,27 +316,66 @@ class PaddleOCREngine(BaseOCREngine):
         return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
 
     def _extract_full_text(self, results: List[OCRResult]) -> str:
-        """Extract full text preserving reading order"""
+        """Extract full text preserving reading order with improved line detection"""
         if not results:
             return ""
 
-        # Sort by Y coordinate first, then X coordinate with null safety
-        sorted_results = sorted(results, key=lambda r: (r.bbox.y if r.bbox else 0, r.bbox.x if r.bbox else 0))
+        # Sort by Y coordinate first, then X coordinate with null safety and attribute checks
+        sorted_results = sorted(results, key=lambda r: (
+            r.bbox.y if (r.bbox is not None and hasattr(r.bbox, 'y')) else 0,
+            r.bbox.x if (r.bbox is not None and hasattr(r.bbox, 'x')) else 0
+        ))
 
-        # Group into lines
+        # Improved line detection with adaptive threshold
+        lines = self._group_text_into_lines(sorted_results)
+
+        # Combine lines into full text with better formatting
+        full_text_lines = []
+        for line in lines:
+            line_text = self._format_line_text(line)
+            if line_text.strip():  # Only add non-empty lines
+                full_text_lines.append(line_text)
+
+        return "\n".join(full_text_lines)
+
+    def _group_text_into_lines(self, sorted_results: List[OCRResult]) -> List[List[OCRResult]]:
+        """Group text regions into lines with improved algorithm"""
         lines = []
         current_line = []
         last_y = -1
-        y_threshold = 30  # Increased threshold for better line grouping
+
+        # Calculate adaptive threshold based on text height statistics
+        if sorted_results:
+            heights = []
+            for r in sorted_results:
+                if (r.bbox is not None and hasattr(r.bbox, 'height') and
+                    isinstance(r.bbox.height, (int, float))):
+                    heights.append(r.bbox.height)
+            avg_height = np.mean(heights) if heights else 20
+            y_threshold = max(8, avg_height * 0.6)  # Adaptive threshold
+        else:
+            y_threshold = 15  # Default for receipt text
+
+        self.logger.debug(f"Using Y-threshold: {y_threshold}")
 
         for result in sorted_results:
-            if result.bbox:  # FIXED: Check if bbox exists
+            if result.bbox is not None and hasattr(result.bbox, 'y') and hasattr(result.bbox, 'height'):  # Check if bbox exists and has attributes
                 y_pos = result.bbox.y
+                height = result.bbox.height
 
-                if last_y == -1 or abs(y_pos - last_y) <= y_threshold:
+                # Check if this text belongs to current line
+                if last_y == -1:
+                    # First text region
                     current_line.append(result)
                     last_y = y_pos
+                elif abs(y_pos - last_y) <= y_threshold:
+                    # Same line
+                    current_line.append(result)
+                    # Update last_y to the median of current line Y positions
+                    current_y_positions = [r.bbox.y for r in current_line if r.bbox is not None and hasattr(r.bbox, 'y')]
+                    last_y = np.median(current_y_positions) if current_y_positions else last_y
                 else:
+                    # New line
                     if current_line:
                         lines.append(current_line)
                     current_line = [result]
@@ -322,16 +384,60 @@ class PaddleOCREngine(BaseOCREngine):
         if current_line:
             lines.append(current_line)
 
-        # Combine lines into full text
-        full_text_lines = []
-        for line in lines:
-            # Sort words in line by X position with null safety
-            line_sorted = sorted(line, key=lambda r: r.bbox.x if r.bbox else 0)
-            line_text = " ".join(result.text for result in line_sorted if result.text)
-            if line_text.strip():  # Only add non-empty lines
-                full_text_lines.append(line_text)
+        self.logger.debug(f"Grouped into {len(lines)} lines")
+        return lines
 
-        return "\n".join(full_text_lines)
+    def _format_line_text(self, line: List[OCRResult]) -> str:
+        """Format a line of text with proper spacing and column handling"""
+        if not line:
+            return ""
+
+        # Filter out results without bounding boxes and sort by X position
+        valid_results = [r for r in line if r.bbox is not None]
+        if not valid_results:
+            return ""
+
+        line_sorted = sorted(valid_results, key=lambda r: r.bbox.x if (r.bbox is not None and hasattr(r.bbox, 'x')) else 0)
+
+        # Detect potential columns (large horizontal gaps)
+        formatted_parts = []
+        current_column = []
+
+        for i, result in enumerate(line_sorted):
+            if result.bbox is None:
+                continue
+
+            current_column.append(result)
+
+            # Check if next item is in a different column
+            if i < len(line_sorted) - 1:
+                next_result = line_sorted[i + 1]
+                if next_result.bbox is not None and result.bbox is not None:
+                    next_x = next_result.bbox.x
+                    current_x_end = result.bbox.x + result.bbox.width
+
+                    # If there's a significant gap, treat as column separator
+                    gap = next_x - current_x_end
+                    avg_height = np.mean([r.bbox.height for r in valid_results if r.bbox]) if valid_results else 20
+
+                    if gap > avg_height * 2:  # Significant gap indicates column break
+                        # Format current column
+                        column_text = " ".join(r.text for r in current_column if r.text)
+                        formatted_parts.append(column_text)
+                        current_column = []
+
+        # Add remaining column
+        if current_column:
+            column_text = " ".join(r.text for r in current_column if r.text)
+            formatted_parts.append(column_text)
+
+        # Join columns with appropriate separator
+        if len(formatted_parts) > 1:
+            # For receipts, use tab-like separation for columns
+            return " | ".join(formatted_parts)
+        else:
+            # Single column, use normal spacing
+            return " ".join(r.text for r in line_sorted if r.text)
 
     def _calculate_image_stats(self, image: np.ndarray) -> Dict[str, Any]:
         """Calculate image statistics"""

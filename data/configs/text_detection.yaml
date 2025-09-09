@@ -1,155 +1,33 @@
-# data/configs/text_detection.yaml
-# Advanced Text Detection Configuration
+# OPTIMIZED PARAMETERS for form documents
+method: "mser"
+confidence_threshold: 0.75  # Increased from 0.5
 
-# Detection method selection
-# Options: traditional, craft, east, mser, hybrid, auto
-method: "auto"
-
-# General detection parameters
-confidence_threshold: 0.5
-nms_threshold: 0.4
-min_region_area: 100
-max_region_area: 100000
-
-# Traditional detection methods
 traditional:
-  min_text_size: 10
-  max_text_size: 300
+  min_text_size: 25     # Increased from 10
+  max_text_size: 150    # Reduced from 300
   
-  # MSER parameters
   mser:
-    min_area: 60
-    max_area: 14400
-    max_variation: 0.25
-    min_diversity: 0.2
-    max_evolution: 200
-    area_threshold: 1.01
-    min_margin: 0.003
-    edge_blur_size: 5
-  
-  # Morphological operations
-  morphological:
-    kernel_size: [15, 5]
-    kernel_type: "rect"  # rect, ellipse, cross
-    operation: "close"   # close, open, gradient
-    iterations: 1
-  
-  # Gradient-based detection
-  gradient:
-    sobel_kernel_size: 3
-    threshold: 50
-    morphology_kernel: [9, 1]
+    min_area: 300       # Increased from 60
+    max_area: 5000      # Reduced from 14400  
+    max_variation: 0.12 # Reduced from 0.25
+    min_diversity: 0.6  # Increased from 0.2
+    max_evolution: 50   # Reduced from 200
+    area_threshold: 3.0 # Increased from 1.01
+    min_margin: 0.02    # Increased from 0.003
 
-# CRAFT (Deep Learning) parameters  
-craft:
-  enabled: true
-  model_path: "./models/craft/craft_mlt_25k.pth"
-  text_threshold: 0.7
-  link_threshold: 0.4
-  low_text: 0.4
-  canvas_size: 1280
-  mag_ratio: 1.5
-  cuda: true
-  
-  # Post-processing
-  min_size: 10
-  watershed_enabled: true
-  local_maxima_min_distance: 5
-
-# EAST parameters
-east:
-  enabled: false
-  model_path: "./models/east/frozen_east_text_detection.pb"
-  confidence_threshold: 0.5
-  nms_threshold: 0.4
-  input_width: 320
-  input_height: 320
-
-# Hybrid detection (combines multiple methods)
-hybrid:
-  enabled: true
-  methods: ["craft", "mser"]  # Methods to combine
-  confidence_weighting: true
-  overlap_threshold: 0.3
-  
-  # Method-specific weights for final confidence calculation
-  method_weights:
-    craft: 0.6
-    mser: 0.4
-    morphological: 0.3
-    gradient: 0.2
-
-# Image preprocessing for detection
-preprocessing:
-  # Image enhancement
-  auto_contrast: true
-  gamma_correction: 1.0
-  
-  # Noise reduction
-  denoise: false
-  denoise_method: "bilateral"  # gaussian, bilateral, morphological
-  
-  # Binarization (for traditional methods)
-  binarize: false
-  binarization_method: "adaptive"  # otsu, adaptive, sauvola
-
-# Post-processing and filtering
 postprocessing:
-  # Region filtering
-  min_aspect_ratio: 0.1
-  max_aspect_ratio: 20.0
-  min_width: 10
-  min_height: 5
-  max_width: 2000
-  max_height: 1000
-  
-  # Overlap handling
-  merge_overlapping: true
-  overlap_threshold: 0.3
-  merge_method: "weighted_average"  # weighted_average, highest_confidence, largest_area
-  
-  # Region validation
-  validate_text_characteristics: true
-  min_edge_density: 0.1
-  max_solidity: 0.95
+  min_aspect_ratio: 0.25  # Increased from 0.1
+  max_aspect_ratio: 12.0  # Reduced from 20.0
+  min_width: 25          # Increased from 10
+  min_height: 15         # Increased from 5
+  overlap_threshold: 0.5  # Increased from 0.3
 
-# Performance optimization
-optimization:
-  # Multi-threading
-  parallel_processing: true
-  max_workers: 4
-  
-  # Memory management
-  batch_processing: false
-  batch_size: 8
-  
-  # Caching
-  cache_preprocessed: false
-  cache_models: true
 
-# Debugging and visualization
-debug:
-  save_intermediate_results: false
-  output_dir: "./debug/text_detection"
-  visualize_detections: false
-  export_regions_json: false
-  
-  # Method comparison
-  benchmark_methods: false
-  benchmark_output: "./benchmark/detection_results.json"
-
-# Model management
-models:
-  auto_download: true
-  model_dir: "./models"
-  
-  # Model URLs (for automatic download)
-  urls:
-    craft: "https://github.com/clovaai/CRAFT-pytorch/releases/download/v1.0/craft_mlt_25k.pth"
-    east: "https://github.com/opencv/opencv_extra/raw/master/testdata/dnn/frozen_east_text_detection.pb"
-
-# Logging
-logging:
-  level: "INFO"
-  log_detections: true
-  performance_logging: true
+# Add this section to your config
+boundary_detection:
+  enabled: true
+  min_document_area_ratio: 0.15
+  max_document_area_ratio: 0.85
+  gaussian_blur_size: 5
+  canny_low: 50
+  canny_high: 150

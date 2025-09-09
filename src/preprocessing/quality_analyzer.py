@@ -466,4 +466,5 @@ class IntelligentQualityAnalyzer:
         if abs(skew) > 5.0:
             warnings.append(f"Significant skew detected: {skew:.1f} degrees")
         
-        return warnings
+# Alias for backward compatibility
+QualityAnalyzer = IntelligentQualityAnalyzer

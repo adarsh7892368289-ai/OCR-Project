@@ -117,16 +117,16 @@ class TextRegion:
 class OCRResult:
     """FIXED: OCR result with compatible constructor for post-processing pipeline"""
     # CRITICAL: Parameter order and naming fixed for pipeline compatibility
-    text: str                                           # Main text (was full_text)
-    confidence: float                                   # Confidence score
-    regions: Optional[List[TextRegion]] = None         # Text regions (was text_regions)
-    processing_time: float = 0.0                       # FIXED: Added missing parameter
-    bbox: Optional[BoundingBox] = None                 # Bounding box (optional)
-    level: str = "line"                               # Processing level
-    language: str = "en"                              # Language
-    text_type: TextType = TextType.UNKNOWN            # Text type
-    rotation_angle: float = 0.0                       # Rotation angle
-    metadata: Dict[str, Any] = field(default_factory=dict)  # Processing metadata (was processing_metadata)
+    text: str                                           
+    confidence: float                                   
+    regions: Optional[List[TextRegion]] = None        
+    processing_time: float = 0.0                       
+    bbox: Optional[BoundingBox] = None                
+    level: str = "line"                               
+    language: str = "en"                              
+    text_type: TextType = TextType.UNKNOWN            
+    rotation_angle: float = 0.0                       
+    metadata: Dict[str, Any] = field(default_factory=dict)  
     
     def __post_init__(self):
         # Handle regions parameter compatibility

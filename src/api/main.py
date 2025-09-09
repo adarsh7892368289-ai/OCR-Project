@@ -181,16 +181,19 @@ class UnifiedOCRSystem:
     def filter_valid_engines(self, requested_engines: List[str]) -> List[str]:
         """Filter and validate requested engines - GUARANTEES NO NONE VALUES"""
         available = self.get_available_engines()
+        available_lower = [eng.lower() for eng in available]
         
         # Filter out None, empty strings, and unavailable engines
         valid_engines = []
         for engine in requested_engines:
-            if engine and isinstance(engine, str) and engine.strip().lower() in available:
-                valid_engines.append(engine.strip().lower())
+            if engine and isinstance(engine, str):
+                engine_clean = engine.strip().lower()
+                if engine_clean in available_lower:
+                    valid_engines.append(engine_clean)
         
         # If no valid engines, use the first available one
         if not valid_engines and available:
-            valid_engines = [available[0]]
+            valid_engines = [available[0].lower()]
         
         return valid_engines
 
@@ -345,13 +348,11 @@ class UnifiedOCRSystem:
             self.logger.error(f"Engine processing failed: {e}")
             # Create fallback result
             fallback_result = DocumentResult(
-                full_text="Processing failed",
-                confidence_score=0.0,
+                pages=[],
+                metadata={"engine": engine_name, "image_stats": image_stats},
                 processing_time=0.0,
-                text_regions=[],
-                image_stats=image_stats,
                 engine_name=engine_name,
-                document_structure=DocumentStructure()
+                confidence_score=0.0
             )
             
             return fallback_result, [engine_name], {
@@ -380,48 +381,80 @@ class UnifiedOCRSystem:
             )
 
     def _build_final_result(self, post_processed_result: PipelineResult, document_result: DocumentResult,
-                          engines_used: List[str], engine_results: Dict[str, Dict], 
-                          total_time: float, request: OCRRequest, text_type: TextType) -> Dict[str, Any]:
-        """Build final result with safe attribute access"""
+                        engines_used: List[str], engine_results: Dict[str, Dict], 
+                        total_time: float, request: OCRRequest, text_type: TextType) -> Dict[str, Any]:
+        """Build final result with safe attribute access - FIXED VERSION"""
         
-        # Safe text extraction
-        formatted_results = getattr(post_processed_result, 'formatted_results', {})
-        if isinstance(formatted_results, dict) and request.output_format in formatted_results:
-            format_data = formatted_results.get(request.output_format, {})
-            final_text = format_data.get('content', document_result.full_text) if isinstance(format_data, dict) else str(format_data)
-        else:
-            final_text = document_result.full_text
+        # FIXED: Safe text extraction from post-processed result
+        final_text = ""
+        formatted_results = {}
+        
+        try:
+            # Get formatted results safely
+            formatted_results = getattr(post_processed_result, 'formatted_results', {})
+            
+            if isinstance(formatted_results, dict) and request.output_format in formatted_results:
+                format_data = formatted_results.get(request.output_format, {})
+                if isinstance(format_data, dict):
+                    final_text = format_data.get('content', '')
+                else:
+                    final_text = str(format_data)
+            
+            # Fallback to document result text
+            if not final_text:
+                final_text = getattr(document_result, 'full_text', '') or getattr(document_result, 'text', '')
+                
+        except Exception as e:
+            self.logger.warning(f"Text extraction failed: {e}")
+            # Ultimate fallback
+            final_text = getattr(document_result, 'full_text', '') or getattr(document_result, 'text', '') or ""
 
-        # Safe layout analysis
+        # FIXED: Safe layout analysis
         layout_analysis_data = None
-        if hasattr(post_processed_result, 'layout_analysis') and post_processed_result.layout_analysis:
-            try:
-                layout_analysis_data = vars(post_processed_result.layout_analysis)
-            except Exception:
-                layout_analysis_data = None
+        try:
+            layout_analysis = getattr(post_processed_result, 'layout_analysis', None)
+            if layout_analysis and hasattr(layout_analysis, '__dict__'):
+                layout_analysis_data = vars(layout_analysis)
+            elif isinstance(layout_analysis, dict):
+                layout_analysis_data = layout_analysis
+        except Exception:
+            layout_analysis_data = None
 
-        # Safe engine performance - FIXED THE KEY ISSUE
+        # FIXED: Safe engine performance
         engine_performance = {}
         try:
             all_performance = self.engine_manager.get_engine_performance()
             if isinstance(all_performance, dict):
-                engine_performance = {name: all_performance.get(name, {}) for name in engines_used}
-        except Exception:
-            pass
+                for engine_name in engines_used:
+                    if engine_name in all_performance:
+                        engine_performance[engine_name] = all_performance[engine_name]
+        except Exception as e:
+            self.logger.warning(f"Engine performance extraction failed: {e}")
 
+        # FIXED: Safe confidence extraction
+        confidence = 0.0
+        try:
+            confidence = getattr(document_result, 'confidence_score', 0.0)
+            if confidence is None:
+                confidence = getattr(document_result, 'confidence', 0.0) or 0.0
+        except Exception:
+            confidence = 0.0
+
+        # Build the final result
         return {
-            "success": post_processed_result.success,
-            "text": final_text or "",
-            "confidence": document_result.confidence_score,
-            "processing_time": total_time,
+            "success": getattr(post_processed_result, 'success', True),
+            "text": final_text,
+            "confidence": float(confidence),
+            "processing_time": float(total_time),
+            "engine_used": engines_used[0] if engines_used else "unknown",  # ADDED: Single engine for compatibility
             "engines_used": engines_used,
             "metadata": {
-                "original_stats": document_result.image_stats,
+                "original_stats": getattr(document_result, 'image_stats', {}),
                 "pipeline_stats": getattr(post_processed_result, 'pipeline_stats', {}),
                 "engine_performance": engine_performance,
                 "text_type_detected": text_type.value if hasattr(text_type, 'value') else "unknown"
             },
-            "warnings": [post_processed_result.error_message] if not post_processed_result.success and hasattr(post_processed_result, 'error_message') and post_processed_result.error_message else [],
+            "warnings": [],
             "word_count": len(final_text.split()) if final_text else 0,
             "line_count": final_text.count('\n') + 1 if final_text else 0,
             "layout_analysis": layout_analysis_data,

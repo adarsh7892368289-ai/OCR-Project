@@ -8,7 +8,10 @@ import logging
 from typing import Dict, List, Any, Optional, Tuple
 import time
 
-from .quality_analyzer import QualityMetrics, ImageType
+try:
+    from .quality_analyzer import QualityMetrics, ImageType
+except ImportError:
+    from src.preprocessing.quality_analyzer import QualityMetrics, ImageType
 
 logger = logging.getLogger(__name__)
 
@@ -460,3 +463,172 @@ class AIImageEnhancer:
         if self.image_cache:
             self.image_cache.clear()
             logger.info("Enhancement cache cleared")
+            
+    # Add these methods to your existing AIImageEnhancer class in image_enhancer.py
+
+    def should_enhance_image(self, image: np.ndarray, 
+                           quality_metrics: Optional[QualityMetrics] = None) -> Tuple[bool, str]:
+        """
+        CONDITIONAL ENHANCEMENT - Decide if enhancement is beneficial
+        
+        Returns:
+            (should_enhance: bool, reason: str)
+        """
+        if quality_metrics is None:
+            return True, "no_quality_metrics_available"
+        
+        # High quality images (>0.75) - skip enhancement
+        if quality_metrics.overall_score > 0.75:
+            return False, f"high_quality_image_score_{quality_metrics.overall_score:.3f}"
+        
+        # Very good quality (0.65-0.75) - conditional enhancement
+        if quality_metrics.overall_score > 0.65:
+            # Only enhance if specific issues exist
+            needs_contrast = quality_metrics.contrast_score < 0.4
+            needs_sharpening = quality_metrics.sharpness_score < 0.5
+            high_noise = quality_metrics.noise_level > 0.3
+            
+            if needs_contrast or needs_sharpening or high_noise:
+                issues = []
+                if needs_contrast: issues.append("low_contrast")
+                if needs_sharpening: issues.append("low_sharpness") 
+                if high_noise: issues.append("high_noise")
+                return True, f"targeted_enhancement_needed_{'+'.join(issues)}"
+            else:
+                return False, f"good_quality_no_issues_score_{quality_metrics.overall_score:.3f}"
+        
+        # Medium quality (0.4-0.65) - standard enhancement
+        if quality_metrics.overall_score > 0.4:
+            return True, f"medium_quality_standard_enhancement_score_{quality_metrics.overall_score:.3f}"
+        
+        # Low quality (<0.4) - always enhance
+        return True, f"low_quality_enhancement_required_score_{quality_metrics.overall_score:.3f}"
+    
+    def smart_enhance_image(self, image: np.ndarray, 
+                          quality_metrics: Optional[QualityMetrics] = None,
+                          force_enhance: bool = False) -> EnhancementResult:
+        """
+        SMART ENHANCEMENT with conditional processing
+        
+        Args:
+            image: Input image
+            quality_metrics: Quality analysis results
+            force_enhance: Force enhancement even if not recommended
+            
+        Returns:
+            EnhancementResult with processing decision info
+        """
+        start_time = time.time()
+        
+        if image is None:
+            return EnhancementResult(
+                enhanced_image=np.zeros((100, 100, 3), dtype=np.uint8),
+                enhancement_applied="failed",
+                processing_time=0.0,
+                warnings=["Input image is None"]
+            )
+        
+        # Decide if enhancement is needed
+        should_enhance, reason = self.should_enhance_image(image, quality_metrics)
+        
+        if not should_enhance and not force_enhance:
+            # Skip enhancement - return original with metadata
+            processing_time = time.time() - start_time
+            
+            logger.info(f"Enhancement SKIPPED: {reason}")
+            
+            return EnhancementResult(
+                enhanced_image=image.copy(),
+                enhancement_applied="skipped",
+                quality_improvement=0.0,
+                processing_time=processing_time,
+                operations_performed=["conditional_skip"],
+                parameters_used={"skip_reason": reason},
+                metadata={
+                    "original_shape": image.shape,
+                    "enhanced_shape": image.shape,
+                    "strategy_used": "conditional_skip",
+                    "skip_reason": reason,
+                    "quality_score": quality_metrics.overall_score if quality_metrics else None
+                },
+                warnings=[f"Enhancement skipped: {reason}"]
+            )
+        
+        # Proceed with regular enhancement
+        logger.info(f"Enhancement PROCEEDING: {reason}")
+        return self.enhance_image(image, None, quality_metrics)
+    
+    def targeted_enhance_image(self, image: np.ndarray,
+                             quality_metrics: QualityMetrics) -> EnhancementResult:
+        """
+        TARGETED ENHANCEMENT - Only fix specific issues
+        
+        For medium-quality images, apply only necessary enhancements
+        """
+        start_time = time.time()
+        enhanced = image.copy()
+        operations = []
+        parameters = {}
+        
+        try:
+            # Convert to grayscale if needed for processing
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                is_color = True
+            else:
+                gray = image.copy()
+                is_color = False
+            
+            # Only fix contrast if really needed
+            if quality_metrics.contrast_score < 0.4:
+                if is_color:
+                    lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+                    l, a, b = cv2.split(lab)
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    l = clahe.apply(l)
+                    enhanced = cv2.merge([l, a, b])
+                    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+                else:
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    enhanced = clahe.apply(enhanced)
+                
+                operations.append("targeted_contrast_enhancement")
+                parameters["clahe"] = {"clip_limit": 2.0, "tile_grid_size": (8, 8)}
+            
+            # Only fix sharpness if really needed
+            if quality_metrics.sharpness_score < 0.5:
+                kernel = np.array([[-0.5,-0.5,-0.5], [-0.5,5,-0.5], [-0.5,-0.5,-0.5]], dtype=np.float32)
+                enhanced = cv2.filter2D(enhanced, -1, kernel)
+                operations.append("targeted_sharpening")
+                parameters["sharpening"] = "mild_laplacian"
+            
+            # Only reduce noise if really needed
+            if quality_metrics.noise_level > 0.3:
+                if is_color:
+                    enhanced = cv2.bilateralFilter(enhanced, 5, 50, 50)
+                else:
+                    enhanced = cv2.bilateralFilter(enhanced, 5, 50, 50)
+                operations.append("targeted_noise_reduction")
+                parameters["bilateral_filter"] = {"d": 5, "sigma_color": 50, "sigma_space": 50}
+        
+        except Exception as e:
+            logger.warning(f"Targeted enhancement failed: {e}")
+            enhanced = image.copy()
+            operations = ["failed"]
+        
+        processing_time = time.time() - start_time
+        
+        return EnhancementResult(
+            enhanced_image=enhanced,
+            enhancement_applied="targeted",
+            quality_improvement=self._measure_improvement(image, enhanced, quality_metrics),
+            processing_time=processing_time,
+            operations_performed=operations,
+            parameters_used=parameters,
+            metadata={
+                "original_shape": image.shape,
+                "enhanced_shape": enhanced.shape,
+                "strategy_used": "targeted_enhancement"
+            }
+        )
+ImageEnhancer = AIImageEnhancer
