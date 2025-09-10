@@ -23,7 +23,7 @@ def load_test_image(image_path=None):
     """Load test image from specified path or default"""
     if image_path is None:
         # Default to img3.jpg like in preprocessing test
-        image_path = project_root / "data" / "sample_images" / "img4.jpg"
+        image_path = project_root / "data" / "sample_images" / "img5.jpg"
 
     if not image_path.exists():
         print(f"❌ Test image not found: {image_path}")
@@ -155,6 +155,11 @@ def test_preprocessing_to_paddleocr(image_path=None):
         quality_metrics = quality_analyzer.analyze_image(image)
         quality_time = time.time() - quality_start
 
+        print(f"  - Overall score: {quality_metrics.overall_score:.3f}")
+        print(f"  - Sharpness score: {quality_metrics.sharpness_score:.3f}")
+        print(f"  - Contrast score: {quality_metrics.contrast_score:.3f}")
+        print(f"  - Brightness score: {quality_metrics.brightness_score:.3f}")
+        print(f"  - Noise level: {quality_metrics.noise_level:.3f}")
         print(f"  - Image type: {quality_metrics.image_type}")
         print(f"  - Quality level: {quality_metrics.quality_level}")
 
@@ -196,7 +201,7 @@ def test_preprocessing_to_paddleocr(image_path=None):
         ocr_results = paddle_engine.process_image(enhanced_image)
         ocr_time = time.time() - ocr_start
 
-        print(f"  - OCR processing time: {ocr_time:.3f}s")
+        print(f"  - Processing time: {ocr_time:.3f}s")
         print(f"  - Results extracted: {len(ocr_results)}")
 
         if ocr_results:
@@ -204,7 +209,7 @@ def test_preprocessing_to_paddleocr(image_path=None):
             print("  - Sample results:")
             for i, result in enumerate(ocr_results[:5]):  # Show first 5
                 bbox = result.bbox
-                print(f"    [{i+1}] '{result.text}' (conf: {result.confidence:.2f})")
+                print(f"    {i+1}. '{result.text}' at ({bbox.x:.0f}, {bbox.y:.0f})")
 
         # STAGE 4: Save Results
         print("\n" + "=" * 60)
@@ -256,7 +261,7 @@ def test_preprocessing_to_paddleocr(image_path=None):
         print(f"  - Quality analysis: {quality_time:.3f}s")
         print(f"  - Enhancement: {enhancement_time:.3f}s")
         print(f"  - PaddleOCR: {ocr_time:.3f}s")
-        print(f"  - Total processing: {total_time:.3f}s")
+        print(f"  - Total time: {total_time:.3f}s")
 
         # List saved files
         saved_files = list(output_dir.glob("*"))

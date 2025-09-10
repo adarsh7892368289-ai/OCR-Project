@@ -272,7 +272,7 @@ class PostProcessingPipeline:
 
         return pipeline_result
 
-    def process_results(self, raw_ocr_results: List[OCRResult]) -> Dict[str, Any]:
+    def process_results(self, raw_ocr_results: List[OCRResult], quality_metrics: Optional[Any] = None) -> Dict[str, Any]:
         """
         Legacy method to process raw OCR results for backward compatibility.
         This method wraps the new process method.

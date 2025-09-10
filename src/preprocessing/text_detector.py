@@ -754,7 +754,7 @@ class AdvancedTextDetector:
         self.logger = logging.getLogger("AdvancedTextDetector")
         
         # Detection parameters - OPTIMIZED FOR MODERN PERFORMANCE
-        self.detection_method = DetectionMethod(config.get("method", "auto"))
+        self.detection_method = DetectionMethod(self.config.get("method", "auto"))
         self.confidence_threshold = config.get("confidence_threshold", 0.6)  # Higher threshold
         self.nms_threshold = config.get("nms_threshold", 0.3)  # More aggressive NMS
         self.min_region_area = config.get("min_region_area", 150)  # Larger minimum

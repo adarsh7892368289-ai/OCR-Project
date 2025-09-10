@@ -1,0 +1,37 @@
+{
+  "image_path": "default",
+  "original_shape": [
+    1550,
+    1022,
+    3
+  ],
+  "enhanced_shape": [
+    1550,
+    1022,
+    3
+  ],
+  "quality_metrics": {
+    "overall_score": 0.768982333843757,
+    "sharpness_score": 1.0,
+    "contrast_score": 0.40837078949573885,
+    "brightness_score": 0.5,
+    "noise_level": 0.04055181765088848,
+    "image_type": "ImageType.TABLE_DOCUMENT",
+    "quality_level": "ImageQuality.GOOD"
+  },
+  "enhancement": {
+    "applied": "skipped",
+    "skipped": true,
+    "operations": [
+      "conditional_skip"
+    ],
+    "quality_improvement": 0.0,
+    "processing_time": 0.0
+  },
+  "paddleocr": {
+    "results_count": 25,
+    "processing_time": 5.080481290817261
+  },
+  "total_processing_time": 5.19732141494751,
+  "timestamp": 1757413735.7896094
+}

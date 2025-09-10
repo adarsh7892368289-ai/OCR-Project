@@ -1,0 +1,14 @@
+{
+  "type": "<class 'src.utils.config.Config'>",
+  "attributes": [
+    "config_data",
+    "config_file_path",
+    "default_config",
+    "get",
+    "get_engine_config",
+    "load_from_file",
+    "save_to_file",
+    "set",
+    "validate_current_config"
+  ]
+}

@@ -1,0 +1,835 @@
+=== TESSERACT OCR RESULTS - LINE BY LINE ===
+Timestamp: 2025-09-10 13:26:24
+
+STATISTICS:
+  Total Lines: 205
+  Total Characters: 836
+  Total Words: 205
+  Average Confidence: 0.770
+
+DETECTED LINES:
+--------------------------------------------------
+Line   1: |
+           Confidence: 0.710, Chars: 1, Words: 1
+
+Line   2: Kona
+           Confidence: 0.940, Chars: 4, Words: 1
+
+Line   3: Big
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line   4: Wave
+           Confidence: 0.920, Chars: 4, Words: 1
+
+Line   5: 120z
+           Confidence: 0.890, Chars: 4, Words: 1
+
+Line   6: bt]
+           Confidence: 0.680, Chars: 3, Words: 1
+
+Line   7: —10.00
+           Confidence: 0.080, Chars: 6, Words: 1
+
+Line   8: CM
+           Confidence: 0.010, Chars: 2, Words: 1
+
+Line   9: 1
+           Confidence: 0.830, Chars: 1, Words: 1
+
+Line  10: Athletic
+           Confidence: 0.960, Chars: 8, Words: 1
+
+Line  11: Mexican
+           Confidence: 0.960, Chars: 7, Words: 1
+
+Line  12: Cooper
+           Confidence: 0.960, Chars: 6, Words: 1
+
+Line  13: tht
+           Confidence: 0.130, Chars: 3, Words: 1
+
+Line  14: :
+           Confidence: 0.890, Chars: 1, Words: 1
+
+Line  15: ee
+           Confidence: 0.440, Chars: 2, Words: 1
+
+Line  16: WA
+           Confidence: 0.830, Chars: 2, Words: 1
+
+Line  17: 202
+           Confidence: 0.610, Chars: 3, Words: 1
+
+Line  18: can
+           Confidence: 0.930, Chars: 3, Words: 1
+
+Line  19: ae
+           Confidence: 0.280, Chars: 2, Words: 1
+
+Line  20: Auth
+           Confidence: 0.650, Chars: 4, Words: 1
+
+Line  21: Code
+           Confidence: 0.910, Chars: 4, Words: 1
+
+Line  22: :
+           Confidence: 0.670, Chars: 1, Words: 1
+
+Line  23: 117493
+           Confidence: 0.880, Chars: 6, Words: 1
+
+Line  24: 2
+           Confidence: 0.940, Chars: 1, Words: 1
+
+Line  25: Blue
+           Confidence: 0.940, Chars: 4, Words: 1
+
+Line  26: Moon
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line  27: 1207
+           Confidence: 0.520, Chars: 4, Words: 1
+
+Line  28: bt]
+           Confidence: 0.620, Chars: 3, Words: 1
+
+Line  29: 20.00
+           Confidence: 0.950, Chars: 5, Words: 1
+
+Line  30: pa
+           Confidence: 0.200, Chars: 2, Words: 1
+
+Line  31: 2
+           Confidence: 0.880, Chars: 1, Words: 1
+
+Line  32: Modelo
+           Confidence: 0.880, Chars: 6, Words: 1
+
+Line  33: Especial
+           Confidence: 0.930, Chars: 8, Words: 1
+
+Line  34: 14oz
+           Confidence: 0.380, Chars: 4, Words: 1
+
+Line  35: draft
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line  36: ™
+           Confidence: 0.100, Chars: 1, Words: 1
+
+Line  37: TVR
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line  38: 0000008000
+           Confidence: 0.370, Chars: 10, Words: 1
+
+Line  39: 2.
+           Confidence: 0.830, Chars: 2, Words: 1
+
+Line  40: :
+           Confidence: 0.480, Chars: 1, Words: 1
+
+Line  41: TAD
+           Confidence: 0.940, Chars: 3, Words: 1
+
+Line  42: :
+           Confidence: 0.510, Chars: 1, Words: 1
+
+Line  43: _
+           Confidence: 0.590, Chars: 1, Words: 1
+
+Line  44: 9
+           Confidence: 0.490, Chars: 1, Words: 1
+
+Line  45: Golden
+           Confidence: 0.770, Chars: 6, Words: 1
+
+Line  46: Road
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line  47: 10
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line  48: Hop
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line  49: Hazy
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line  50: 0110404001240000000000000000000000F
+           Confidence: 0.630, Chars: 35, Words: 1
+
+Line  51: F
+           Confidence: 0.630, Chars: 1, Words: 1
+
+Line  52: ;
+           Confidence: 0.310, Chars: 1, Words: 1
+
+Line  53: IPA
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line  54: 1402
+           Confidence: 0.830, Chars: 4, Words: 1
+
+Line  55: draft
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line  56: 55.00
+           Confidence: 0.830, Chars: 5, Words: 1
+
+Line  57: Isr
+           Confidence: 0.180, Chars: 3, Words: 1
+
+Line  58: :
+           Confidence: 0.780, Chars: 1, Words: 1
+
+Line  59: E800
+           Confidence: 0.940, Chars: 4, Words: 1
+
+Line  60: 1
+           Confidence: 0.790, Chars: 1, Words: 1
+
+Line  61: Golden
+           Confidence: 0.950, Chars: 6, Words: 1
+
+Line  62: Road
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line  63: 10
+           Confidence: 0.950, Chars: 2, Words: 1
+
+Line  64: Hop
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line  65: Hazy
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line  66: >
+           Confidence: 0.510, Chars: 1, Words: 1
+
+Line  67: ar
+           Confidence: 0.720, Chars: 2, Words: 1
+
+Line  68: :
+           Confidence: 0.350, Chars: 1, Words: 1
+
+Line  69: 2B
+           Confidence: 0.350, Chars: 2, Words: 1
+
+Line  70: 1
+           Confidence: 0.730, Chars: 1, Words: 1
+
+Line  71: IPA
+           Confidence: 0.940, Chars: 3, Words: 1
+
+Line  72: 1402
+           Confidence: 0.210, Chars: 4, Words: 1
+
+Line  73: draft
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line  74: 11,00
+           Confidence: 0.900, Chars: 5, Words: 1
+
+Line  75: LS
+           Confidence: 0.160, Chars: 2, Words: 1
+
+Line  76: .
+           Confidence: 0.100, Chars: 1, Words: 1
+
+Line  77: 1
+           Confidence: 0.780, Chars: 1, Words: 1
+
+Line  78: Owens
+           Confidence: 0.780, Chars: 5, Words: 1
+
+Line  79: Ginger
+           Confidence: 0.960, Chars: 6, Words: 1
+
+Line  80: Beer
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line  81: Can
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line  82: 6.00
+           Confidence: 0.930, Chars: 4, Words: 1
+
+Line  83: Amount
+           Confidence: 0.710, Chars: 6, Words: 1
+
+Line  84: —:
+           Confidence: 0.160, Chars: 2, Words: 1
+
+Line  85: USD
+           Confidence: 0.840, Chars: 3, Words: 1
+
+Line  86: $184.23
+           Confidence: 0.880, Chars: 7, Words: 1
+
+Line  87: Subtotal
+           Confidence: 0.840, Chars: 8, Words: 1
+
+Line  88: $170.00
+           Confidence: 0.950, Chars: 7, Words: 1
+
+Line  89: a
+           Confidence: 0.460, Chars: 1, Words: 1
+
+Line  90: cn
+           Confidence: 0.210, Chars: 2, Words: 1
+
+Line  91: $14.23
+           Confidence: 0.840, Chars: 6, Words: 1
+
+Line  92: be
+           Confidence: 0.630, Chars: 2, Words: 1
+
+Line  93: AMRISH
+           Confidence: 0.910, Chars: 6, Words: 1
+
+Line  94: THAKKAR
+           Confidence: 0.910, Chars: 7, Words: 1
+
+Line  95: /
+           Confidence: 0.930, Chars: 1, Words: 1
+
+Line  96: 6:57
+           Confidence: 0.910, Chars: 4, Words: 1
+
+Line  97: PM
+           Confidence: 0.910, Chars: 2, Words: 1
+
+Line  98: re
+           Confidence: 0.430, Chars: 2, Words: 1
+
+Line  99: Total
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line 100: Due
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 101: $184.23
+           Confidence: 0.870, Chars: 7, Words: 1
+
+Line 102: |
+           Confidence: 0.140, Chars: 1, Words: 1
+
+Line 103: "88
+           Confidence: 0.390, Chars: 3, Words: 1
+
+Line 104: MERCHANT
+           Confidence: 0.930, Chars: 8, Words: 1
+
+Line 105: COPY
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line 106: +4
+           Confidence: 0.700, Chars: 2, Words: 1
+
+Line 107: Suggested
+           Confidence: 0.960, Chars: 9, Words: 1
+
+Line 108: Gratuity
+           Confidence: 0.960, Chars: 8, Words: 1
+
+Line 109: j
+           Confidence: 0.710, Chars: 1, Words: 1
+
+Line 110: Calculated
+           Confidence: 0.950, Chars: 10, Words: 1
+
+Line 111: on
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 112: Tota]
+           Confidence: 0.670, Chars: 5, Words: 1
+
+Line 113: Before
+           Confidence: 0.970, Chars: 6, Words: 1
+
+Line 114: Discounts
+           Confidence: 0.960, Chars: 9, Words: 1
+
+Line 115: are
+           Confidence: 0.440, Chars: 3, Words: 1
+
+Line 116: |
+           Confidence: 0.440, Chars: 1, Words: 1
+
+Line 117: Applied
+           Confidence: 0.920, Chars: 7, Words: 1
+
+Line 118: ae
+           Confidence: 0.250, Chars: 2, Words: 1
+
+Line 119: TIP
+           Confidence: 0.950, Chars: 3, Words: 1
+
+Line 120: 20.00
+           Confidence: 0.430, Chars: 5, Words: 1
+
+Line 121: ,
+           Confidence: 0.200, Chars: 1, Words: 1
+
+Line 122: Tip
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 123: Total
+           Confidence: 0.930, Chars: 5, Words: 1
+
+Line 124: |
+           Confidence: 0.580, Chars: 1, Words: 1
+
+Line 125: .
+           Confidence: 0.080, Chars: 1, Words: 1
+
+Line 126: 18%
+           Confidence: 0.890, Chars: 3, Words: 1
+
+Line 127: of
+           Confidence: 0.920, Chars: 2, Words: 1
+
+Line 128: sale:
+           Confidence: 0.910, Chars: 5, Words: 1
+
+Line 129: $30.60
+           Confidence: 0.850, Chars: 6, Words: 1
+
+Line 130: =
+           Confidence: 0.930, Chars: 1, Words: 1
+
+Line 131: $214.83
+           Confidence: 0.830, Chars: 7, Words: 1
+
+Line 132: Round
+           Confidence: 0.950, Chars: 5, Words: 1
+
+Line 133: Up
+           Confidence: 0.880, Chars: 2, Words: 1
+
+Line 134: For
+           Confidence: 0.880, Chars: 3, Words: 1
+
+Line 135: Charity:
+           Confidence: 0.290, Chars: 8, Words: 1
+
+Line 136: 20%
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 137: of
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 138: sale:
+           Confidence: 0.930, Chars: 5, Words: 1
+
+Line 139: $34.00
+           Confidence: 0.610, Chars: 6, Words: 1
+
+Line 140: =
+           Confidence: 0.930, Chars: 1, Words: 1
+
+Line 141: $218.23
+           Confidence: 0.950, Chars: 7, Words: 1
+
+Line 142: 22%
+           Confidence: 0.870, Chars: 3, Words: 1
+
+Line 143: of
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 144: sale:
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line 145: $37.40
+           Confidence: 0.950, Chars: 6, Words: 1
+
+Line 146: =
+           Confidence: 0.940, Chars: 1, Words: 1
+
+Line 147: $221.63
+           Confidence: 0.860, Chars: 7, Words: 1
+
+Line 148: &
+           Confidence: 0.510, Chars: 1, Words: 1
+
+Line 149: .
+           Confidence: 0.590, Chars: 1, Words: 1
+
+Line 150: 2
+           Confidence: 0.550, Chars: 1, Words: 1
+
+Line 151: Music
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line 152: Forward
+           Confidence: 0.960, Chars: 7, Words: 1
+
+Line 153: prepares
+           Confidence: 0.960, Chars: 8, Words: 1
+
+Line 154: youth
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line 155: for
+           Confidence: 0.970, Chars: 3, Words: 1
+
+Line 156: Total
+           Confidence: 0.770, Chars: 5, Words: 1
+
+Line 157: 2
+           Confidence: 0.330, Chars: 1, Words: 1
+
+Line 158: 3
+           Confidence: 0.610, Chars: 1, Words: 1
+
+Line 159: ella
+           Confidence: 0.300, Chars: 4, Words: 1
+
+Line 160: Signature:
+           Confidence: 0.960, Chars: 10, Words: 1
+
+Line 161: wow
+           Confidence: 0.450, Chars: 3, Words: 1
+
+Line 162: .hobmus
+           Confidence: 0.640, Chars: 7, Words: 1
+
+Line 163: icforward.org
+           Confidence: 0.680, Chars: 13, Words: 1
+
+Line 164: |
+           Confidence: 0.910, Chars: 1, Words: 1
+
+Line 165: RETAIN
+           Confidence: 0.960, Chars: 6, Words: 1
+
+Line 166: ONE
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 167: Copy
+           Confidence: 0.510, Chars: 4, Words: 1
+
+Line 168: FOR
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 169: YOUR
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line 170: RECORDS
+           Confidence: 0.960, Chars: 7, Words: 1
+
+Line 171: Thanks
+           Confidence: 0.960, Chars: 6, Words: 1
+
+Line 172: and
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 173: come
+           Confidence: 0.960, Chars: 4, Words: 1
+
+Line 174: again!
+           Confidence: 0.960, Chars: 6, Words: 1
+
+Line 175: |
+           Confidence: 0.660, Chars: 1, Words: 1
+
+Line 176: Suggested
+           Confidence: 0.960, Chars: 9, Words: 1
+
+Line 177: Gratuity
+           Confidence: 0.960, Chars: 8, Words: 1
+
+Line 178: Calculated
+           Confidence: 0.960, Chars: 10, Words: 1
+
+Line 179: on
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 180: Total
+           Confidence: 0.770, Chars: 5, Words: 1
+
+Line 181: Before
+           Confidence: 0.960, Chars: 6, Words: 1
+
+Line 182: Discounts
+           Confidence: 0.960, Chars: 9, Words: 1
+
+Line 183: are
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 184: Re
+           Confidence: 0.180, Chars: 2, Words: 1
+
+Line 185: Applied
+           Confidence: 0.930, Chars: 7, Words: 1
+
+Line 186: Tip
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 187: Total
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line 188: 18%
+           Confidence: 0.960, Chars: 3, Words: 1
+
+Line 189: of
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 190: sale:
+           Confidence: 0.940, Chars: 5, Words: 1
+
+Line 191: $30.60
+           Confidence: 0.920, Chars: 6, Words: 1
+
+Line 192: =
+           Confidence: 0.960, Chars: 1, Words: 1
+
+Line 193: $214.83
+           Confidence: 0.940, Chars: 7, Words: 1
+
+Line 194: 20%
+           Confidence: 0.950, Chars: 3, Words: 1
+
+Line 195: of
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 196: sale:
+           Confidence: 0.960, Chars: 5, Words: 1
+
+Line 197: $34.00
+           Confidence: 0.790, Chars: 6, Words: 1
+
+Line 198: =
+           Confidence: 0.950, Chars: 1, Words: 1
+
+Line 199: $218.23
+           Confidence: 0.910, Chars: 7, Words: 1
+
+Line 200: 22%
+           Confidence: 0.750, Chars: 3, Words: 1
+
+Line 201: of
+           Confidence: 0.960, Chars: 2, Words: 1
+
+Line 202: sale:
+           Confidence: 0.910, Chars: 5, Words: 1
+
+Line 203: $37.49
+           Confidence: 0.690, Chars: 6, Words: 1
+
+Line 204: =
+           Confidence: 0.940, Chars: 1, Words: 1
+
+Line 205: $221.63
+           Confidence: 0.840, Chars: 7, Words: 1
+
+
+==================================================
+COMBINED TEXT:
+==================================================
+|
+Kona
+Big
+Wave
+120z
+bt]
+—10.00
+CM
+1
+Athletic
+Mexican
+Cooper
+tht
+:
+ee
+WA
+202
+can
+ae
+Auth
+Code
+:
+117493
+2
+Blue
+Moon
+1207
+bt]
+20.00
+pa
+2
+Modelo
+Especial
+14oz
+draft
+™
+TVR
+0000008000
+2.
+:
+TAD
+:
+_
+9
+Golden
+Road
+10
+Hop
+Hazy
+0110404001240000000000000000000000F
+F
+;
+IPA
+1402
+draft
+55.00
+Isr
+:
+E800
+1
+Golden
+Road
+10
+Hop
+Hazy
+>
+ar
+:
+2B
+1
+IPA
+1402
+draft
+11,00
+LS
+.
+1
+Owens
+Ginger
+Beer
+Can
+6.00
+Amount
+—:
+USD
+$184.23
+Subtotal
+$170.00
+a
+cn
+$14.23
+be
+AMRISH
+THAKKAR
+/
+6:57
+PM
+re
+Total
+Due
+$184.23
+|
+"88
+MERCHANT
+COPY
++4
+Suggested
+Gratuity
+j
+Calculated
+on
+Tota]
+Before
+Discounts
+are
+|
+Applied
+ae
+TIP
+20.00
+,
+Tip
+Total
+|
+.
+18%
+of
+sale:
+$30.60
+=
+$214.83
+Round
+Up
+For
+Charity:
+20%
+of
+sale:
+$34.00
+=
+$218.23
+22%
+of
+sale:
+$37.40
+=
+$221.63
+&
+.
+2
+Music
+Forward
+prepares
+youth
+for
+Total
+2
+3
+ella
+Signature:
+wow
+.hobmus
+icforward.org
+|
+RETAIN
+ONE
+Copy
+FOR
+YOUR
+RECORDS
+Thanks
+and
+come
+again!
+|
+Suggested
+Gratuity
+Calculated
+on
+Total
+Before
+Discounts
+are
+Re
+Applied
+Tip
+Total
+18%
+of
+sale:
+$30.60
+=
+$214.83
+20%
+of
+sale:
+$34.00
+=
+$218.23
+22%
+of
+sale:
+$37.49
+=
+$221.63
