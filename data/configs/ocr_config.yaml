@@ -1,10 +1,61 @@
+# Main OCR System Configuration
+system:
+  name: "Advanced OCR System"
+  version: "2.0.0"
+  debug: false
+
+# Engine Configuration
 engines:
-  easyocr: {}
-  tesseract: {}
-  paddleocr: {}
-  trocr: {}
-postprocessing_pipeline:
-  enable_text_correction: true
-text_detection:
-  confidence_threshold: 0.3
-  method: auto
+  tesseract:
+    enabled: true
+    priority: 3
+    languages: ["eng"]
+    config: "--oem 1 --psm 6"
+    
+  paddleocr:
+    enabled: true
+    priority: 1
+    languages: ["en"]
+    use_gpu: true
+    
+  easyocr:
+    enabled: true
+    priority: 2
+    languages: ["en"]
+    use_gpu: true
+    
+  trocr:
+    enabled: true
+    priority: 4
+    model: "microsoft/trocr-base-printed"
+
+# Engine Manager Settings
+engine_manager:
+  max_workers: 3
+  timeout: 300
+  enable_parallel: true
+  selection_strategy: "adaptive"
+
+# Quality Analyzer Settings
+quality_analyzer:
+  min_quality_score: 0.5
+  enable_enhancement: true
+
+# Image Enhancer Settings
+image_enhancer:
+  auto_enhance: true
+  contrast_enhancement: true
+  noise_reduction: true
+
+# Text Detector Settings
+text_detector:
+  method: "craft"
+  confidence_threshold: 0.7
+  min_text_size: 10
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  file: "logs/ocr_system.log"
+  max_size: "10MB"
+  backup_count: 5

@@ -21,13 +21,13 @@ from ..core.base_engine import (
 
 class TrOCREngine(BaseOCREngine):
     """
-    OPTIMIZED TrOCR Engine - Fast processing while maintaining pipeline compatibility
+    FIXED TrOCR Engine - Returns single OCRResult compatible with base engine
     
     Key Optimizations:
     - Intelligent image resizing before processing
     - Early stopping for sufficient text extraction
     - Reduced segmentation overhead
-    - Maintains preprocessed_image input → List[OCRResult] output
+    - FIXED: Returns single OCRResult (not List[OCRResult])
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -38,9 +38,9 @@ class TrOCREngine(BaseOCREngine):
         self.model_name = self.config.get("model_name", "microsoft/trocr-base-printed")
         
         # Performance optimization settings
-        self.max_image_dimension = self.config.get("max_dimension", 800)  # Resize large images
+        self.max_image_dimension = self.config.get("max_dimension", 800)
         self.enable_segmentation = self.config.get("enable_segmentation", True)
-        self.max_strips = self.config.get("max_strips", 3)  # Limit segmentation
+        self.max_strips = self.config.get("max_strips", 3)
         self.min_confidence = self.config.get("min_confidence", 0.4)
         
         # Modern engine capabilities
@@ -101,20 +101,16 @@ class TrOCREngine(BaseOCREngine):
         else:
             return ['en', 'de', 'fr', 'it', 'pt']
         
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> List[OCRResult]:
+    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        OPTIMIZED: Process preprocessed image with TrOCR
-        
-        Pipeline Contract:
-        Input: preprocessed_image (np.ndarray) - Image from preprocessing pipeline
-        Output: List[OCRResult] - Results for postprocessing pipeline
+        FIXED: Process preprocessed image with TrOCR - Returns single OCRResult
         
         Args:
             preprocessed_image: Preprocessed image from image enhancement
             **kwargs: Additional parameters
             
         Returns:
-            List[OCRResult]: OCR results for postprocessing
+            OCRResult: Single OCR result compatible with base engine
         """
         start_time = time.time()
         
@@ -122,13 +118,11 @@ class TrOCREngine(BaseOCREngine):
             # Validate initialization
             if not self.is_initialized or self.model is None:
                 if not self.initialize():
-                    self.logger.error("TrOCR engine failed to initialize")
-                    return []
+                    raise RuntimeError("TrOCR engine failed to initialize")
             
             # Validate preprocessed input from pipeline
             if not self.validate_image(preprocessed_image):
-                self.logger.error("Invalid preprocessed image from pipeline")
-                return []
+                raise ValueError("Invalid preprocessed image from pipeline")
             
             original_shape = preprocessed_image.shape
             self.logger.info(f"Processing preprocessed image: {original_shape}")
@@ -144,28 +138,48 @@ class TrOCREngine(BaseOCREngine):
                 self.logger.info("Full image extraction insufficient, using limited segmentation")
                 text, confidence = self._limited_segmentation(optimized_image)
             
-            # Create OCRResult if we have meaningful text
-            if text.strip() and len(text.strip()) > 0:
-                result = self._create_pipeline_result(text, confidence, original_shape)
+            # Create single OCRResult - FIXED!
+            result = self._create_pipeline_result(text, confidence, original_shape)
+            
+            # Update processing stats
+            processing_time = time.time() - start_time
+            if result:
+                result.processing_time = processing_time
+                result.engine_name = self.name
                 
-                # Update processing stats
-                processing_time = time.time() - start_time
                 self.processing_stats['total_processed'] += 1
                 self.processing_stats['total_time'] += processing_time
                 
-                self.logger.info(f"TrOCR extracted {len(text)} chars (conf: {confidence:.3f}) in {processing_time:.2f}s")
+                if result.text.strip():
+                    self.processing_stats['successful_extractions'] += 1
                 
-                return [result] if result else []
+                self.logger.info(f"TrOCR extracted {len(text)} chars (conf: {confidence:.3f}) in {processing_time:.2f}s")
             else:
-                processing_time = time.time() - start_time
+                # Return empty result instead of None
+                result = OCRResult(
+                    text="",
+                    confidence=0.0,
+                    processing_time=processing_time,
+                    engine_name=self.name,
+                    metadata={"no_text_found": True}
+                )
                 self.logger.warning(f"TrOCR: No meaningful text extracted in {processing_time:.2f}s")
-                return []
+            
+            return result
             
         except Exception as e:
             processing_time = time.time() - start_time
             self.logger.error(f"TrOCR extraction failed after {processing_time:.2f}s: {e}")
             self.processing_stats['errors'] += 1
-            return []
+            
+            # Return empty result instead of raising
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                processing_time=processing_time,
+                engine_name=self.name,
+                metadata={"error": str(e)}
+            )
     
     def _optimize_for_speed(self, preprocessed_image: np.ndarray) -> np.ndarray:
         """
@@ -369,14 +383,27 @@ class TrOCREngine(BaseOCREngine):
             height, width = original_shape[:2]
             bbox = BoundingBox(
                 x=0, y=0, width=width, height=height, 
-                confidence=confidence
+                confidence=confidence,
+                text_type=TextType.PRINTED
+            )
+            
+            # Create text region
+            region = TextRegion(
+                text=text.strip(),
+                confidence=confidence,
+                bbox=bbox,
+                text_type=TextType.PRINTED,
+                language="en"
             )
             
             result = OCRResult(
                 text=text.strip(),
                 confidence=confidence,
+                regions=[region],
                 bbox=bbox,
                 level="page",
+                engine_name=self.name,
+                text_type=TextType.PRINTED,
                 metadata={
                     'detection_method': 'trocr',
                     'model_name': self.model_name,
@@ -395,13 +422,13 @@ class TrOCREngine(BaseOCREngine):
             self.logger.error(f"Pipeline result creation failed: {e}")
             return None
     
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[List[OCRResult]]:
+    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
         """Process multiple preprocessed images efficiently"""
         results = []
         for i, image in enumerate(images):
             self.logger.info(f"Processing image {i+1}/{len(images)} with optimized TrOCR")
-            image_results = self.process_image(image, **kwargs)
-            results.append(image_results)
+            image_result = self.process_image(image, **kwargs)
+            results.append(image_result)
         return results
     
     def validate_image(self, image: np.ndarray) -> bool:
@@ -433,8 +460,8 @@ class TrOCREngine(BaseOCREngine):
             'optimal_for': ['handwritten_text', 'printed_text', 'mixed_text', 'documents', 'forms'],
             'performance_profile': {
                 'accuracy': 'very_high',
-                'speed': 'optimized',  # Updated
-                'memory_usage': 'medium',  # Reduced
+                'speed': 'optimized',
+                'memory_usage': 'medium',
                 'gpu_required': False,
                 'gpu_recommended': True
             },
@@ -451,9 +478,11 @@ class TrOCREngine(BaseOCREngine):
                 'device': self.device,
                 'supports_handwriting': self.supports_handwriting
             },
-            'initialization_status': {
-                'is_initialized': self.is_initialized,
-                'model_loaded': self.model_loaded
+            'pipeline_integration': {
+                'uses_preprocessing_pipeline': True,
+                'returns_single_result': True,
+                'compatible_with_base_engine': True,
+                'works_with_engine_manager': True
             }
         }
         
@@ -464,20 +493,3 @@ class TrOCREngine(BaseOCREngine):
             info['version'] = 'unknown'
             
         return info
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get processing statistics"""
-        stats = {
-            'total_processed': self.processing_stats.get('total_processed', 0),
-            'total_time': self.processing_stats.get('total_time', 0.0),
-            'errors': self.processing_stats.get('errors', 0),
-            'model_name': self.model_name,
-            'device': self.device,
-            'transformer_based': True,
-            'engine_name': self.name,
-            'is_initialized': self.is_initialized,
-            'model_loaded': self.model_loaded,
-            'optimized': True,
-            'max_dimension': self.max_image_dimension
-        }
-        return stats

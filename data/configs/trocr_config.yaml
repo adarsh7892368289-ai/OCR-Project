@@ -1,188 +1,25 @@
-# TrOCR Engine Configuration
-# data/configs/trocr_config.yaml
-
-# Engine Configuration
+# TrOCR Engine Configuration - Simplified for reliability
 engine:
   name: "trocr"
-  version: "2.0.0"
-  description: "Enhanced TrOCR Engine with multi-model support"
+  model_name: "microsoft/trocr-base-printed"
+  confidence_threshold: 0.7
 
-# Model Configuration
-models:
-  # Default model to load on initialization
-  default_model: "base-printed"
-  
-  # Enable automatic model selection based on content type
-  auto_model_selection: true
-  
-  # Model-specific settings
-  base-handwritten:
-    model_name: "microsoft/trocr-base-handwritten"
-    processor_name: "microsoft/trocr-base-handwritten"
-    confidence_threshold: 0.7
-    max_length: 384
-    best_for: ["handwritten", "manuscripts", "notes"]
-    
-  base-printed:
-    model_name: "microsoft/trocr-base-printed"
-    processor_name: "microsoft/trocr-base-printed"
-    confidence_threshold: 0.8
-    max_length: 384
-    best_for: ["printed", "documents", "books"]
-    
-  large-handwritten:
-    model_name: "microsoft/trocr-large-handwritten"
-    processor_name: "microsoft/trocr-large-handwritten"
-    confidence_threshold: 0.75
-    max_length: 384
-    best_for: ["handwritten", "complex_manuscripts"]
-    
-  large-printed:
-    model_name: "microsoft/trocr-large-printed"
-    processor_name: "microsoft/trocr-large-printed"
-    confidence_threshold: 0.85
-    max_length: 384
-    best_for: ["printed", "high_quality_docs"]
-
-# Processing Configuration
 processing:
-  # Batch processing settings
-  batch_size: 4
-  max_workers: 2
-  
-  # Image preprocessing
-  preprocessing:
-    resize_target: [384, 384]  # TrOCR standard input size
-    normalize_contrast: true
-    apply_denoising: true
-    optimize_resolution: true
-    
-    # Contrast enhancement settings
-    contrast:
-      clip_limit: 2.0
-      tile_grid_size: [8, 8]
-      
-    # Denoising settings
-    denoising:
-      bilateral_filter:
-        d: 9
-        sigma_color: 75
-        sigma_space: 75
-    
-    # Resolution optimization
-    resolution:
-      min_dimension: 384
-      max_dimension: 2048
-      maintain_aspect_ratio: true
+  max_dim: 800
+  max_strips: 3
+  batch_size: 1
+  timeout: 30
 
-# Quality and Confidence Settings
-quality:
-  # Minimum confidence threshold for accepting results
-  min_confidence: 0.7
+preprocessing:
+  resize_target: [384, 384]
+  normalize: true
   
-  # Text quality validation
-  text_validation:
-    min_alpha_ratio: 0.5
-    max_suspicious_patterns: 2
-    min_word_length: 1
-    max_word_length: 20
-    
-  # Confidence calculation weights
-  confidence_weights:
-    engine_confidence: 0.6
-    text_quality: 0.4
-
-# Performance Settings
 performance:
-  # Device preferences (auto-detected if not specified)
-  device: "auto"  # "cuda", "cpu", or "auto"
-  
-  # Memory management
+  device: "auto"
   memory:
     clear_cache_after_batch: true
-    max_cached_models: 2
-    
-  # Performance tracking
-  tracking:
-    enable_stats: true
-    detailed_timing: true
-    confidence_distribution: true
 
-# Language Support
-languages:
-  default: "en"
-  supported: ["en", "de", "fr", "it", "pt", "ru", "ja", "ko", "zh", "ar"]
-  
-  # Language-specific settings
-  language_models:
-    en:
-      preferred_models: ["base-printed", "large-printed"]
-      post_processing: true
-    zh:
-      preferred_models: ["base-printed"]
-      post_processing: false
-
-# Output Configuration
-output:
-  # Text formatting
-  formatting:
-    normalize_whitespace: true
-    fix_common_errors: true
-    apply_spell_check: false  # Can be enabled with additional dependencies
-    
-  # Result structure
-  include_regions: true
-  include_confidence: true
-  include_metadata: true
-  
-  # Export formats
-  export_formats: ["text", "json", "xml"]
-
-# Debugging and Logging
 debug:
-  # Enable debug mode
   enabled: false
-  
-  # Save intermediate results
-  save_preprocessed_images: false
-  save_detection_results: false
-  
-  # Debug output directory
-  output_dir: "debug/trocr"
-  
-  # Logging level
-  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
-
-# Benchmarking Configuration
-benchmark:
-  # Enable benchmarking
-  enabled: true
-  
-  # Metrics to track
-  metrics:
-    - "processing_time"
-    - "confidence_score"
-    - "text_length"
-    - "memory_usage"
-    
-  # Benchmark output
-  output_file: "benchmark/trocr_benchmark.json"
-  detailed_report: true
-
-# Advanced Settings
-advanced:
-  # Custom preprocessing pipeline
-  custom_preprocessing: false
-  preprocessing_pipeline: []
-  
-  # Model fine-tuning (if supported)
-  fine_tuning:
-    enabled: false
-    learning_rate: 1e-5
-    epochs: 3
-    
-  # Experimental features
-  experimental:
-    multi_scale_processing: false
-    ensemble_models: false
-    adaptive_thresholding: true
+  log_level: "INFO"
+  save_intermediate: false

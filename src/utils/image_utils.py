@@ -24,10 +24,29 @@ class ImageUtils:
         return np.array(image)
     
     @staticmethod
-    def resize_image(image: np.ndarray, max_width: int = 2048, max_height: int = 2048) -> np.ndarray:
-        """Resize image while maintaining aspect ratio"""
+    def resize_image(image: np.ndarray, size: Union[Tuple[int, int], int] = None, 
+                     max_width: int = 2048, max_height: int = 2048) -> np.ndarray:
+        """Resize image while maintaining aspect ratio
+        
+        Args:
+            image: Input image
+            size: Either (width, height) tuple or single dimension, or None for max constraints
+            max_width: Maximum width when size is None
+            max_height: Maximum height when size is None
+        """
         height, width = image.shape[:2]
         
+        if size is not None:
+            if isinstance(size, tuple) and len(size) == 2:
+                # Direct resize to specific dimensions
+                new_width, new_height = size
+                return cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+            elif isinstance(size, int):
+                # Resize to square with given dimension
+                new_width = new_height = size
+                return cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+        
+        # Use max_width and max_height constraints
         if width <= max_width and height <= max_height:
             return image
         
@@ -57,6 +76,13 @@ class ImageUtils:
             raise ValueError(f"Unsupported conversion: {conversion}")
         
         return cv2.cvtColor(image, conversions[conversion])
+    
+    @staticmethod
+    def convert_to_grayscale(image: np.ndarray) -> np.ndarray:
+        """Convert image to grayscale (added for test compatibility)"""
+        if len(image.shape) == 3:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return image
     
     @staticmethod
     def calculate_image_stats(image: np.ndarray) -> dict:

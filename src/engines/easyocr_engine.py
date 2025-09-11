@@ -16,12 +16,12 @@ from ..core.base_engine import (
 
 class EasyOCREngine(BaseOCREngine):
     """
-    Modern EasyOCR Engine - AI-Style Pipeline Architecture
+    Modern EasyOCR Engine - Aligned with Pipeline
     
-    Clean separation of concerns:
-    - Takes preprocessed images from preprocessing pipeline
-    - Performs pure OCR extraction with EasyOCR
-    - Returns structured results for postprocessing pipeline
+    Clean integration with your pipeline:
+    - Takes preprocessed images from YOUR preprocessing pipeline
+    - Returns single OCRResult compatible with YOUR base engine
+    - Works with YOUR engine manager and postprocessing
     - Excellent for handwritten and printed text
     """
     
@@ -32,7 +32,7 @@ class EasyOCREngine(BaseOCREngine):
         self.gpu = self.config.get("gpu", True)
         self.model_storage_directory = self.config.get("model_dir", None)
         
-        # Modern engine capabilities
+        # Engine capabilities
         self.supports_handwriting = True
         self.supports_multiple_languages = True
         self.supports_orientation_detection = False  # EasyOCR handles this internally
@@ -78,16 +78,16 @@ class EasyOCREngine(BaseOCREngine):
             'tr', 'az', 'uz', 'mn'
         ]
         
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> List[OCRResult]:
+    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        Process preprocessed image with EasyOCR
+        FIXED: Process preprocessed image and return single OCRResult
         
         Args:
-            preprocessed_image: Image from preprocessing pipeline
+            preprocessed_image: Image from YOUR preprocessing pipeline
             **kwargs: Additional parameters
             
         Returns:
-            List[OCRResult]: Raw OCR results for postprocessing
+            OCRResult: Single result compatible with YOUR base engine
         """
         start_time = time.time()
         
@@ -116,25 +116,40 @@ class EasyOCREngine(BaseOCREngine):
                 batch_size=1
             )
             
-            # Convert to OCRResult objects
-            results = self._extract_ocr_results(ocr_detections)
+            # FIXED: Combine all EasyOCR detections into single OCRResult
+            result = self._combine_easyocr_results(ocr_detections)
             
-            # Update processing stats
+            # Set processing time and engine info
             processing_time = time.time() - start_time
+            result.processing_time = processing_time
+            result.engine_name = self.name
+            
+            # Update stats
             self.processing_stats['total_processed'] += 1
             self.processing_stats['total_time'] += processing_time
+            if result.text.strip():
+                self.processing_stats['successful_extractions'] += 1
             
-            return results
+            return result
             
         except Exception as e:
             self.logger.error(f"EasyOCR extraction failed: {e}")
+            processing_time = time.time() - start_time
             self.processing_stats['errors'] += 1
-            return []
+            
+            # Return empty result instead of raising
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                processing_time=processing_time,
+                engine_name=self.name,
+                metadata={"error": str(e)}
+            )
     
     def _prepare_for_easyocr(self, image: np.ndarray) -> np.ndarray:
         """
         Minimal conversion for EasyOCR compatibility
-        Only format conversion, no enhancement (done by preprocessing pipeline)
+        Only format conversion - YOUR preprocessing pipeline handles enhancement
         """
         # EasyOCR expects RGB format
         if len(image.shape) == 3:
@@ -147,12 +162,14 @@ class EasyOCREngine(BaseOCREngine):
             # Convert grayscale to RGB
             return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     
-    def _extract_ocr_results(self, detections: List) -> List[OCRResult]:
+    def _combine_easyocr_results(self, detections: List) -> OCRResult:
         """
-        Extract OCRResult objects from EasyOCR detections
-        Minimal processing - just format conversion
+        FIXED: Combine all EasyOCR detections into single OCRResult
         """
-        results = []
+        regions = []
+        all_text_parts = []
+        total_confidence = 0.0
+        detection_count = 0
         
         for detection in detections:
             if len(detection) >= 3:
@@ -166,24 +183,48 @@ class EasyOCREngine(BaseOCREngine):
                 x, y, w, h = self._polygon_to_bbox(bbox_points)
                 bbox = BoundingBox(
                     x=x, y=y, width=w, height=h, 
-                    confidence=confidence
+                    confidence=confidence,
+                    text_type=TextType.MIXED  # EasyOCR handles both printed and handwritten
                 )
                 
-                result = OCRResult(
+                # Create text region
+                region = TextRegion(
                     text=text.strip(),
                     confidence=confidence,
                     bbox=bbox,
-                    level="word",
-                    metadata={
-                        'detection_method': 'easyocr',
-                        'polygon_points': bbox_points,
-                        'original_confidence': confidence
-                    }
+                    text_type=TextType.MIXED,
+                    language="en"
                 )
                 
-                results.append(result)
-                        
-        return results
+                regions.append(region)
+                all_text_parts.append(text.strip())
+                total_confidence += confidence
+                detection_count += 1
+        
+        # Combine all text parts with space separation
+        combined_text = " ".join(all_text_parts)
+        overall_confidence = total_confidence / detection_count if detection_count > 0 else 0.0
+        
+        # Create overall bounding box from all regions
+        overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
+        
+        # Return single OCRResult combining all detections
+        return OCRResult(
+            text=combined_text,
+            confidence=overall_confidence,
+            regions=regions,
+            bbox=overall_bbox,
+            level="page",
+            engine_name=self.name,
+            text_type=TextType.MIXED,
+            metadata={
+                'detection_method': 'easyocr',
+                'detection_count': detection_count,
+                'gpu_enabled': self.gpu,
+                'languages': self.languages,
+                'individual_confidences': [r.confidence for r in regions]
+            }
+        )
     
     def _polygon_to_bbox(self, points: List[List[float]]) -> Tuple[int, int, int, int]:
         """Convert polygon points to bounding box coordinates"""
@@ -195,12 +236,30 @@ class EasyOCREngine(BaseOCREngine):
         
         return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
     
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[List[OCRResult]]:
-        """Process multiple images efficiently"""
+    def _calculate_overall_bbox(self, regions: List[TextRegion]) -> BoundingBox:
+        """Calculate overall bounding box from all text regions"""
+        if not regions:
+            return BoundingBox(0, 0, 100, 30)
+        
+        min_x = min(r.bbox.x for r in regions)
+        min_y = min(r.bbox.y for r in regions)
+        max_x = max(r.bbox.x + r.bbox.width for r in regions)
+        max_y = max(r.bbox.y + r.bbox.height for r in regions)
+        
+        return BoundingBox(
+            x=min_x,
+            y=min_y,
+            width=max_x - min_x,
+            height=max_y - min_y,
+            confidence=sum(r.confidence for r in regions) / len(regions)
+        )
+    
+    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
+        """Process multiple images - returns single result per image"""
         results = []
         for image in images:
-            image_results = self.process_image(image, **kwargs)
-            results.append(image_results)
+            result = self.process_image(image, **kwargs)
+            results.append(result)
         return results
     
     def get_engine_info(self) -> Dict[str, Any]:
@@ -229,6 +288,12 @@ class EasyOCREngine(BaseOCREngine):
                 'recognition_model': 'CRNN',
                 'languages_loaded': self.languages,
                 'gpu_enabled': self.gpu
+            },
+            'pipeline_integration': {
+                'uses_preprocessing_pipeline': True,
+                'returns_single_result': True,
+                'compatible_with_base_engine': True,
+                'works_with_engine_manager': True
             }
         }
         

@@ -42,13 +42,12 @@ def find_tesseract():
 
 class TesseractEngine(BaseOCREngine):
     """
-    Modern Tesseract OCR Engine - AI-Style Architecture
+    Modern Tesseract OCR Engine - Aligned with Pipeline
     
-    Clean separation of concerns:
-    - Takes preprocessed images as input
-    - Performs pure OCR extraction 
-    - Returns structured results for postprocessing
-    - No internal preprocessing or postprocessing
+    Clean integration with your pipeline:
+    - Takes preprocessed images from YOUR preprocessing pipeline
+    - Returns single OCRResult compatible with YOUR base engine
+    - Works with YOUR engine manager and postprocessing
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -109,16 +108,16 @@ class TesseractEngine(BaseOCREngine):
         """Get supported languages"""
         return getattr(self, 'supported_languages', ["eng"])
         
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> List[OCRResult]:
+    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        Process preprocessed image and extract text
+        FIXED: Process preprocessed image and return single OCRResult
         
         Args:
-            preprocessed_image: Image from preprocessing pipeline
+            preprocessed_image: Image from YOUR preprocessing pipeline
             **kwargs: Additional parameters
             
         Returns:
-            List[OCRResult]: Raw OCR results for postprocessing
+            OCRResult: Single result compatible with YOUR base engine
         """
         start_time = time.time()
         
@@ -136,20 +135,35 @@ class TesseractEngine(BaseOCREngine):
                 output_type=pytesseract.Output.DICT
             )
             
-            # Convert to OCRResult objects
-            results = self._extract_ocr_results(ocr_data)
+            # FIXED: Combine all Tesseract detections into single OCRResult
+            result = self._combine_tesseract_results(ocr_data)
+            
+            # Set processing time and engine info
+            processing_time = time.time() - start_time
+            result.processing_time = processing_time
+            result.engine_name = self.name
             
             # Update stats
-            processing_time = time.time() - start_time
             self.processing_stats['total_processed'] += 1
             self.processing_stats['total_time'] += processing_time
+            if result.text.strip():
+                self.processing_stats['successful_extractions'] += 1
             
-            return results
+            return result
             
         except Exception as e:
             self.logger.error(f"OCR extraction failed: {e}")
+            processing_time = time.time() - start_time
             self.processing_stats['errors'] += 1
-            return []
+            
+            # Return empty result instead of raising
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                processing_time=processing_time,
+                engine_name=self.name,
+                metadata={"error": str(e)}
+            )
     
     def _numpy_to_pil(self, image: np.ndarray) -> Image.Image:
         """Convert numpy array to PIL Image"""
@@ -164,9 +178,14 @@ class TesseractEngine(BaseOCREngine):
             # Grayscale
             return Image.fromarray(image)
     
-    def _extract_ocr_results(self, data: Dict) -> List[OCRResult]:
-        """Extract OCRResult objects from Tesseract data"""
-        results = []
+    def _combine_tesseract_results(self, data: Dict) -> OCRResult:
+        """
+        FIXED: Combine all Tesseract detections into single OCRResult
+        """
+        regions = []
+        all_text_parts = []
+        total_confidence = 0.0
+        detection_count = 0
         
         for i in range(len(data['text'])):
             text = data['text'][i].strip()
@@ -180,33 +199,72 @@ class TesseractEngine(BaseOCREngine):
                 y=int(data['top'][i]),
                 width=int(data['width'][i]),
                 height=int(data['height'][i]),
-                confidence=conf / 100.0
+                confidence=conf / 100.0,
+                text_type=TextType.PRINTED
             )
             
-            result = OCRResult(
+            # Create text region
+            region = TextRegion(
                 text=text,
                 confidence=conf / 100.0,
                 bbox=bbox,
-                level="word",
-                metadata={
-                    'tesseract_level': data.get('level', [0])[i] if 'level' in data else 5,
-                    'block_num': data.get('block_num', [0])[i] if 'block_num' in data else 0,
-                    'par_num': data.get('par_num', [0])[i] if 'par_num' in data else 0,
-                    'line_num': data.get('line_num', [0])[i] if 'line_num' in data else 0,
-                    'word_num': data.get('word_num', [0])[i] if 'word_num' in data else 0
-                }
+                text_type=TextType.PRINTED,
+                language="en"
             )
             
-            results.append(result)
-            
-        return results
+            regions.append(region)
+            all_text_parts.append(text)
+            total_confidence += conf / 100.0
+            detection_count += 1
+        
+        # Combine all text parts with space separation
+        combined_text = " ".join(all_text_parts)
+        overall_confidence = total_confidence / detection_count if detection_count > 0 else 0.0
+        
+        # Create overall bounding box from all regions
+        overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
+        
+        # Return single OCRResult combining all detections
+        return OCRResult(
+            text=combined_text,
+            confidence=overall_confidence,
+            regions=regions,
+            bbox=overall_bbox,
+            level="page",
+            engine_name=self.name,
+            text_type=TextType.PRINTED,
+            metadata={
+                'detection_method': 'tesseract',
+                'detection_count': detection_count,
+                'tesseract_config': self.tesseract_config,
+                'individual_confidences': [r.confidence for r in regions]
+            }
+        )
     
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[List[OCRResult]]:
-        """Process multiple images efficiently"""
+    def _calculate_overall_bbox(self, regions: List[TextRegion]) -> BoundingBox:
+        """Calculate overall bounding box from all text regions"""
+        if not regions:
+            return BoundingBox(0, 0, 100, 30)
+        
+        min_x = min(r.bbox.x for r in regions)
+        min_y = min(r.bbox.y for r in regions)
+        max_x = max(r.bbox.x + r.bbox.width for r in regions)
+        max_y = max(r.bbox.y + r.bbox.height for r in regions)
+        
+        return BoundingBox(
+            x=min_x,
+            y=min_y,
+            width=max_x - min_x,
+            height=max_y - min_y,
+            confidence=sum(r.confidence for r in regions) / len(regions)
+        )
+    
+    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
+        """Process multiple images - returns single result per image"""
         results = []
         for image in images:
-            image_results = self.process_image(image, **kwargs)
-            results.append(image_results)
+            result = self.process_image(image, **kwargs)
+            results.append(result)
         return results
     
     def get_engine_info(self) -> Dict[str, Any]:
@@ -228,6 +286,12 @@ class TesseractEngine(BaseOCREngine):
                 'speed': 'medium',
                 'memory_usage': 'low',
                 'gpu_required': False
+            },
+            'pipeline_integration': {
+                'uses_preprocessing_pipeline': True,
+                'returns_single_result': True,
+                'compatible_with_base_engine': True,
+                'works_with_engine_manager': True
             }
         }
         

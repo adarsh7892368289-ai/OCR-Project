@@ -364,7 +364,26 @@ class EngineManager:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.cleanup()
-
+    def process_with_best_engine_single(self, image: np.ndarray, 
+                                   content_type: str = 'default') -> Optional[OCRResult]:
+        """Process image with best engine and return single best result"""
+        if image is None or image.size == 0:
+            return None
+        
+        try:
+            # Get all results from best engine
+            results_list = self.process_with_best_engine(image, content_type)
+            
+            # Return single best result
+            if results_list:
+                # Find result with highest confidence
+                return max(results_list, key=lambda x: x.confidence)
+            else:
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Best engine single processing failed: {e}")
+            return None
 # Alias for backward compatibility
 OCREngineManager = EngineManager
 
