@@ -32,6 +32,10 @@ class EasyOCREngine(BaseOCREngine):
         self.gpu = self.config.get("gpu", True)
         self.model_storage_directory = self.config.get("model_dir", None)
         
+        # Layout preservation settings
+        self.line_height_threshold = self.config.get("line_height_threshold", 15)
+        self.word_spacing_threshold = self.config.get("word_spacing_threshold", 20)
+        
         # Engine capabilities
         self.supports_handwriting = True
         self.supports_multiple_languages = True
@@ -80,7 +84,7 @@ class EasyOCREngine(BaseOCREngine):
         
     def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        FIXED: Process preprocessed image and return single OCRResult
+        FIXED: Process preprocessed image and return single OCRResult with preserved layout
         
         Args:
             preprocessed_image: Image from YOUR preprocessing pipeline
@@ -116,8 +120,8 @@ class EasyOCREngine(BaseOCREngine):
                 batch_size=1
             )
             
-            # FIXED: Combine all EasyOCR detections into single OCRResult
-            result = self._combine_easyocr_results(ocr_detections)
+            # FIXED: Combine all EasyOCR detections with layout preservation
+            result = self._combine_easyocr_results_with_layout(ocr_detections)
             
             # Set processing time and engine info
             processing_time = time.time() - start_time
@@ -162,13 +166,11 @@ class EasyOCREngine(BaseOCREngine):
             # Convert grayscale to RGB
             return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     
-    def _combine_easyocr_results(self, detections: List) -> OCRResult:
+    def _combine_easyocr_results_with_layout(self, detections: List) -> OCRResult:
         """
-        FIXED: Combine all EasyOCR detections into single OCRResult
+        FIXED: Combine all EasyOCR detections with preserved document layout
         """
         regions = []
-        all_text_parts = []
-        total_confidence = 0.0
         detection_count = 0
         
         for detection in detections:
@@ -184,10 +186,10 @@ class EasyOCREngine(BaseOCREngine):
                 bbox = BoundingBox(
                     x=x, y=y, width=w, height=h, 
                     confidence=confidence,
-                    text_type=TextType.MIXED  # EasyOCR handles both printed and handwritten
+                    text_type=TextType.MIXED
                 )
                 
-                # Create text region
+                # Create text region with spatial information
                 region = TextRegion(
                     text=text.strip(),
                     confidence=confidence,
@@ -197,20 +199,20 @@ class EasyOCREngine(BaseOCREngine):
                 )
                 
                 regions.append(region)
-                all_text_parts.append(text.strip())
-                total_confidence += confidence
                 detection_count += 1
         
-        # Combine all text parts with space separation
-        combined_text = " ".join(all_text_parts)
-        overall_confidence = total_confidence / detection_count if detection_count > 0 else 0.0
+        # FIXED: Reconstruct text with proper layout based on spatial positioning
+        formatted_text = self._reconstruct_document_layout(regions)
+        
+        # Calculate overall confidence
+        overall_confidence = sum(r.confidence for r in regions) / len(regions) if regions else 0.0
         
         # Create overall bounding box from all regions
         overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
         
-        # Return single OCRResult combining all detections
+        # Return single OCRResult with preserved layout
         return OCRResult(
-            text=combined_text,
+            text=formatted_text,
             confidence=overall_confidence,
             regions=regions,
             bbox=overall_bbox,
@@ -222,9 +224,86 @@ class EasyOCREngine(BaseOCREngine):
                 'detection_count': detection_count,
                 'gpu_enabled': self.gpu,
                 'languages': self.languages,
-                'individual_confidences': [r.confidence for r in regions]
+                'individual_confidences': [r.confidence for r in regions],
+                'layout_preserved': True
             }
         )
+    
+    def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
+        """
+        CORE FIX: Reconstruct document text with proper line breaks and formatting
+        """
+        if not regions:
+            return ""
+        
+        # Sort regions by vertical position (top to bottom), then horizontal (left to right)
+        sorted_regions = sorted(regions, key=lambda r: (r.bbox.y, r.bbox.x))
+        
+        # Group regions into lines based on Y-coordinate proximity
+        lines = []
+        current_line = []
+        current_line_y = None
+        
+        for region in sorted_regions:
+            region_center_y = region.bbox.y + region.bbox.height // 2
+            
+            if current_line_y is None:
+                # First region
+                current_line_y = region_center_y
+                current_line.append(region)
+            else:
+                # Check if this region is on the same line
+                y_distance = abs(region_center_y - current_line_y)
+                
+                if y_distance <= self.line_height_threshold:
+                    # Same line - add to current line
+                    current_line.append(region)
+                else:
+                    # New line - finish current line and start new one
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = [region]
+                    current_line_y = region_center_y
+        
+        # Add the last line
+        if current_line:
+            lines.append(current_line)
+        
+        # Build the formatted text
+        formatted_lines = []
+        
+        for line_regions in lines:
+            # Sort regions in the line by X-coordinate (left to right)
+            line_regions.sort(key=lambda r: r.bbox.x)
+            
+            # Combine text from regions in the line with appropriate spacing
+            line_text_parts = []
+            prev_region = None
+            
+            for region in line_regions:
+                if prev_region is not None:
+                    # Calculate horizontal distance between regions
+                    horizontal_gap = region.bbox.x - (prev_region.bbox.x + prev_region.bbox.width)
+                    
+                    # Add extra spaces for large gaps (likely separate words/columns)
+                    if horizontal_gap > self.word_spacing_threshold:
+                        # Multiple spaces for large gaps
+                        spaces = " " * min(4, max(2, horizontal_gap // 10))
+                        line_text_parts.append(spaces)
+                    else:
+                        # Single space for normal word separation
+                        line_text_parts.append(" ")
+                
+                line_text_parts.append(region.text)
+                prev_region = region
+            
+            # Join the line parts and add to formatted lines
+            line_text = "".join(line_text_parts).strip()
+            if line_text:  # Only add non-empty lines
+                formatted_lines.append(line_text)
+        
+        # Join all lines with newlines to preserve document structure
+        return "\n".join(formatted_lines)
     
     def _polygon_to_bbox(self, points: List[List[float]]) -> Tuple[int, int, int, int]:
         """Convert polygon points to bounding box coordinates"""
@@ -273,7 +352,8 @@ class EasyOCREngine(BaseOCREngine):
                 'handwriting': self.supports_handwriting,
                 'multiple_languages': self.supports_multiple_languages,
                 'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis
+                'structure_analysis': self.supports_structure_analysis,
+                'layout_preservation': True  # NEW: Added layout preservation capability
             },
             'optimal_for': ['handwritten_text', 'mixed_text', 'multilingual', 'natural_scenes'],
             'performance_profile': {
@@ -293,7 +373,8 @@ class EasyOCREngine(BaseOCREngine):
                 'uses_preprocessing_pipeline': True,
                 'returns_single_result': True,
                 'compatible_with_base_engine': True,
-                'works_with_engine_manager': True
+                'works_with_engine_manager': True,
+                'preserves_document_layout': True  # NEW: Layout preservation feature
             }
         }
         

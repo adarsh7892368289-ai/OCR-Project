@@ -83,7 +83,7 @@ class PipelineTestRunner:
         
         # Look for img1.jpg first, then any available image
         sample_dir = Path("data/sample_images")
-        test_images = ["img1.jpg", "test1.jpg", "sample1.jpg"]
+        test_images = ["img3.jpg"]
         
         image_path = None
         
@@ -681,11 +681,11 @@ class PipelineTestRunner:
                         else:
                             f.write("[NO TEXT DETECTED]\n")
                             
-                        f.write("─" * 50 + "\n")
-                        f.write("CONTINUOUS TEXT (As single block):\n")
-                        f.write("─" * 20 + "\n")
-                        f.write(raw_text if raw_text.strip() else "[NO TEXT DETECTED]")
-                        f.write("\n" + "─" * 20 + "\n\n")
+                        # f.write("─" * 50 + "\n")
+                        # f.write("CONTINUOUS TEXT (As single block):\n")
+                        # f.write("─" * 20 + "\n")
+                        # f.write(raw_text if raw_text.strip() else "[NO TEXT DETECTED]")
+                        # f.write("\n" + "─" * 20 + "\n\n")
                         
                     else:
                         f.write(f"Status: ❌ NOT AVAILABLE\n")
