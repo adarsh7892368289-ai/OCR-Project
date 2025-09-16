@@ -54,11 +54,11 @@ except ImportError:
     F = None
 
 # Import from parent modules - FIXED import paths according to project structure
-from advanced_ocr.config import OCRConfig
-from advanced_ocr.utils.logger import OCRLogger
-from advanced_ocr.utils.model_utils import ModelLoader
-from advanced_ocr.utils.image_utils import ImageProcessor
-from advanced_ocr.results import BoundingBox, TextRegion
+from ..config import OCRConfig
+from ..utils.logger import OCRLogger
+from ..utils.model_utils import ModelLoader
+from ..utils.image_utils import ImageProcessor
+from ..results import BoundingBox, TextRegion
 
 
 class CRAFTDetector:

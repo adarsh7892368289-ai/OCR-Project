@@ -1,427 +1,407 @@
-# src/advanced_ocr/core.py
 """
-Advanced OCR Engine Management Core
+Advanced OCR System - Core Orchestrator
+=======================================
 
-This module provides the core engine management functionality for the advanced OCR
-system, enabling intelligent coordination of multiple OCR engines with performance
-tracking and optimization.
+Main pipeline controller that coordinates the entire OCR processing flow.
 
-The module focuses on:
-- Multi-engine processing and comparison
-- Intelligent engine selection based on content type
-- Performance tracking and bottleneck identification
-- Parallel processing capabilities
-- Engine initialization and cleanup
+PIPELINE FLOW:
+1. Receive raw image from __init__.py
+2. Call image_processor.py → get (enhanced_image, text_regions, quality_metrics)
+3. Call engine_coordinator.py → get raw OCRResult(s)
+4. Call text_processor.py → get final OCRResult
+5. Return final result to __init__.py
 
-Classes:
-    EngineManager: Main engine coordination and management class
-    EnginePerformance: Performance metrics tracking for individual engines
-
-Functions:
-    process_with_best_engine: Process image with automatically selected best engine
-    process_with_multiple_engines: Process with multiple engines for comparison
-    batch_process: Process multiple images efficiently
-
-Example:
-    >>> manager = EngineManager()
-    >>> manager.register_engine("tesseract", tesseract_engine)
-    >>> result = manager.process_with_best_engine(image)
-    >>> print(f"OCR result: {result.text}")
-
+DEPENDENCIES: image_processor.py, engine_coordinator.py, text_processor.py, config.py, logger.py
+USED BY: __init__.py ONLY
 """
 
-import os
 import time
+from pathlib import Path
+from typing import Union, Optional, List, Dict, Any
 import numpy as np
-import logging
-from typing import List, Dict, Any, Optional, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from PIL import Image
+import cv2
 
-from .base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult
+from .config import OCRConfig
+from .results import OCRResult, ProcessingMetrics, BoundingBox
+from .utils.logger import OCRLogger, ProcessingStageTimer
+from .utils.image_utils import ImageLoader, ImageValidator
+from .utils.model_utils import ModelLoader
+from .preprocessing.image_processor import ImageProcessor, PreprocessingResult
+from .engines.engine_coordinator import EngineCoordinator, CoordinationResult
+from .postprocessing.text_processor import TextProcessor
 
-@dataclass
-class EnginePerformance:
-    """Track engine performance metrics"""
-    engine_name: str
-    total_processed: int = 0
-    successful_processes: int = 0
-    total_time: float = 0.0
-    total_confidence: float = 0.0
-    success_rate: float = 0.0
-    avg_confidence: float = 0.0
-    avg_processing_time: float = 0.0
-    
-    def update(self, processing_time: float, confidence: float, success: bool):
-        """Update performance metrics"""
-        self.total_processed += 1
-        self.total_time += processing_time
-        
-        if success:
-            self.successful_processes += 1
-            self.total_confidence += confidence
-        
-        # Recalculate averages
-        self.success_rate = self.successful_processes / self.total_processed
-        if self.successful_processes > 0:
-            self.avg_confidence = self.total_confidence / self.successful_processes
-        self.avg_processing_time = self.total_time / self.total_processed
 
-class EngineManager:
+class OCRCore:
     """
-    Modern Engine Manager - Multi-Engine Coordination
+    Main orchestrator for the Advanced OCR pipeline.
     
-    Clean architecture for managing multiple OCR engines:
-    - Engine registration and initialization
-    - Intelligent engine selection
-    - Multi-engine processing and comparison
-    - Performance tracking and optimization
+    Coordinates the flow between preprocessing, engine coordination, and postprocessing
+    while maintaining clean separation of concerns and comprehensive error handling.
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """Initialize engine manager with optional configuration"""
-        self.config = config or {}
-        self.engines: Dict[str, BaseOCREngine] = {}
-        self.performance: Dict[str, EnginePerformance] = {}
-        self.logger = logging.getLogger(__name__)
+    def __init__(self, config: Optional[OCRConfig] = None):
+        """
+        Initialize the OCR core with configuration and component instances.
         
-        # Configuration with defaults
-        self.max_workers = self.config.get('max_workers', 3)
-        self.timeout = self.config.get('timeout', 300)
-        self.enable_parallel = self.config.get('enable_parallel', True)
+        Args:
+            config: OCR configuration object. If None, uses default configuration.
+        """
+        self.config = config or OCRConfig()
+        self.logger = OCRLogger(self.config.logging)
         
-        # Engine selection strategy
-        self.selection_strategy = self.config.get('selection_strategy', 'adaptive')
+        # Initialize pipeline components
+        self._initialize_components()
         
-        # Engine priorities for different content types
-        self.engine_priorities = {
-            'printed': ['tesseract', 'paddleocr', 'easyocr', 'trocr'],
-            'handwritten': ['trocr', 'easyocr', 'paddleocr', 'tesseract'],
-            'mixed': ['paddleocr', 'easyocr', 'trocr', 'tesseract'],
-            'document': ['paddleocr', 'tesseract', 'easyocr', 'trocr'],
-            'default': ['paddleocr', 'easyocr', 'tesseract', 'trocr']
-        }
+        # Performance tracking
+        self.processing_metrics = []
         
-    def register_engine(self, engine_name: str, engine: BaseOCREngine) -> bool:
-        """Register and initialize an OCR engine"""
+        self.logger.info("OCR Core initialized successfully", extra={
+            "config_hash": hash(str(self.config)),
+            "components_loaded": len(self._get_component_status())
+        })
+    
+    def _initialize_components(self) -> None:
+        """Initialize all pipeline components with error handling."""
         try:
-            if engine_name in self.engines:
-                self.logger.warning(f"Engine {engine_name} already registered, overwriting")
+            # Initialize preprocessing pipeline
+            self.image_processor = ImageProcessor(self.config.preprocessing)
+            self.logger.debug("Image processor initialized")
             
-            self.engines[engine_name] = engine
-            self.performance[engine_name] = EnginePerformance(engine_name=engine_name)
+            # Initialize engine coordination layer
+            self.engine_coordinator = EngineCoordinator(self.config.engines)
+            self.logger.debug("Engine coordinator initialized")
             
-            # Auto-initialize the engine
-            try:
-                if engine.initialize():
-                    self.logger.info(f"Registered and initialized engine: {engine_name}")
-                else:
-                    self.logger.warning(f"Registered engine {engine_name} but initialization failed")
-            except Exception as init_error:
-                self.logger.warning(f"Engine {engine_name} registered but initialization failed: {init_error}")
+            # Initialize postprocessing pipeline
+            self.text_processor = TextProcessor(self.config.postprocessing)
+            self.logger.debug("Text processor initialized")
             
-            return True
+            # Initialize utilities
+            self.image_loader = ImageLoader()
+            self.image_validator = ImageValidator()
             
         except Exception as e:
-            self.logger.error(f"Failed to register engine {engine_name}: {e}")
-            return False
+            self.logger.error("Failed to initialize components", extra={
+                "error": str(e),
+                "error_type": type(e).__name__
+            })
+            raise RuntimeError(f"Core initialization failed: {str(e)}") from e
     
-    def get_available_engines(self) -> Dict[str, BaseOCREngine]:
-        """Get all registered engines"""
-        return self.engines.copy()
-    
-    def get_initialized_engines(self) -> Dict[str, BaseOCREngine]:
-        """Get only initialized engines"""
-        return {name: engine for name, engine in self.engines.items() 
-                if engine.is_initialized}
-    
-    def select_best_engine(self, image: np.ndarray, content_type: str = 'default') -> str:
-        """Select best engine based on content type and performance"""
-        initialized_engines = self.get_initialized_engines()
+    def extract_text(
+        self, 
+        image: Union[str, Path, np.ndarray, Image.Image],
+        region_filter: Optional[List[BoundingBox]] = None,
+        processing_options: Optional[Dict[str, Any]] = None
+    ) -> OCRResult:
+        """
+        Main text extraction method - orchestrates the entire pipeline.
         
-        if not initialized_engines:
-            raise RuntimeError("No initialized engines available")
-        
-        # Get priority list for content type
-        priority_list = self.engine_priorities.get(content_type, 
-                                                  self.engine_priorities['default'])
-        
-        # Find first available engine from priority list
-        for engine_name in priority_list:
-            if engine_name in initialized_engines:
-                return engine_name
-        
-        # Fallback to first available engine
-        return list(initialized_engines.keys())[0]
-    
-    def process_with_multiple_engines(self, image: np.ndarray, 
-                                    engine_names: Optional[List[str]] = None) -> Dict[str, List[OCRResult]]:
-        """Process image with multiple engines for comparison"""
-        if engine_names is None:
-            engine_names = list(self.get_initialized_engines().keys())
-        
-        results = {}
-        
-        if self.enable_parallel and len(engine_names) > 1:
-            # Parallel processing
-            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(engine_names))) as executor:
-                future_to_engine = {
-                    executor.submit(self._process_single_engine, engine_name, image): engine_name
-                    for engine_name in engine_names
-                    if engine_name in self.engines and self.engines[engine_name].is_initialized
-                }
-                
-                for future in as_completed(future_to_engine, timeout=self.timeout):
-                    engine_name = future_to_engine[future]
-                    try:
-                        result = future.result()
-                        results[engine_name] = result
-                    except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed: {e}")
-                        results[engine_name] = []
-        else:
-            # Sequential processing
-            for engine_name in engine_names:
-                if engine_name in self.engines and self.engines[engine_name].is_initialized:
-                    try:
-                        result = self._process_single_engine(engine_name, image)
-                        results[engine_name] = result
-                    except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed: {e}")
-                        results[engine_name] = []
-        
-        return results
-    
-    def _process_single_engine(self, engine_name: str, image: np.ndarray) -> List[OCRResult]:
-        """Process image with a single engine"""
-        start_time = time.time()
-        engine = self.engines[engine_name]
-        
-        try:
-            # Process image
-            ocr_results = engine.process_image(image)
-            processing_time = time.time() - start_time
+        Args:
+            image: Input image (file path, PIL Image, or numpy array)
+            region_filter: Optional list of regions to focus on
+            processing_options: Optional processing parameters override
             
-            # Handle different return types
-            if isinstance(ocr_results, list):
-                results = ocr_results
+        Returns:
+            OCRResult: Complete extraction results with text, confidence, and metadata
+            
+        Raises:
+            ValueError: If image is invalid or unsupported format
+            RuntimeError: If processing pipeline fails
+        """
+        # Start overall timer
+        with ProcessingStageTimer("total_processing", self.logger) as total_timer:
+            
+            # Stage 1: Load and validate input image
+            with ProcessingStageTimer("image_loading", self.logger):
+                validated_image = self._load_and_validate_image(image)
+            
+            # Stage 2: Preprocessing - get enhanced image, text regions, quality metrics
+            with ProcessingStageTimer("preprocessing", self.logger):
+                preprocessing_result = self._run_preprocessing(validated_image, region_filter)
+            
+            # Stage 3: Engine coordination - select engines and extract text
+            with ProcessingStageTimer("engine_coordination", self.logger):
+                coordination_result = self._run_engine_coordination(
+                    preprocessing_result, processing_options
+                )
+            
+            # Stage 4: Postprocessing - fusion, layout reconstruction, final confidence
+            with ProcessingStageTimer("postprocessing", self.logger):
+                final_result = self._run_postprocessing(
+                    coordination_result, preprocessing_result
+                )
+            
+            # Stage 5: Finalize result with metrics
+            self._finalize_result(final_result, total_timer.elapsed_time)
+            
+            return final_result
+    
+    def _load_and_validate_image(
+        self, 
+        image: Union[str, Path, np.ndarray, Image.Image]
+    ) -> np.ndarray:
+        """
+        Load and validate input image with comprehensive error handling.
+        
+        Args:
+            image: Input image in various formats
+            
+        Returns:
+            np.ndarray: Validated image as numpy array in BGR format
+            
+        Raises:
+            ValueError: If image is invalid or unsupported
+        """
+        try:
+            # Load image using ImageLoader utility
+            if isinstance(image, (str, Path)):
+                loaded_image = self.image_loader.load_from_path(image)
+                self.logger.debug(f"Loaded image from path: {image}")
+            elif isinstance(image, Image.Image):
+                loaded_image = self.image_loader.load_from_pil(image)
+                self.logger.debug("Loaded image from PIL Image")
+            elif isinstance(image, np.ndarray):
+                loaded_image = self.image_loader.load_from_numpy(image)
+                self.logger.debug("Loaded image from numpy array")
             else:
-                # Single result - convert to list
-                results = [ocr_results] if ocr_results else []
+                raise ValueError(f"Unsupported image type: {type(image)}")
             
-            # Update performance
-            if results:
-                avg_confidence = sum(r.confidence for r in results) / len(results)
-                self.performance[engine_name].update(processing_time, avg_confidence, True)
-            else:
-                self.performance[engine_name].update(processing_time, 0.0, False)
+            # Validate image quality and format
+            validation_result = self.image_validator.validate(loaded_image)
+            if not validation_result.is_valid:
+                raise ValueError(f"Image validation failed: {validation_result.error_message}")
             
-            return results
+            self.logger.info("Image loaded and validated successfully", extra={
+                "image_shape": loaded_image.shape,
+                "image_size_mb": loaded_image.nbytes / (1024 * 1024),
+                "validation_score": validation_result.quality_score
+            })
+            
+            return loaded_image
             
         except Exception as e:
-            processing_time = time.time() - start_time
-            self.performance[engine_name].update(processing_time, 0.0, False)
-            raise e
+            self.logger.error("Image loading failed", extra={
+                "error": str(e),
+                "image_type": type(image).__name__
+            })
+            raise ValueError(f"Failed to load image: {str(e)}") from e
     
-    def compare_results(self, results: Dict[str, List[OCRResult]]) -> Dict[str, Any]:
-        """Compare results from multiple engines"""
-        if not results:
-            return {}
+    def _run_preprocessing(
+        self, 
+        image: np.ndarray, 
+        region_filter: Optional[List[BoundingBox]]
+    ) -> PreprocessingResult:
+        """
+        Run the preprocessing pipeline through image_processor.py.
         
-        comparison = {
-            'engine_count': len(results),
-            'total_detections': {},
-            'confidence_scores': {},
-            'processing_quality': {},
-            'best_engine': None,
-            'consensus_text': None
-        }
-        
-        # Calculate metrics for each engine
-        best_score = 0.0
-        best_engine = None
-        
-        for engine_name, ocr_results in results.items():
-            if not ocr_results:
-                comparison['total_detections'][engine_name] = 0
-                comparison['confidence_scores'][engine_name] = 0.0
-                comparison['processing_quality'][engine_name] = 'failed'
-                continue
+        Args:
+            image: Validated input image
+            region_filter: Optional regions to focus processing on
             
-            # Calculate metrics
-            total_detections = len(ocr_results)
-            avg_confidence = sum(r.confidence for r in ocr_results) / total_detections
-            total_text_length = sum(len(r.text) for r in ocr_results)
-            
-            # Quality score (combination of confidence and text length)
-            quality_score = (avg_confidence * 0.7) + (min(total_text_length / 100, 1.0) * 0.3)
-            
-            comparison['total_detections'][engine_name] = total_detections
-            comparison['confidence_scores'][engine_name] = avg_confidence
-            comparison['processing_quality'][engine_name] = 'excellent' if quality_score > 0.8 else 'good' if quality_score > 0.6 else 'fair'
-            
-            if quality_score > best_score:
-                best_score = quality_score
-                best_engine = engine_name
-        
-        comparison['best_engine'] = best_engine
-        
-        # Generate consensus text from best engine
-        if best_engine and results[best_engine]:
-            comparison['consensus_text'] = ' '.join(r.text for r in results[best_engine])
-        
-        return comparison
-    
-    def select_best_result(self, results: Dict[str, List[OCRResult]]) -> Optional[OCRResult]:
-        """Select the best result from multiple engine outputs"""
-        if not results:
-            return None
-        
-        best_result = None
-        best_score = 0.0
-        
-        for engine_name, ocr_results in results.items():
-            if not ocr_results:
-                continue
-            
-            for result in ocr_results:
-                # Score based on confidence and text length
-                text_length_score = min(len(result.text) / 50, 1.0)  # Normalize to 0-1
-                combined_score = (result.confidence * 0.8) + (text_length_score * 0.2)
-                
-                if combined_score > best_score:
-                    best_score = combined_score
-                    best_result = result
-        
-        return best_result
-    
-    def batch_process(self, images: List[np.ndarray], 
-                     engine_name: Optional[str] = None) -> List[List[OCRResult]]:
-        """Process multiple images with specified or best engine"""
-        if not images:
-            return []
-        
-        # Select engine if not specified
-        if engine_name is None:
-            engine_name = self.select_best_engine(images[0])
-        
-        if engine_name not in self.engines or not self.engines[engine_name].is_initialized:
-            raise ValueError(f"Engine {engine_name} not available")
-        
-        engine = self.engines[engine_name]
-        
-        # Use engine's batch processing if available
-        if hasattr(engine, 'batch_process'):
-            return engine.batch_process(images)
-        else:
-            # Manual batch processing
-            results = []
-            for image in images:
-                try:
-                    result = engine.process_image(image)
-                    if isinstance(result, list):
-                        results.append(result)
-                    else:
-                        results.append([result] if result else [])
-                except Exception as e:
-                    self.logger.error(f"Batch processing failed for image: {e}")
-                    results.append([])
-            return results
-    
-    def process_with_best_engine(self, image: np.ndarray, 
-                               content_type: str = 'default') -> List[OCRResult]:
-        """Process image with automatically selected best engine"""
-        if image is None or image.size == 0:
-            return []
-        
+        Returns:
+            PreprocessingResult: Enhanced image, text regions, and quality metrics
+        """
         try:
-            best_engine = self.select_best_engine(image, content_type)
-            return self._process_single_engine(best_engine, image)
-        except Exception as e:
-            self.logger.error(f"Best engine processing failed: {e}")
-            return []
-    
-    def get_performance_stats(self) -> Dict[str, Any]:
-        """Get performance statistics for all engines"""
-        stats = {
-            'total_engines': len(self.engines),
-            'initialized_engines': len(self.get_initialized_engines()),
-            'engine_performance': {},
-            'system_stats': {
-                'max_workers': self.max_workers,
-                'parallel_enabled': self.enable_parallel,
-                'timeout': self.timeout
-            }
-        }
-        
-        # Add individual engine stats
-        total_processed = 0
-        total_time = 0.0
-        
-        for engine_name, perf in self.performance.items():
-            stats['engine_performance'][engine_name] = {
-                'total_processed': perf.total_processed,
-                'success_rate': perf.success_rate,
-                'avg_confidence': perf.avg_confidence,
-                'avg_processing_time': perf.avg_processing_time,
-                'status': 'initialized' if self.engines[engine_name].is_initialized else 'not_initialized'
-            }
+            # Call image_processor.py for unified preprocessing
+            preprocessing_result = self.image_processor.process(
+                image=image,
+                region_filter=region_filter
+            )
             
-            total_processed += perf.total_processed
-            total_time += perf.total_time
-        
-        # System-wide stats
-        stats['system_stats']['total_processed'] = total_processed
-        stats['system_stats']['total_time'] = total_time
-        if total_processed > 0:
-            stats['system_stats']['average_time'] = total_time / total_processed
-        
-        return stats
+            self.logger.info("Preprocessing completed successfully", extra={
+                "text_regions_detected": len(preprocessing_result.text_regions),
+                "enhancement_applied": preprocessing_result.enhancement_applied,
+                "quality_score": preprocessing_result.quality_metrics.overall_score,
+                "processing_time_ms": preprocessing_result.processing_time_ms
+            })
+            
+            return preprocessing_result
+            
+        except Exception as e:
+            self.logger.error("Preprocessing failed", extra={
+                "error": str(e),
+                "stage": "preprocessing"
+            })
+            raise RuntimeError(f"Preprocessing pipeline failed: {str(e)}") from e
     
-    def cleanup(self):
-        """Cleanup all engines"""
-        for engine_name, engine in self.engines.items():
-            try:
-                if hasattr(engine, 'cleanup'):
-                    engine.cleanup()
-                self.logger.info(f"Cleaned up engine: {engine_name}")
-            except Exception as e:
-                self.logger.error(f"Failed to cleanup engine {engine_name}: {e}")
+    def _run_engine_coordination(
+        self, 
+        preprocessing_result: PreprocessingResult,
+        processing_options: Optional[Dict[str, Any]]
+    ) -> CoordinationResult:
+        """
+        Run engine coordination through engine_coordinator.py.
         
-        self.engines.clear()
-        self.performance.clear()
+        Args:
+            preprocessing_result: Results from preprocessing stage
+            processing_options: Optional processing parameter overrides
+            
+        Returns:
+            CoordinationResult: Raw OCR results from selected engines
+        """
+        try:
+            # Call engine_coordinator.py for intelligent engine selection and execution
+            coordination_result = self.engine_coordinator.coordinate_extraction(
+                enhanced_image=preprocessing_result.enhanced_image,
+                text_regions=preprocessing_result.text_regions,
+                quality_metrics=preprocessing_result.quality_metrics,
+                processing_options=processing_options or {}
+            )
+            
+            self.logger.info("Engine coordination completed successfully", extra={
+                "engines_used": [engine.name for engine in coordination_result.engines_used],
+                "content_type_detected": coordination_result.content_classification.primary_type,
+                "results_count": len(coordination_result.ocr_results),
+                "total_confidence": sum(r.confidence.overall for r in coordination_result.ocr_results) / len(coordination_result.ocr_results)
+            })
+            
+            return coordination_result
+            
+        except Exception as e:
+            self.logger.error("Engine coordination failed", extra={
+                "error": str(e),
+                "stage": "engine_coordination"
+            })
+            raise RuntimeError(f"Engine coordination failed: {str(e)}") from e
+    
+    def _run_postprocessing(
+        self, 
+        coordination_result: CoordinationResult,
+        preprocessing_result: PreprocessingResult
+    ) -> OCRResult:
+        """
+        Run postprocessing through text_processor.py.
+        
+        Args:
+            coordination_result: Results from engine coordination
+            preprocessing_result: Original preprocessing results for context
+            
+        Returns:
+            OCRResult: Final processed and enhanced OCR result
+        """
+        try:
+            # Call text_processor.py for result fusion, layout reconstruction, and final processing
+            final_result = self.text_processor.process_results(
+                ocr_results=coordination_result.ocr_results,
+                content_classification=coordination_result.content_classification,
+                quality_metrics=preprocessing_result.quality_metrics,
+                original_image_shape=preprocessing_result.original_image_shape
+            )
+            
+            self.logger.info("Postprocessing completed successfully", extra={
+                "final_text_length": len(final_result.text),
+                "confidence_score": final_result.confidence.overall,
+                "layout_elements": len(final_result.layout_elements) if final_result.layout_elements else 0,
+                "processing_applied": final_result.processing_metadata.get("postprocessing_steps", [])
+            })
+            
+            return final_result
+            
+        except Exception as e:
+            self.logger.error("Postprocessing failed", extra={
+                "error": str(e),
+                "stage": "postprocessing"
+            })
+            raise RuntimeError(f"Postprocessing pipeline failed: {str(e)}") from e
+    
+    def _finalize_result(self, result: OCRResult, total_processing_time: float) -> None:
+        """
+        Finalize the OCR result with comprehensive metrics and metadata.
+        
+        Args:
+            result: The final OCR result to enhance
+            total_processing_time: Total processing time in seconds
+        """
+        # Add processing metrics
+        if not hasattr(result, 'processing_metrics') or result.processing_metrics is None:
+            result.processing_metrics = ProcessingMetrics()
+        
+        result.processing_metrics.total_processing_time = total_processing_time
+        result.processing_metrics.timestamp = time.time()
+        
+        # Add system metadata
+        if not hasattr(result, 'processing_metadata') or result.processing_metadata is None:
+            result.processing_metadata = {}
+        
+        result.processing_metadata.update({
+            "ocr_core_version": "1.0.0",
+            "pipeline_components": self._get_component_status(),
+            "configuration_hash": hash(str(self.config)),
+            "total_processing_stages": 4
+        })
+        
+        # Store metrics for analysis
+        self.processing_metrics.append({
+            "timestamp": result.processing_metrics.timestamp,
+            "processing_time": total_processing_time,
+            "text_length": len(result.text),
+            "confidence": result.confidence.overall
+        })
+        
+        self.logger.info("OCR processing completed", extra={
+            "total_time_s": total_processing_time,
+            "text_extracted_chars": len(result.text),
+            "final_confidence": result.confidence.overall,
+            "success": True
+        })
+    
+    def _get_component_status(self) -> Dict[str, bool]:
+        """Get status of all pipeline components."""
+        return {
+            "image_processor": hasattr(self, 'image_processor') and self.image_processor is not None,
+            "engine_coordinator": hasattr(self, 'engine_coordinator') and self.engine_coordinator is not None,
+            "text_processor": hasattr(self, 'text_processor') and self.text_processor is not None,
+            "image_loader": hasattr(self, 'image_loader') and self.image_loader is not None,
+            "image_validator": hasattr(self, 'image_validator') and self.image_validator is not None
+        }
+    
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """
+        Get comprehensive performance metrics from recent processing.
+        
+        Returns:
+            Dict containing processing performance statistics
+        """
+        if not self.processing_metrics:
+            return {"status": "no_metrics", "message": "No processing completed yet"}
+        
+        recent_metrics = self.processing_metrics[-10:]  # Last 10 processes
+        
+        return {
+            "total_processes": len(self.processing_metrics),
+            "recent_processes": len(recent_metrics),
+            "average_processing_time": sum(m["processing_time"] for m in recent_metrics) / len(recent_metrics),
+            "average_confidence": sum(m["confidence"] for m in recent_metrics) / len(recent_metrics),
+            "average_text_length": sum(m["text_length"] for m in recent_metrics) / len(recent_metrics),
+            "component_status": self._get_component_status()
+        }
+    
+    def cleanup(self) -> None:
+        """Clean up resources and close connections."""
+        try:
+            # Cleanup components if they have cleanup methods
+            for component_name in ["image_processor", "engine_coordinator", "text_processor"]:
+                component = getattr(self, component_name, None)
+                if component and hasattr(component, 'cleanup'):
+                    component.cleanup()
+            
+            self.logger.info("OCR Core cleanup completed successfully")
+            
+        except Exception as e:
+            self.logger.error("Error during cleanup", extra={"error": str(e)})
     
     def __enter__(self):
+        """Context manager entry."""
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with cleanup."""
         self.cleanup()
-    def process_with_best_engine_single(self, image: np.ndarray, 
-                                   content_type: str = 'default') -> Optional[OCRResult]:
-        """Process image with best engine and return single best result"""
-        if image is None or image.size == 0:
-            return None
         
-        try:
-            # Get all results from best engine
-            results_list = self.process_with_best_engine(image, content_type)
-            
-            # Return single best result
-            if results_list:
-                # Find result with highest confidence
-                return max(results_list, key=lambda x: x.confidence)
-            else:
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Best engine single processing failed: {e}")
-            return None
-# Alias for backward compatibility
-OCREngineManager = EngineManager
-
-# Export main classes
-__all__ = [
-    'EngineManager',
-    'OCREngineManager', 
-    'EnginePerformance'
-]
+        if exc_type is not None:
+            self.logger.error("OCR Core exited with exception", extra={
+                "exception_type": exc_type.__name__,
+                "exception_message": str(exc_val)
+            })
+        
+        return False  # Don't suppress exceptions

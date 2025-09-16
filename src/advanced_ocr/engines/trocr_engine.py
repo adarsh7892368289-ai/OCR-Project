@@ -128,8 +128,8 @@ class TrOCREngine(BaseOCREngine):
         else:
             return 'cpu'
     
-    @cached_model_load
-    def _load_models(self):
+    @cached_model_load("trocr", "transformers")
+    def _load_model(self):
         """
         Load TrOCR processor and model using your ModelCache system.
         
@@ -173,7 +173,7 @@ class TrOCREngine(BaseOCREngine):
     def _ensure_models_loaded(self) -> None:
         """Ensure models are loaded before processing."""
         if self.processor is None or self.model is None:
-            self.processor, self.model = self._load_models()
+            self.processor, self.model = self._load_model()
     
     def extract(self, image: np.ndarray, text_regions: List[BoundingBox]) -> OCRResult:
         """

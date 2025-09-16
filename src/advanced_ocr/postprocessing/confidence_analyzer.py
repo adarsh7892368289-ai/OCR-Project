@@ -1,706 +1,408 @@
 """
-Enhanced Confidence Filter with Intelligent Filtering
-Step 5: Advanced Post-processing Implementation
-
-Features:
-- Multi-level confidence scoring
-- Context-aware filtering
-- Quality assessment
-- Adaptive thresholds
-- Performance monitoring
+Advanced OCR System - Confidence Analysis Module
+ONLY JOB: Analyze and calculate confidence scores
+DEPENDENCIES: results.py, config.py
+USED BY: text_processor.py ONLY
 """
 
 import numpy as np
-import logging
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field
-from pathlib import Path
-import time
-import json
-from collections import defaultdict, Counter
-import statistics
 import re
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from enum import Enum
 
-from ..core.base_engine import OCRResult, TextRegion, BoundingBox
-from ..config import ConfigManager
-from ..utils.logger import get_logger
-
-logger = get_logger(__name__)
+from ..results import OCRResult, ConfidenceMetrics, TextRegion, Word, Line
+from ..config import OCRConfig
 
 
-@dataclass
-class ConfidenceAnalysis:
-    """Confidence analysis result"""
-    original_confidence: float
-    adjusted_confidence: float
-    quality_score: float
-    factors: Dict[str, float] = field(default_factory=dict)
-    recommendations: List[str] = field(default_factory=list)
-    should_filter: bool = False
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'original_confidence': self.original_confidence,
-            'adjusted_confidence': self.adjusted_confidence,
-            'quality_score': self.quality_score,
-            'factors': self.factors,
-            'recommendations': self.recommendations,
-            'should_filter': self.should_filter
-        }
+class ConfidenceFactors(Enum):
+    """Factors that influence confidence scoring"""
+    CONSENSUS = "consensus"
+    CHARACTER_CLARITY = "character_clarity"
+    WORD_DICTIONARY = "word_dictionary"
+    SPATIAL_CONSISTENCY = "spatial_consistency"
+    ENGINE_RELIABILITY = "engine_reliability"
 
 
 @dataclass
-class FilterResult:
-    """Result of confidence filtering"""
-    original_result: OCRResult
-    filtered_result: OCRResult
-    removed_regions: List[TextRegion]
-    confidence_analysis: List[ConfidenceAnalysis]
-    processing_time: float
-    statistics: Dict[str, Any] = field(default_factory=dict)
+class ConsensusAnalysis:
+    """Analysis of consensus between multiple OCR results"""
+    agreement_score: float
+    conflicting_regions: List[Tuple[int, int]]  # Character positions with conflicts
+    consensus_text: str
+    engine_votes: Dict[str, float]
+
+
+@dataclass  
+class CharacterAnalysis:
+    """Analysis of individual character confidence"""
+    char_scores: List[float]
+    problematic_chars: List[Tuple[int, str, float]]  # Position, char, score
+    average_score: float
+    min_score: float
+
+
+class ConfidenceAnalyzer:
+    """
+    ONLY RESPONSIBILITY: Analyze and calculate confidence scores
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'original_regions_count': len(self.original_result.regions),
-            'filtered_regions_count': len(self.filtered_result.regions),
-            'removed_regions_count': len(self.removed_regions),
-            'processing_time': self.processing_time,
-            'statistics': self.statistics,
-            'confidence_analysis': [analysis.to_dict() for analysis in self.confidence_analysis]
+    Receives OCRResult(s) from text_processor.py and returns enhanced confidence metrics.
+    Does NOT perform text processing, result selection, or result fusion.
+    """
+    
+    def __init__(self, config: OCRConfig):
+        self.config = config
+        self.min_confidence_threshold = config.postprocessing.confidence_threshold
+        self.consensus_weight = 0.4
+        self.clarity_weight = 0.3
+        self.spatial_weight = 0.2
+        self.reliability_weight = 0.1
+        
+        # Common English words for dictionary checking
+        self._load_dictionary()
+        
+    def _load_dictionary(self):
+        """Load common words for dictionary-based confidence"""
+        # Basic English words - in production, load from file
+        self.common_words = {
+            'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have',
+            'i', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you',
+            'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they',
+            'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would',
+            'there', 'their', 'what', 'so', 'up', 'out', 'if', 'about',
+            'who', 'get', 'which', 'go', 'me', 'when', 'make', 'can',
+            'like', 'time', 'no', 'just', 'him', 'know', 'take',
+            'people', 'into', 'year', 'your', 'good', 'some', 'could',
+            'them', 'see', 'other', 'than', 'then', 'now', 'look',
+            'only', 'come', 'its', 'over', 'think', 'also', 'back',
+            'after', 'use', 'two', 'how', 'our', 'work', 'first',
+            'well', 'way', 'even', 'new', 'want', 'because', 'any',
+            'these', 'give', 'day', 'most', 'us'
         }
-
-
-class EnhancedConfidenceFilter:
-    """
-    Advanced confidence filtering with contextual understanding
-    """
     
-    def __init__(self, config_path: Optional[str] = None):
-        self.config = ConfigManager(config_path).get_section('confidence_filter', {})
-        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
-        
-        # Thresholds configuration
-        self.base_confidence_threshold = self.config.get('base_confidence_threshold', 0.3)
-        self.high_confidence_threshold = self.config.get('high_confidence_threshold', 0.8)
-        self.adaptive_threshold = self.config.get('adaptive_threshold', True)
-        self.context_boost = self.config.get('context_boost', 0.1)
-        
-        # Quality factors
-        self.enable_length_factor = self.config.get('enable_length_factor', True)
-        self.enable_dictionary_factor = self.config.get('enable_dictionary_factor', True)
-        self.enable_context_factor = self.config.get('enable_context_factor', True)
-        self.enable_pattern_factor = self.config.get('enable_pattern_factor', True)
-        self.enable_geometric_factor = self.config.get('enable_geometric_factor', True)
-        
-        # Filter modes
-        self.filter_mode = self.config.get('filter_mode', 'balanced')  # 'strict', 'balanced', 'lenient'
-        self.preserve_high_confidence = self.config.get('preserve_high_confidence', True)
-        self.min_region_size = self.config.get('min_region_size', 3)
-        self.max_noise_ratio = self.config.get('max_noise_ratio', 0.5)
-        
-        # Initialize components
-        self._initialize_dictionaries()
-        self._initialize_patterns()
-        
-        # Statistics and performance tracking
-        self.stats = defaultdict(int)
-        self.confidence_history = []
-        self.threshold_history = []
-        
-        self.logger.info(f"Enhanced confidence filter initialized with mode: {self.filter_mode}")
-    
-    def _initialize_dictionaries(self):
-        """Initialize word dictionaries for quality scoring"""
-        self.common_words = set()
-        self.technical_terms = set()
-        
-        # Load common words
-        try:
-            dict_file = Path(self.config.get('common_words_file', 'data/common_words.txt'))
-            if dict_file.exists():
-                with open(dict_file, 'r', encoding='utf-8') as f:
-                    self.common_words = {line.strip().lower() for line in f if line.strip()}
-                self.logger.info(f"Loaded {len(self.common_words)} common words")
-        except Exception as e:
-            self.logger.warning(f"Could not load common words: {e}")
-        
-        # Fallback common words
-        if not self.common_words:
-            self.common_words = {
-                'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'her',
-                'was', 'one', 'our', 'had', 'by', 'word', 'oil', 'sit', 'now', 'find',
-                'long', 'down', 'day', 'did', 'get', 'come', 'made', 'may', 'part',
-                'time', 'very', 'when', 'much', 'first', 'water', 'been', 'call',
-                'who', 'its', 'now', 'find', 'long', 'down', 'day', 'did', 'get'
-            }
-        
-        # Load technical terms
-        try:
-            tech_file = Path(self.config.get('technical_terms_file', 'data/technical_terms.txt'))
-            if tech_file.exists():
-                with open(tech_file, 'r', encoding='utf-8') as f:
-                    self.technical_terms = {line.strip().lower() for line in f if line.strip()}
-                self.logger.info(f"Loaded {len(self.technical_terms)} technical terms")
-        except Exception as e:
-            self.logger.warning(f"Could not load technical terms: {e}")
-    
-    def _initialize_patterns(self):
-        """Initialize text patterns for quality assessment"""
-        self.valid_patterns = [
-            r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',  # Dates
-            r'\b\d{1,2}:\d{2}(?::\d{2})?\b',        # Times
-            r'\b[A-Z]{1,3}\d+[A-Z]?\b',             # Codes (e.g., A123B)
-            r'\b\d+(?:\.\d+)?%?\b',                 # Numbers/percentages
-            r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', # Proper nouns
-            r'\b[a-zA-Z]+@[a-zA-Z]+\.[a-zA-Z]+\b', # Email-like patterns
-            r'\b\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b', # Phone numbers
-        ]
-        
-        # FIXED: Corrected regex patterns with proper escaping
-        self.noise_patterns = [
-            r'^[^\w\s]+$',          # Only punctuation
-            r'^\s*[|\\/_]+\s*$',    # Line artifacts
-            r'^[.]{3,}$',           # Multiple dots
-            r'^[-_]{3,}$',          # Multiple dashes/underscores
-            r'^[^\x00-\x7F]+$',     # Non-ASCII characters only
-            r'^\w{1,2}$',           # Very short fragments
-        ]
-    
-    def filter_result(
-        self,
-        ocr_result: OCRResult,
-        context: Optional[str] = None,
-        custom_threshold: Optional[float] = None
-    ) -> FilterResult:
+    def analyze_single_result(self, result: OCRResult) -> ConfidenceMetrics:
         """
-        Filter OCR result based on confidence and quality analysis
+        Analyze confidence for a single OCR result
         
         Args:
-            ocr_result: OCR result to filter
-            context: Additional context for filtering decisions
-            custom_threshold: Custom confidence threshold
+            result: Single OCR result to analyze
             
         Returns:
-            FilterResult with filtered regions
+            Enhanced confidence metrics
         """
-        start_time = time.time()
+        # Character-level analysis
+        char_analysis = self._analyze_character_confidence(result.text, result.confidence)
         
-        if not ocr_result.regions:
-            return FilterResult(
-                original_result=ocr_result,
-                filtered_result=ocr_result,
-                removed_regions=[],
-                confidence_analysis=[],
-                processing_time=time.time() - start_time
-            )
+        # Word-level dictionary check
+        word_scores = self._analyze_word_dictionary_match(result.text)
         
-        # Determine threshold
-        threshold = custom_threshold or self._calculate_adaptive_threshold(ocr_result)
+        # Spatial consistency check
+        spatial_score = self._analyze_spatial_consistency(result.regions)
         
-        # Analyze each region
-        confidence_analyses = []
-        filtered_regions = []
-        removed_regions = []
+        # Engine reliability factor
+        engine_reliability = self._get_engine_reliability(result.engine_name)
         
-        for i, region in enumerate(ocr_result.regions):
-            analysis = self._analyze_region_confidence(
-                region, ocr_result.regions, context, i
-            )
-            confidence_analyses.append(analysis)
-            
-            # Decide whether to keep the region
-            should_keep = self._should_keep_region(region, analysis, threshold)
-            
-            if should_keep:
-                # Update region with adjusted confidence
-                updated_region = TextRegion(
-                    text=getattr(region, 'text', getattr(region, 'full_text', str(region))),
-                    bbox=region.bbox,
-                    confidence=analysis.adjusted_confidence,
-                    text_type=region.text_type,
-                    language=region.language,
-                    reading_order=region.reading_order
-                )
-                filtered_regions.append(updated_region)
-            else:
-                removed_regions.append(region)
+        # Combine all factors
+        overall_confidence = self._calculate_weighted_confidence(
+            char_analysis.average_score,
+            word_scores,
+            spatial_score,
+            engine_reliability
+        )
         
-        # Create filtered result
-        filtered_result = OCRResult(
-            text=' '.join(region.full_text for region in filtered_regions),
-            confidence=(
-                sum(region.confidence for region in filtered_regions) / len(filtered_regions)
-                if filtered_regions else 0.0
-            ),
-            regions=filtered_regions,
-            processing_time=ocr_result.processing_time,
-            engine_name=f"{ocr_result.engine_name} + ConfidenceFilter",
-            metadata={
-                **ocr_result.metadata,
-                'confidence_threshold': threshold,
-                'regions_removed': len(removed_regions),
-                'filter_mode': self.filter_mode
+        return ConfidenceMetrics(
+            overall=overall_confidence,
+            word_level=[word_scores] * len(result.text.split()),
+            char_level=char_analysis.char_scores,
+            spatial_consistency=spatial_score,
+            dictionary_match=word_scores,
+            engine_reliability=engine_reliability,
+            factors={
+                ConfidenceFactors.CHARACTER_CLARITY.value: char_analysis.average_score,
+                ConfidenceFactors.WORD_DICTIONARY.value: word_scores,
+                ConfidenceFactors.SPATIAL_CONSISTENCY.value: spatial_score,
+                ConfidenceFactors.ENGINE_RELIABILITY.value: engine_reliability
             }
         )
+    
+    def analyze_consensus(self, results: List[OCRResult]) -> ConfidenceMetrics:
+        """
+        Analyze confidence based on consensus between multiple results
         
-        processing_time = time.time() - start_time
+        Args:
+            results: List of OCR results to analyze consensus
+            
+        Returns:
+            Enhanced confidence metrics with consensus analysis
+        """
+        if len(results) == 1:
+            return self.analyze_single_result(results[0])
         
-        # Update statistics
-        self.stats['total_processed'] += 1
-        self.stats['regions_analyzed'] += len(ocr_result.regions)
-        self.stats['regions_filtered'] += len(removed_regions)
-        self.confidence_history.extend([analysis.adjusted_confidence for analysis in confidence_analyses])
-        self.threshold_history.append(threshold)
+        # Perform consensus analysis
+        consensus_analysis = self._perform_consensus_analysis(results)
         
-        # Calculate statistics - FIXED: Properly handle statistics.mean function
-        statistics_data = {
-            'threshold_used': threshold,
-            'removal_rate': len(removed_regions) / len(ocr_result.regions),
-            'avg_original_confidence': self._safe_mean([a.original_confidence for a in confidence_analyses]),
-            'avg_adjusted_confidence': self._safe_mean([a.adjusted_confidence for a in confidence_analyses]),
-            'quality_distribution': self._calculate_quality_distribution(confidence_analyses)
-        }
-        
-        result = FilterResult(
-            original_result=ocr_result,
-            filtered_result=filtered_result,
-            removed_regions=removed_regions,
-            confidence_analysis=confidence_analyses,
-            processing_time=processing_time,
-            statistics=statistics_data  # FIXED: Renamed to avoid name conflict
+        # Analyze the consensus text
+        base_confidence = self.analyze_single_result(
+            OCRResult(
+                text=consensus_analysis.consensus_text,
+                confidence=consensus_analysis.agreement_score,
+                regions=results[0].regions,  # Use first result's regions
+                engine_name="consensus"
+            )
         )
         
-        self.logger.info(
-            f"Confidence filtering completed: {len(filtered_regions)} kept, "
-            f"{len(removed_regions)} removed (threshold: {threshold:.3f})"
+        # Enhance with consensus factor
+        consensus_enhanced = self._enhance_with_consensus(
+            base_confidence, 
+            consensus_analysis
         )
         
-        return result
+        return consensus_enhanced
     
-    def _safe_mean(self, values: List[float]) -> float:
-        """Safely calculate mean, handling empty lists"""
-        if not values:
-            return 0.0
-        return statistics.mean(values)
-    
-    def _safe_stdev(self, values: List[float]) -> float:
-        """Safely calculate standard deviation, handling edge cases"""
-        if len(values) <= 1:
-            return 0.0
-        return statistics.stdev(values)
-    
-    def _calculate_adaptive_threshold(self, ocr_result: OCRResult) -> float:
-        """Calculate adaptive threshold based on result characteristics"""
-        if not self.adaptive_threshold:
-            return self.base_confidence_threshold
+    def _analyze_character_confidence(self, text: str, base_confidence: float) -> CharacterAnalysis:
+        """Analyze confidence at character level"""
+        char_scores = []
+        problematic_chars = []
         
-        confidences = [region.confidence for region in ocr_result.regions]
-        
-        if not confidences:
-            return self.base_confidence_threshold
-        
-        # Calculate statistics
-        mean_confidence = self._safe_mean(confidences)
-        std_confidence = self._safe_stdev(confidences)
-        median_confidence = statistics.median(confidences)
-        
-        # Base threshold on distribution characteristics
-        if self.filter_mode == 'strict':
-            # Use higher threshold for strict mode
-            threshold = max(
-                self.base_confidence_threshold,
-                median_confidence - 0.5 * std_confidence
-            )
-        elif self.filter_mode == 'lenient':
-            # Use lower threshold for lenient mode
-            threshold = min(
-                self.base_confidence_threshold,
-                mean_confidence - std_confidence
-            )
-        else:  # balanced
-            # Balanced approach
-            threshold = (
-                0.4 * self.base_confidence_threshold +
-                0.3 * mean_confidence +
-                0.3 * median_confidence
-            )
-        
-        # Ensure reasonable bounds
-        threshold = max(0.1, min(0.9, threshold))
-        
-        return round(threshold, 3)
-    
-    def _analyze_region_confidence(
-        self,
-        region: TextRegion,
-        all_regions: List[TextRegion],
-        context: Optional[str],
-        region_index: int
-    ) -> ConfidenceAnalysis:
-        """Analyze confidence of a single region"""
-        factors = {}
-        recommendations = []
-        
-        original_confidence = region.confidence
-        adjusted_confidence = original_confidence
-        
-        # Length factor
-        if self.enable_length_factor:
-            length_factor = self._calculate_length_factor(region.full_text)
-            factors['length'] = length_factor
-            adjusted_confidence *= (1 + 0.1 * length_factor)
+        for i, char in enumerate(text):
+            score = self._calculate_character_score(char, i, text, base_confidence)
+            char_scores.append(score)
             
-            if length_factor < -0.5:
-                recommendations.append("Text too short, consider removal")
-            elif length_factor > 0.5:
-                recommendations.append("Good text length")
+            if score < self.min_confidence_threshold:
+                problematic_chars.append((i, char, score))
         
-        # Dictionary factor
-        if self.enable_dictionary_factor:
-            dict_factor = self._calculate_dictionary_factor(region.full_text)
-            factors['dictionary'] = dict_factor
-            adjusted_confidence *= (1 + 0.15 * dict_factor)
-            
-            if dict_factor > 0.3:
-                recommendations.append("Contains common words")
-            elif dict_factor < -0.3:
-                recommendations.append("Many unknown words")
-        
-        # Context factor
-        if self.enable_context_factor and len(all_regions) > 1:
-            context_factor = self._calculate_context_factor(
-                region, all_regions, region_index
-            )
-            factors['context'] = context_factor
-            adjusted_confidence *= (1 + 0.1 * context_factor)
-            
-            if context_factor > 0.2:
-                recommendations.append("Consistent with surrounding text")
-        
-        # Pattern factor
-        if self.enable_pattern_factor:
-            pattern_factor = self._calculate_pattern_factor(region.full_text)
-            factors['pattern'] = pattern_factor
-            adjusted_confidence *= (1 + 0.1 * pattern_factor)
-            
-            if pattern_factor < -0.5:
-                recommendations.append("Contains noise patterns")
-        
-        # Geometric factor
-        if self.enable_geometric_factor:
-            geometric_factor = self._calculate_geometric_factor(region)
-            factors['geometric'] = geometric_factor
-            adjusted_confidence *= (1 + 0.05 * geometric_factor)
-            
-            if geometric_factor < -0.3:
-                recommendations.append("Unusual text region geometry")
-        
-        # Calculate quality score
-        quality_score = sum(factors.values()) / len(factors) if factors else 0.0
-        
-        # Ensure confidence bounds
-        adjusted_confidence = max(0.0, min(1.0, adjusted_confidence))
-        
-        # Determine if should filter
-        should_filter = (
-            adjusted_confidence < self.base_confidence_threshold or
-            quality_score < -0.5 or
-            len(region.full_text.strip()) < self.min_region_size
-        )
-        
-        return ConfidenceAnalysis(
-            original_confidence=original_confidence,
-            adjusted_confidence=adjusted_confidence,
-            quality_score=quality_score,
-            factors=factors,
-            recommendations=recommendations,
-            should_filter=should_filter
+        return CharacterAnalysis(
+            char_scores=char_scores,
+            problematic_chars=problematic_chars,
+            average_score=np.mean(char_scores) if char_scores else 0.0,
+            min_score=min(char_scores) if char_scores else 0.0
         )
     
-    def _calculate_length_factor(self, text: str) -> float:
-        """Calculate factor based on text length"""
-        text = text.strip()
-        length = len(text)
+    def _calculate_character_score(self, char: str, pos: int, text: str, base: float) -> float:
+        """Calculate confidence score for individual character"""
+        score = base
         
-        if length == 0:
-            return -1.0
-        elif length == 1:
-            return -0.8
-        elif length == 2:
-            return -0.6
-        elif 3 <= length <= 5:
-            return -0.2
-        elif 6 <= length <= 20:
-            return 0.3
-        elif 21 <= length <= 100:
-            return 0.5
-        else:
-            return 0.2  # Very long text might be concatenated
+        # Boost confidence for common characters
+        if char.isalpha() and char.lower() in 'etaoinshrdlu':
+            score *= 1.1
+        
+        # Reduce confidence for easily confused characters
+        confusing_chars = {'0O', '1lI', '5S', '8B', 'cl', 'rn', 'vv'}
+        for pair in confusing_chars:
+            if char in pair:
+                score *= 0.9
+                break
+        
+        # Context analysis - characters that fit well in context get boost
+        if pos > 0 and pos < len(text) - 1:
+            if self._is_contextually_appropriate(char, text[pos-1], text[pos+1]):
+                score *= 1.05
+        
+        return min(1.0, max(0.0, score))
     
-    def _calculate_dictionary_factor(self, text: str) -> float:
-        """Calculate factor based on dictionary word presence"""
-        words = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+    def _is_contextually_appropriate(self, char: str, prev_char: str, next_char: str) -> bool:
+        """Check if character fits well in its context"""
+        # Simple heuristics for contextual appropriateness
+        if char.isalpha():
+            if prev_char.isalpha() and next_char.isalpha():
+                return True
+            if prev_char.isspace() and next_char.isalpha():
+                return True
+        elif char.isdigit():
+            if prev_char.isdigit() or next_char.isdigit():
+                return True
+        elif char.isspace():
+            if prev_char.isalpha() and next_char.isalpha():
+                return True
         
+        return False
+    
+    def _analyze_word_dictionary_match(self, text: str) -> float:
+        """Analyze how many words match common dictionary"""
+        words = re.findall(r'\b\w+\b', text.lower())
         if not words:
-            return -0.5
-        
-        common_word_count = sum(1 for word in words if word in self.common_words)
-        technical_word_count = sum(1 for word in words if word in self.technical_terms)
-        
-        common_ratio = common_word_count / len(words)
-        technical_ratio = technical_word_count / len(words)
-        
-        # Boost for common words, smaller boost for technical terms
-        factor = 0.8 * common_ratio + 0.4 * technical_ratio
-        
-        # Penalty for many unknown words
-        unknown_ratio = 1 - (common_ratio + technical_ratio)
-        if unknown_ratio > 0.7:
-            factor -= 0.5 * unknown_ratio
-        
-        return min(1.0, max(-1.0, factor))
-    
-    def _calculate_context_factor(
-        self,
-        region: TextRegion,
-        all_regions: List[TextRegion],
-        region_index: int
-    ) -> float:
-        """Calculate factor based on context consistency"""
-        if len(all_regions) < 2:
-            return 0.0
-        
-        # Get neighboring regions
-        neighbors = []
-        if region_index > 0:
-            neighbors.append(all_regions[region_index - 1])
-        if region_index < len(all_regions) - 1:
-            neighbors.append(all_regions[region_index + 1])
-        
-        if not neighbors:
-            return 0.0
-        
-        # Calculate similarity with neighbors
-        similarities = []
-        for neighbor in neighbors:
-            # Simple similarity based on character patterns
-            region_chars = set(region.full_text.lower())
-            neighbor_chars = set(neighbor.full_text.lower())
-            
-            if region_chars and neighbor_chars:
-                similarity = len(region_chars & neighbor_chars) / len(region_chars | neighbor_chars)
-                similarities.append(similarity)
-        
-        if not similarities:
-            return 0.0
-        
-        avg_similarity = self._safe_mean(similarities)
-        
-        # Convert similarity to factor
-        if avg_similarity > 0.3:
             return 0.5
-        elif avg_similarity > 0.1:
-            return 0.2
+        
+        matches = sum(1 for word in words if word in self.common_words)
+        return matches / len(words)
+    
+    def _analyze_spatial_consistency(self, regions: List[TextRegion]) -> float:
+        """Analyze spatial consistency of text regions"""
+        if not regions or len(regions) < 2:
+            return 1.0
+        
+        # Check for reasonable spacing and alignment
+        consistency_scores = []
+        
+        for i in range(len(regions) - 1):
+            current = regions[i]
+            next_region = regions[i + 1]
+            
+            # Check horizontal alignment for lines
+            if hasattr(current, 'bbox') and hasattr(next_region, 'bbox'):
+                alignment_score = self._calculate_alignment_score(
+                    current.bbox, next_region.bbox
+                )
+                consistency_scores.append(alignment_score)
+        
+        return np.mean(consistency_scores) if consistency_scores else 1.0
+    
+    def _calculate_alignment_score(self, bbox1, bbox2) -> float:
+        """Calculate alignment score between two bounding boxes"""
+        # Simple alignment check - can be enhanced
+        height_diff = abs(bbox1.height - bbox2.height)
+        max_height = max(bbox1.height, bbox2.height)
+        
+        if max_height > 0:
+            height_consistency = 1.0 - (height_diff / max_height)
         else:
-            return -0.2
+            height_consistency = 1.0
+        
+        return max(0.0, height_consistency)
     
-    def _calculate_pattern_factor(self, text: str) -> float:
-        """Calculate factor based on text patterns"""
-        text = text.strip()
-        
-        if not text:
-            return -1.0
-        
-        # Check for valid patterns
-        valid_score = 0
-        for pattern in self.valid_patterns:
-            if re.search(pattern, text):
-                valid_score += 0.2
-        
-        # Check for noise patterns
-        noise_score = 0
-        for pattern in self.noise_patterns:
-            if re.search(pattern, text):
-                noise_score += 0.3
-        
-        # Calculate final factor
-        factor = valid_score - noise_score
-        
-        # Additional checks
-        if len(text) < 3 and not re.search(r'\d', text):
-            factor -= 0.3
-        
-        if re.search(r'[a-zA-Z]', text) and re.search(r'\d', text):
-            factor += 0.1  # Mixed alphanumeric is often valid
-        
-        return min(1.0, max(-1.0, factor))
-    
-    def _calculate_geometric_factor(self, region: TextRegion) -> float:
-        """Calculate factor based on region geometry"""
-        if not region.bbox:
-            return 0.0
-        
-        width = region.bbox.x2 - region.bbox.x1
-        height = region.bbox.y2 - region.bbox.y1
-        
-        if width <= 0 or height <= 0:
-            return -0.5
-        
-        aspect_ratio = width / height
-        area = width * height
-        
-        # Reasonable aspect ratios for text
-        if 0.1 <= aspect_ratio <= 50:
-            geometric_factor = 0.2
-        else:
-            geometric_factor = -0.3
-        
-        # Very small regions are suspicious
-        if area < 100:
-            geometric_factor -= 0.3
-        elif area > 10000:
-            geometric_factor += 0.1
-        
-        return min(1.0, max(-1.0, geometric_factor))
-    
-    def _should_keep_region(
-        self,
-        region: TextRegion,
-        analysis: ConfidenceAnalysis,
-        threshold: float
-    ) -> bool:
-        """Determine if a region should be kept"""
-        # Always keep high-confidence regions if enabled
-        if self.preserve_high_confidence and analysis.original_confidence >= self.high_confidence_threshold:
-            return True
-        
-        # Check adjusted confidence against threshold
-        if analysis.adjusted_confidence < threshold:
-            return False
-        
-        # Additional quality checks
-        if analysis.quality_score < -0.7:
-            return False
-        
-        # Minimum text length
-        if len(region.full_text.strip()) < self.min_region_size:
-            return False
-        
-        # Check noise ratio
-        noise_chars = sum(1 for c in region.full_text if not c.isalnum() and not c.isspace())
-        total_chars = len(region.full_text)
-        if total_chars > 0 and noise_chars / total_chars > self.max_noise_ratio:
-            return False
-        
-        return True
-    
-    def _calculate_quality_distribution(self, analyses: List[ConfidenceAnalysis]) -> Dict[str, int]:
-        """Calculate quality score distribution"""
-        distribution = {'high': 0, 'medium': 0, 'low': 0}
-        
-        for analysis in analyses:
-            if analysis.quality_score > 0.3:
-                distribution['high'] += 1
-            elif analysis.quality_score > -0.3:
-                distribution['medium'] += 1
-            else:
-                distribution['low'] += 1
-        
-        return distribution
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get filtering statistics"""
-        stats = {
-            'total_processed': self.stats['total_processed'],
-            'regions_analyzed': self.stats['regions_analyzed'],
-            'regions_filtered': self.stats['regions_filtered'],
-            'filter_rate': (
-                self.stats['regions_filtered'] / max(self.stats['regions_analyzed'], 1)
-            ),
-            'configuration': {
-                'filter_mode': self.filter_mode,
-                'base_threshold': self.base_confidence_threshold,
-                'adaptive_threshold': self.adaptive_threshold,
-                'preserve_high_confidence': self.preserve_high_confidence
-            }
+    def _get_engine_reliability(self, engine_name: str) -> float:
+        """Get reliability score for specific engine"""
+        # Engine reliability based on typical performance
+        reliability_scores = {
+            'tesseract': 0.85,
+            'paddleocr': 0.90,
+            'easyocr': 0.82,
+            'trocr': 0.88,
+            'consensus': 0.95
         }
         
-        if self.confidence_history:
-            stats['confidence_stats'] = {
-                'mean': self._safe_mean(self.confidence_history),
-                'median': statistics.median(self.confidence_history),
-                'std': self._safe_stdev(self.confidence_history),
-                'min': min(self.confidence_history),
-                'max': max(self.confidence_history),
-                'samples': len(self.confidence_history)
-            }
-        
-        if self.threshold_history:
-            stats['threshold_stats'] = {
-                'mean': self._safe_mean(self.threshold_history),
-                'min': min(self.threshold_history),
-                'max': max(self.threshold_history),
-                'samples': len(self.threshold_history)
-            }
-        
-        return stats
+        return reliability_scores.get(engine_name.lower(), 0.75)
     
-    def reset_statistics(self):
-        """Reset all statistics"""
-        self.stats.clear()
-        self.confidence_history.clear()
-        self.threshold_history.clear()
-        self.logger.info("Statistics reset")
+    def _calculate_weighted_confidence(self, char_score: float, word_score: float, 
+                                     spatial_score: float, reliability_score: float) -> float:
+        """Calculate weighted overall confidence"""
+        weighted = (
+            char_score * self.clarity_weight +
+            word_score * self.consensus_weight +  # Using consensus weight for word matching
+            spatial_score * self.spatial_weight +
+            reliability_score * self.reliability_weight
+        )
+        
+        return min(1.0, max(0.0, weighted))
     
-    def optimize_threshold(self, validation_data: List[Tuple[OCRResult, List[bool]]]) -> float:
-        """
-        Optimize threshold based on validation data
+    def _perform_consensus_analysis(self, results: List[OCRResult]) -> ConsensusAnalysis:
+        """Perform detailed consensus analysis between results"""
+        texts = [r.text for r in results]
+        engines = [r.engine_name for r in results]
         
-        Args:
-            validation_data: List of (OCRResult, ground_truth_labels) pairs
-                           where ground_truth_labels[i] is True if region i should be kept
-            
-        Returns:
-            Optimized threshold value
-        """
-        if not validation_data:
-            return self.base_confidence_threshold
+        # Find consensus text using character-level voting
+        consensus_text = self._build_consensus_text(texts)
         
-        best_threshold = self.base_confidence_threshold
-        best_f1_score = 0.0
+        # Calculate agreement score
+        agreement_score = self._calculate_agreement_score(texts, consensus_text)
         
-        # Test different thresholds
-        for threshold in np.arange(0.1, 0.9, 0.05):
-            true_positives = 0
-            false_positives = 0
-            true_negatives = 0
-            false_negatives = 0
-            
-            for ocr_result, ground_truth in validation_data:
-                filter_result = self.filter_result(ocr_result, custom_threshold=threshold)
-                
-                kept_indices = {i for i, region in enumerate(ocr_result.regions) 
-                              if region in filter_result.filtered_result.regions}
-                
-                for i, should_keep in enumerate(ground_truth):
-                    if i in kept_indices and should_keep:
-                        true_positives += 1
-                    elif i in kept_indices and not should_keep:
-                        false_positives += 1
-                    elif i not in kept_indices and should_keep:
-                        false_negatives += 1
-                    else:
-                        true_negatives += 1
-            
-            # Calculate F1 score
-            precision = true_positives / max(true_positives + false_positives, 1)
-            recall = true_positives / max(true_positives + false_negatives, 1)
-            f1_score = 2 * precision * recall / max(precision + recall, 1e-10)
-            
-            if f1_score > best_f1_score:
-                best_f1_score = f1_score
-                best_threshold = threshold
+        # Find conflicting regions
+        conflicts = self._find_conflicting_regions(texts)
         
-        self.logger.info(f"Optimized threshold: {best_threshold:.3f} (F1: {best_f1_score:.3f})")
-        return best_threshold
-AdvancedConfidenceFilter = EnhancedConfidenceFilter
+        # Calculate engine vote weights
+        engine_votes = self._calculate_engine_votes(results, consensus_text)
+        
+        return ConsensusAnalysis(
+            agreement_score=agreement_score,
+            conflicting_regions=conflicts,
+            consensus_text=consensus_text,
+            engine_votes=engine_votes
+        )
+    
+    def _build_consensus_text(self, texts: List[str]) -> str:
+        """Build consensus text from multiple OCR results"""
+        if not texts:
+            return ""
+        
+        # For simplicity, use the longest common text as base
+        # In production, implement more sophisticated consensus algorithm
+        max_len_text = max(texts, key=len)
+        
+        # Simple consensus: character-by-character majority vote
+        consensus_chars = []
+        min_length = min(len(t) for t in texts)
+        
+        for i in range(min_length):
+            chars_at_pos = [text[i] for text in texts]
+            # Take most common character at this position
+            consensus_char = max(set(chars_at_pos), key=chars_at_pos.count)
+            consensus_chars.append(consensus_char)
+        
+        # Add remaining characters from longest text
+        if len(max_len_text) > min_length:
+            consensus_chars.extend(max_len_text[min_length:])
+        
+        return ''.join(consensus_chars)
+    
+    def _calculate_agreement_score(self, texts: List[str], consensus: str) -> float:
+        """Calculate how well texts agree with consensus"""
+        if not texts or not consensus:
+            return 0.0
+        
+        agreement_scores = []
+        for text in texts:
+            # Calculate character-level similarity
+            similarity = self._calculate_similarity(text, consensus)
+            agreement_scores.append(similarity)
+        
+        return np.mean(agreement_scores)
+    
+    def _calculate_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two texts"""
+        if not text1 or not text2:
+            return 0.0
+        
+        # Simple character-level similarity
+        min_len = min(len(text1), len(text2))
+        matches = sum(1 for i in range(min_len) if text1[i] == text2[i])
+        
+        max_len = max(len(text1), len(text2))
+        return matches / max_len if max_len > 0 else 0.0
+    
+    def _find_conflicting_regions(self, texts: List[str]) -> List[Tuple[int, int]]:
+        """Find character positions where texts conflict"""
+        conflicts = []
+        if len(texts) < 2:
+            return conflicts
+        
+        min_len = min(len(t) for t in texts)
+        
+        for i in range(min_len):
+            chars = set(text[i] for text in texts)
+            if len(chars) > 1:  # Conflict found
+                conflicts.append((i, i + 1))
+        
+        return conflicts
+    
+    def _calculate_engine_votes(self, results: List[OCRResult], consensus: str) -> Dict[str, float]:
+        """Calculate how much each engine contributed to consensus"""
+        votes = {}
+        
+        for result in results:
+            similarity = self._calculate_similarity(result.text, consensus)
+            reliability = self._get_engine_reliability(result.engine_name)
+            vote_weight = similarity * reliability
+            votes[result.engine_name] = vote_weight
+        
+        return votes
+    
+    def _enhance_with_consensus(self, base_confidence: ConfidenceMetrics, 
+                               consensus: ConsensusAnalysis) -> ConfidenceMetrics:
+        """Enhance confidence metrics with consensus information"""
+        # Boost overall confidence based on consensus agreement
+        consensus_boost = consensus.agreement_score * 0.2
+        enhanced_overall = min(1.0, base_confidence.overall + consensus_boost)
+        
+        # Add consensus factor
+        enhanced_factors = base_confidence.factors.copy()
+        enhanced_factors[ConfidenceFactors.CONSENSUS.value] = consensus.agreement_score
+        
+        return ConfidenceMetrics(
+            overall=enhanced_overall,
+            word_level=base_confidence.word_level,
+            char_level=base_confidence.char_level,
+            spatial_consistency=base_confidence.spatial_consistency,
+            dictionary_match=base_confidence.dictionary_match,
+            engine_reliability=base_confidence.engine_reliability,
+            factors=enhanced_factors
+        )

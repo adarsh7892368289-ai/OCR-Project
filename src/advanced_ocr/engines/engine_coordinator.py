@@ -40,16 +40,16 @@ from typing import List, Dict, Optional, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-from advanced_ocr.preprocessing.content_classifier import ContentClassifier, ContentClassification
-from advanced_ocr.preprocessing.image_processor import PreprocessingResult
-from advanced_ocr.engines.base_engine import BaseOCREngine
-from advanced_ocr.engines.tesseract_engine import TesseractEngine
-from advanced_ocr.engines.paddleocr_engine import PaddleOCREngine
-from advanced_ocr.engines.easyocr_engine import EasyOCREngine
-from advanced_ocr.engines.trocr_engine import TrOCREngine
-from advanced_ocr.results import OCRResult
-from advanced_ocr.config import OCRConfig
-from advanced_ocr.utils.logger import OCRLogger
+from ..preprocessing.content_classifier import ContentClassifier, ContentClassification
+from ..preprocessing.image_processor import PreprocessingResult
+from ..engines.base_engine import BaseOCREngine
+from ..engines.tesseract_engine import TesseractEngine
+from ..engines.paddleocr_engine import PaddleOCREngine
+from ..engines.easyocr_engine import EasyOCREngine
+from ..engines.trocr_engine import TrOCREngine
+from ..results import OCRResult
+from ..config import OCRConfig
+from ..utils.logger import OCRLogger
 
 
 class EngineStrategy(Enum):

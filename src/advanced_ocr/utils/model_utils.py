@@ -56,9 +56,9 @@ except ImportError:
     TF_AVAILABLE = False
     tf = None
 
-from advanced_ocr.config import OCRConfig
+from ..config import OCRConfig
 
-from advanced_ocr.utils.logger import OCRLogger
+from ..utils.logger import OCRLogger
 
 class ModelCache:
     """

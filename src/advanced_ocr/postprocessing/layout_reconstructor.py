@@ -1,892 +1,939 @@
 """
-Enhanced Layout Analyzer with Document Structure Understanding
-Step 5: Advanced Post-processing Implementation
-
-Features:
-- Document structure detection
-- Reading order optimization
-- Layout classification
-- Table detection and extraction
-- Multi-column support
-- Performance monitoring
+Advanced OCR System - Layout Reconstruction Module
+ONLY JOB: Reconstruct document layout structure
+DEPENDENCIES: results.py, image_utils.py, config.py
+USED BY: text_processor.py ONLY
 """
 
-import cv2
-import numpy as np
-import logging
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field
-from pathlib import Path
-import time
-import json
-from collections import defaultdict, Counter
-from enum import Enum
-import math
-import statistics
 import re
+import numpy as np
+from typing import List, Dict, Tuple, Optional, Set
+from dataclasses import dataclass
+from enum import Enum
 
-try:
-    from sklearn.cluster import DBSCAN, KMeans
-    from sklearn.preprocessing import StandardScaler
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-
-from ..core.base_engine import OCRResult, TextRegion, BoundingBox
-from ..config import ConfigManager
-from ..utils.logger import get_logger
-from ..utils.image_utils import ImageUtils
-
-logger = get_logger(__name__)
+from ..results import OCRResult, TextRegion, Word, Line, Paragraph, Block, Page, BoundingBox
+from ..config import OCRConfig
+from ..utils.image_utils import CoordinateTransformer
 
 
 class LayoutType(Enum):
-    """Document layout types"""
+    """Types of document layouts"""
     SINGLE_COLUMN = "single_column"
     MULTI_COLUMN = "multi_column"
     TABLE = "table"
-    FORM = "form"
     MIXED = "mixed"
-    UNKNOWN = "unknown"
+    FORM = "form"
 
 
-class TextBlockType(Enum):
-    """Text block types"""
-    TITLE = "title"
-    HEADING = "heading"
-    PARAGRAPH = "paragraph"
-    LIST_ITEM = "list_item"
-    TABLE_CELL = "table_cell"
-    CAPTION = "caption"
-    FOOTER = "footer"
-    HEADER = "header"
-    UNKNOWN = "unknown"
-
-
-@dataclass
-class TextBlock:
-    """Enhanced text block with layout information"""
-    regions: List[TextRegion]
-    bbox: BoundingBox
-    block_type: TextBlockType
-    text: str = ""
-    confidence: float = 0.0
-    reading_order: int = 0
-    column_index: int = 0
-    row_index: int = 0
-    font_size: Optional[float] = None
-    is_bold: bool = False
-    is_italic: bool = False
-    alignment: str = "left"  # left, center, right, justify
-    
-    def __post_init__(self):
-        if not self.full_text:
-            self.full_text = ' '.join(region.full_text for region in self.regions)
-        if self.confidence == 0.0:
-            self.confidence = (
-                sum(region.confidence for region in self.regions) / len(self.regions)
-                if self.regions else 0.0
-            )
-
-
-@dataclass
-class TableStructure:
-    """Table structure information"""
-    rows: int
-    columns: int
-    cells: List[List[Optional[TextBlock]]]
-    bbox: BoundingBox
-    confidence: float = 0.0
-    has_header: bool = False
-    
-    def get_cell_text(self, row: int, col: int) -> str:
-        """Get text content of a specific cell"""
-        if 0 <= row < len(self.cells) and 0 <= col < len(self.cells[row]):
-            cell = self.cells[row][col]
-            return cell.full_text if cell else ""
-        return ""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'rows': self.rows,
-            'columns': self.columns,
-            'bbox': self.bbox.__dict__,
-            'confidence': self.confidence,
-            'has_header': self.has_header,
-            'cell_data': [
-                [cell.full_text if cell else "" for cell in row]
-                for row in self.cells
-            ]
-        }
+class ReadingOrder(Enum):
+    """Reading order strategies"""
+    LEFT_TO_RIGHT_TOP_TO_BOTTOM = "ltr_ttb"
+    RIGHT_TO_LEFT_TOP_TO_BOTTOM = "rtl_ttb"
+    TOP_TO_BOTTOM_LEFT_TO_RIGHT = "ttb_ltr"
+    COLUMN_WISE = "column_wise"
 
 
 @dataclass
 class LayoutAnalysis:
-    """Complete layout analysis result"""
+    """Analysis of document layout structure"""
     layout_type: LayoutType
-    text_blocks: List[TextBlock]
-    tables: List[TableStructure]
-    reading_order: List[int]
-    column_count: int = 1
-    confidence: float = 0.0
-    processing_time: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'layout_type': self.layout_type.value,
-            'block_count': len(self.text_blocks),
-            'table_count': len(self.tables),
-            'column_count': self.column_count,
-            'confidence': self.confidence,
-            'processing_time': self.processing_time,
-            'metadata': self.metadata,
-            'tables': [table.to_dict() for table in self.tables]
-        }
+    reading_order: ReadingOrder
+    column_count: int
+    average_line_height: float
+    average_word_spacing: float
+    text_alignment: str  # left, center, right, justified
+    has_tables: bool
+    has_forms: bool
 
 
-class EnhancedLayoutAnalyzer:
+@dataclass
+class ReconstructionMetrics:
+    """Metrics from layout reconstruction process"""
+    original_regions: int
+    words_created: int
+    lines_created: int
+    paragraphs_created: int
+    blocks_created: int
+    confidence: float
+    layout_analysis: LayoutAnalysis
+
+
+class LayoutReconstructor:
     """
-    Advanced layout analyzer with document structure understanding
+    ONLY RESPONSIBILITY: Reconstruct document layout structure
+    
+    Receives OCRResult from text_processor.py and reconstructs text hierarchy
+    (word→line→paragraph→block→page). Preserves original spacing and structure.
+    Does NOT perform text cleaning, confidence analysis, or result fusion.
     """
     
-    def __init__(self, config_path: Optional[str] = None):
-        self.config = ConfigManager(config_path).get_section('layout_analyzer', {})
-        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+    def __init__(self, config: OCRConfig):
+        self.config = config
+        self.coordinate_transformer = CoordinateTransformer()
         
-        # Configuration
-        self.enable_table_detection = self.config.get('enable_table_detection', True)
-        self.enable_column_detection = self.config.get('enable_column_detection', True)
-        self.enable_block_classification = self.config.get('enable_block_classification', True)
-        self.enable_reading_order = self.config.get('enable_reading_order', True)
+        # Layout reconstruction parameters
+        self.line_height_tolerance = 0.3  # 30% tolerance for line height variations
+        self.word_spacing_threshold = 1.5  # Multiple of average character width
+        self.paragraph_spacing_threshold = 1.8  # Multiple of average line height
+        self.column_gap_threshold = 2.0  # Multiple of average word spacing
         
-        # Detection parameters
-        self.min_table_cells = self.config.get('min_table_cells', 4)
-        self.column_gap_threshold = self.config.get('column_gap_threshold', 50)
-        self.line_height_threshold = self.config.get('line_height_threshold', 1.5)
-        self.clustering_eps = self.config.get('clustering_eps', 20)
-        self.min_block_size = self.config.get('min_block_size', 3)
+        # Text alignment detection thresholds
+        self.alignment_tolerance = 0.1  # 10% of line width
         
-        # Initialize components
-        self.image_utils = ImageUtils()
-        
-        # Statistics
-        self.stats = defaultdict(int)
-        self.processing_history = []
-        
-        self.logger.info("Enhanced layout analyzer initialized")
-    
-    def analyze_layout(
-        self,
-        ocr_result: OCRResult,
-        image: Optional[np.ndarray] = None
-    ) -> LayoutAnalysis:
+    def reconstruct_layout(self, result: OCRResult) -> Tuple[OCRResult, ReconstructionMetrics]:
         """
-        Analyze document layout and structure
+        Reconstruct hierarchical layout from flat OCR result
         
         Args:
-            ocr_result: OCR result with text regions
-            image: Original image for additional analysis
+            result: OCR result with flat text regions
             
         Returns:
-            LayoutAnalysis with document structure information
+            Tuple of (enhanced_result_with_hierarchy, reconstruction_metrics)
         """
-        start_time = time.time()
-        
-        if not ocr_result.regions:
-            return LayoutAnalysis(
-                layout_type=LayoutType.UNKNOWN,
-                text_blocks=[],
-                tables=[],
-                reading_order=[],
-                processing_time=time.time() - start_time
-            )
-        
-        try:
-            # Step 1: Group regions into text blocks
-            text_blocks = self._group_regions_into_blocks(ocr_result.regions)
-            
-            # Step 2: Classify block types
-            if self.enable_block_classification:
-                text_blocks = self._classify_text_blocks(text_blocks)
-            
-            # Step 3: Detect tables
-            tables = []
-            if self.enable_table_detection:
-                tables = self._detect_tables(text_blocks, image)
-            
-            # Step 4: Detect column layout
-            column_count = 1
-            if self.enable_column_detection:
-                column_count = self._detect_columns(text_blocks)
-                text_blocks = self._assign_column_indices(text_blocks, column_count)
-            
-            # Step 5: Determine reading order
-            reading_order = list(range(len(text_blocks)))
-            if self.enable_reading_order:
-                reading_order = self._calculate_reading_order(text_blocks, column_count)
-            
-            # Step 6: Classify overall layout type
-            layout_type = self._classify_layout_type(text_blocks, tables, column_count)
-            
-            # Calculate confidence
-            confidence = self._calculate_layout_confidence(text_blocks, tables)
-            
-            processing_time = time.time() - start_time
-            
-            # Update statistics
-            self.stats['layouts_analyzed'] += 1
-            self.stats[f'layout_type_{layout_type.value}'] += 1
-            self.stats['tables_detected'] += len(tables)
-            self.processing_history.append({
-                'timestamp': time.time(),
-                'processing_time': processing_time,
-                'block_count': len(text_blocks),
-                'table_count': len(tables),
-                'column_count': column_count
-            })
-            
-            analysis = LayoutAnalysis(
-                layout_type=layout_type,
-                text_blocks=text_blocks,
-                tables=tables,
-                reading_order=reading_order,
-                column_count=column_count,
-                confidence=confidence,
-                processing_time=processing_time,
-                metadata={
-                    'original_regions': len(ocr_result.regions),
-                    'blocks_created': len(text_blocks),
-                    'clustering_method': 'dbscan' if SKLEARN_AVAILABLE else 'distance_based'
-                }
-            )
-            
-            self.logger.info(
-                f"Layout analysis completed: {layout_type.value}, "
-                f"{len(text_blocks)} blocks, {len(tables)} tables"
-            )
-            
-            return analysis
-            
-        except Exception as e:
-            self.logger.error(f"Error in layout analysis: {e}")
-            return LayoutAnalysis(
-                layout_type=LayoutType.UNKNOWN,
-                text_blocks=[],
-                tables=[],
-                reading_order=[],
-                processing_time=time.time() - start_time
-            )
-    
-    def _group_regions_into_blocks(self, regions: List[TextRegion]) -> List[TextBlock]:
-        """Group text regions into coherent blocks"""
-        if not regions:
-            return []
-        
-        # Extract features for clustering
-        features = []
-        for region in regions:
-            if region.bbox:
-                features.append([
-                    region.bbox.x1,
-                    region.bbox.y1,
-                    region.bbox.x2 - region.bbox.x1,  # width
-                    region.bbox.y2 - region.bbox.y1   # height
-                ])
-            else:
-                features.append([0, 0, 0, 0])
-        
-        features = np.array(features)
-        
-        if SKLEARN_AVAILABLE and len(features) > 1:
-            # Use DBSCAN clustering for better grouping
-            scaler = StandardScaler()
-            scaled_features = scaler.fit_transform(features)
-            
-            clustering = DBSCAN(
-                eps=self.clustering_eps / 100.0,  # Normalize for scaled features
-                min_samples=1
-            )
-            cluster_labels = clustering.fit_predict(scaled_features)
-        else:
-            # Simple distance-based grouping
-            cluster_labels = self._distance_based_clustering(features)
-        
-        # Group regions by cluster
-        clusters = defaultdict(list)
-        for i, label in enumerate(cluster_labels):
-            clusters[label].append(regions[i])
-        
-        # Create text blocks
-        text_blocks = []
-        for cluster_regions in clusters.values():
-            if len(cluster_regions) == 0:
-                continue
-            
-            # Calculate bounding box for the block
-            min_x1 = min(r.bbox.x1 for r in cluster_regions if r.bbox)
-            min_y1 = min(r.bbox.y1 for r in cluster_regions if r.bbox)
-            max_x2 = max(r.bbox.x2 for r in cluster_regions if r.bbox)
-            max_y2 = max(r.bbox.y2 for r in cluster_regions if r.bbox)
-            
-            block_bbox = BoundingBox(min_x1, min_y1, max_x2, max_y2)
-            
-            # Sort regions within block by reading order
-            sorted_regions = sorted(
-                cluster_regions,
-                key=lambda r: (r.bbox.y1 if r.bbox else 0, r.bbox.x1 if r.bbox else 0)
-            )
-            
-            text_block = TextBlock(
-                regions=sorted_regions,
-                bbox=block_bbox,
-                block_type=TextBlockType.UNKNOWN
-            )
-            
-            text_blocks.append(text_block)
-        
-        return text_blocks
-    
-    def _distance_based_clustering(self, features: np.ndarray) -> List[int]:
-        """Simple distance-based clustering fallback"""
-        if len(features) == 0:
-            return []
-        
-        clusters = []
-        cluster_id = 0
-        
-        for i, feature in enumerate(features):
-            assigned = False
-            
-            # Check if this feature belongs to an existing cluster
-            for j in range(i):
-                if clusters[j] == -1:  # Skip noise points
-                    continue
-                
-                # Calculate distance
-                other_feature = features[j]
-                distance = np.sqrt(np.sum((feature - other_feature) ** 2))
-                
-                if distance < self.clustering_eps:
-                    clusters.append(clusters[j])
-                    assigned = True
-                    break
-            
-            if not assigned:
-                clusters.append(cluster_id)
-                cluster_id += 1
-        
-        return clusters
-    
-    def _classify_text_blocks(self, text_blocks: List[TextBlock]) -> List[TextBlock]:
-        """Classify text blocks by their type"""
-        for block in text_blocks:
-            block.block_type = self._determine_block_type(block)
-        
-        return text_blocks
-    
-    def _determine_block_type(self, block: TextBlock) -> TextBlockType:
-        """Determine the type of a text block"""
-        text = block.full_text.strip()
-        
-        if not text:
-            return TextBlockType.UNKNOWN
-        
-        # Title detection (short, often centered, larger font implied by position)
-        if (len(text) < 100 and 
-            len(text.split()) < 10 and
-            block.bbox.y1 < 200):  # Assuming top of page
-            return TextBlockType.TITLE
-        
-        # Heading detection (short lines, often bold/larger)
-        if (len(text) < 200 and 
-            len(text.split()) < 20 and
-            not text.endswith(('.', '!', '?'))):
-            return TextBlockType.HEADING
-        
-        # List item detection
-        if (text.startswith(('•', '-', '*', '1.', '2.', '3.', '4.', '5.')) or
-            re.match(r'^\d+[\.\)]\s', text) or
-            re.match(r'^[a-zA-Z][\.\)]\s', text)):
-            return TextBlockType.LIST_ITEM
-        
-        # Table cell detection (short, structured content)
-        if (len(text) < 50 and 
-            (re.search(r'\d+', text) or len(text.split()) < 5)):
-            return TextBlockType.TABLE_CELL
-        
-        # Footer detection (bottom of page)
-        if block.bbox.y1 > 800:  # Assuming page height > 800
-            return TextBlockType.FOOTER
-        
-        # Header detection (top of page)
-        if block.bbox.y1 < 100:
-            return TextBlockType.HEADER
-        
-        # Default to paragraph
-        return TextBlockType.PARAGRAPH
-    
-    def _detect_tables(
-        self, 
-        text_blocks: List[TextBlock], 
-        image: Optional[np.ndarray] = None
-    ) -> List[TableStructure]:
-        """Detect table structures in the document"""
-        tables = []
-        
-        # Find potential table regions
-        table_candidates = self._find_table_candidates(text_blocks)
-        
-        for candidate_blocks in table_candidates:
-            table = self._analyze_table_structure(candidate_blocks, image)
-            if table:
-                tables.append(table)
-        
-        return tables
-    
-    def _find_table_candidates(self, text_blocks: List[TextBlock]) -> List[List[TextBlock]]:
-        """Find groups of blocks that might form tables"""
-        # Group blocks that are likely table cells
-        table_blocks = [
-            block for block in text_blocks 
-            if block.block_type == TextBlockType.TABLE_CELL or
-            (len(block.full_text.split()) < 10 and len(block.regions) == 1)
-        ]
-        
-        if len(table_blocks) < self.min_table_cells:
-            return []
-        
-        # Group nearby table blocks
-        candidates = []
-        
-        if SKLEARN_AVAILABLE:
-            # Use clustering to group table blocks
-            positions = np.array([
-                [block.bbox.x1, block.bbox.y1] for block in table_blocks
-            ])
-            
-            clustering = DBSCAN(eps=50, min_samples=2)
-            cluster_labels = clustering.fit_predict(positions)
-            
-            clusters = defaultdict(list)
-            for i, label in enumerate(cluster_labels):
-                if label != -1:  # Ignore noise
-                    clusters[label].append(table_blocks[i])
-            
-            for cluster_blocks in clusters.values():
-                if len(cluster_blocks) >= self.min_table_cells:
-                    candidates.append(cluster_blocks)
-        else:
-            # Simple grid-based grouping
-            if len(table_blocks) >= self.min_table_cells:
-                candidates.append(table_blocks)
-        
-        return candidates
-    
-    def _analyze_table_structure(
-        self, 
-        blocks: List[TextBlock], 
-        image: Optional[np.ndarray] = None
-    ) -> Optional[TableStructure]:
-        """Analyze the structure of a table candidate"""
-        if len(blocks) < self.min_table_cells:
-            return None
-        
-        # Sort blocks by position
-        sorted_blocks = sorted(
-            blocks,
-            key=lambda b: (round(b.bbox.y1 / 20) * 20, b.bbox.x1)  # Group by approximate row
-        )
-        
-        # Detect rows and columns
-        rows = self._detect_table_rows(sorted_blocks)
-        columns = self._detect_table_columns(rows)
-        
-        if len(rows) < 2 or columns < 2:
-            return None
-        
-        # Create cell matrix
-        cells = [[None for _ in range(columns)] for _ in range(len(rows))]
-        
-        for row_idx, row_blocks in enumerate(rows):
-            for block in row_blocks:
-                col_idx = self._determine_column_index(block, columns)
-                if 0 <= col_idx < columns:
-                    cells[row_idx][col_idx] = block
-        
-        # Calculate table bounding box
-        min_x1 = min(block.bbox.x1 for block in blocks)
-        min_y1 = min(block.bbox.y1 for block in blocks)
-        max_x2 = max(block.bbox.x2 for block in blocks)
-        max_y2 = max(block.bbox.y2 for block in blocks)
-        table_bbox = BoundingBox(min_x1, min_y1, max_x2, max_y2)
-        
-        # Calculate confidence
-        filled_cells = sum(1 for row in cells for cell in row if cell is not None)
-        total_cells = len(rows) * columns
-        confidence = filled_cells / total_cells if total_cells > 0 else 0.0
-        
-        # Detect header
-        has_header = self._detect_table_header(cells)
-        
-        return TableStructure(
-            rows=len(rows),
-            columns=columns,
-            cells=cells,
-            bbox=table_bbox,
-            confidence=confidence,
-            has_header=has_header
-        )
-    
-    def _detect_table_rows(self, sorted_blocks: List[TextBlock]) -> List[List[TextBlock]]:
-        """Group blocks into table rows"""
-        if not sorted_blocks:
-            return []
-        
-        rows = []
-        current_row = [sorted_blocks[0]]
-        current_y = sorted_blocks[0].bbox.y1
-        
-        for block in sorted_blocks[1:]:
-            # If the block is on roughly the same line, add to current row
-            if abs(block.bbox.y1 - current_y) < self.line_height_threshold * 10:
-                current_row.append(block)
-            else:
-                # Start a new row
-                if current_row:
-                    rows.append(sorted(current_row, key=lambda b: b.bbox.x1))
-                current_row = [block]
-                current_y = block.bbox.y1
-        
-        # Add the last row
-        if current_row:
-            rows.append(sorted(current_row, key=lambda b: b.bbox.x1))
-        
-        return rows
-    
-    def _detect_table_columns(self, rows: List[List[TextBlock]]) -> int:
-        """Detect the number of columns in a table"""
-        if not rows:
-            return 0
-        
-        # Find the maximum number of blocks in any row
-        max_columns = max(len(row) for row in rows)
-        
-        # Verify column consistency
-        column_positions = []
-        for row in rows:
-            if len(row) == max_columns:
-                positions = [block.bbox.x1 for block in row]
-                column_positions.append(positions)
-        
-        if not column_positions:
-            return max_columns
-        
-        # Calculate average column positions
-        avg_positions = []
-        for col_idx in range(max_columns):
-            positions = [pos[col_idx] for pos in column_positions if col_idx < len(pos)]
-            if positions:
-                avg_positions.append(sum(positions) / len(positions))
-        
-        return len(avg_positions)
-    
-    def _determine_column_index(self, block: TextBlock, total_columns: int) -> int:
-        """Determine which column a block belongs to"""
-        # Simple approach: divide the width into equal columns
-        # In a real implementation, you'd use the detected column positions
-        block_center = (block.bbox.x1 + block.bbox.x2) / 2
-        
-        # This is a simplified approach - you'd want to use actual column boundaries
-        # For now, assume equal column widths
-        return min(int(block_center / (1000 / total_columns)), total_columns - 1)
-    
-    def _detect_table_header(self, cells: List[List[Optional[TextBlock]]]) -> bool:
-        """Detect if the table has a header row"""
-        if not cells or len(cells) < 2:
-            return False
-        
-        first_row = cells[0]
-        second_row = cells[1]
-        
-        # Check if first row has different characteristics
-        first_row_texts = [cell.full_text if cell else "" for cell in first_row]
-        second_row_texts = [cell.full_text if cell else "" for cell in second_row]
-        
-        # Simple heuristics for header detection
-        first_has_numbers = any(re.search(r'\d+', text) for text in first_row_texts)
-        second_has_numbers = any(re.search(r'\d+', text) for text in second_row_texts)
-        
-        # Headers typically have fewer numbers than data rows
-        return not first_has_numbers and second_has_numbers
-    
-    def _detect_columns(self, text_blocks: List[TextBlock]) -> int:
-        """Detect the number of columns in the document"""
-        if not text_blocks:
-            return 1
-        
-        # Collect x-positions of all blocks
-        x_positions = []
-        for block in text_blocks:
-            x_positions.append(block.bbox.x1)
-            x_positions.append(block.bbox.x2)
-        
-        if len(x_positions) < 4:
-            return 1
-        
-        # Find gaps that might indicate column boundaries
-        x_positions = sorted(set(x_positions))
-        gaps = []
-        
-        for i in range(1, len(x_positions)):
-            gap = x_positions[i] - x_positions[i-1]
-            if gap > self.column_gap_threshold:
-                gaps.append((x_positions[i-1], x_positions[i], gap))
-        
-        if not gaps:
-            return 1
-        
-        # Simple heuristic: number of major gaps + 1
-        major_gaps = [gap for gap in gaps if gap[2] > self.column_gap_threshold * 2]
-        return min(len(major_gaps) + 1, 4)  # Cap at 4 columns
-    
-    def _assign_column_indices(
-        self, 
-        text_blocks: List[TextBlock], 
-        column_count: int
-    ) -> List[TextBlock]:
-        """Assign column indices to text blocks"""
-        if column_count <= 1:
-            for block in text_blocks:
-                block.column_index = 0
-            return text_blocks
-        
-        # Find column boundaries
-        all_x_positions = []
-        for block in text_blocks:
-            all_x_positions.extend([block.bbox.x1, block.bbox.x2])
-        
-        min_x = min(all_x_positions)
-        max_x = max(all_x_positions)
-        column_width = (max_x - min_x) / column_count
-        
-        for block in text_blocks:
-            block_center = (block.bbox.x1 + block.bbox.x2) / 2
-            column_index = int((block_center - min_x) / column_width)
-            block.column_index = min(column_index, column_count - 1)
-        
-        return text_blocks
-    
-    def _calculate_reading_order(
-        self, 
-        text_blocks: List[TextBlock], 
-        column_count: int
-    ) -> List[int]:
-        """Calculate optimal reading order for text blocks"""
-        if column_count <= 1:
-            # Single column: sort by y-position then x-position
-            sorted_indices = sorted(
-                range(len(text_blocks)),
-                key=lambda i: (text_blocks[i].bbox.y1, text_blocks[i].bbox.x1)
-            )
-        else:
-            # Multi-column: sort by column, then by y-position within column
-            sorted_indices = sorted(
-                range(len(text_blocks)),
-                key=lambda i: (
-                    text_blocks[i].column_index,
-                    text_blocks[i].bbox.y1,
-                    text_blocks[i].bbox.x1
+        if not result.regions:
+            # No regions - create basic structure from text
+            enhanced_result = self._create_basic_structure(result)
+            metrics = ReconstructionMetrics(
+                original_regions=0,
+                words_created=len(result.text.split()),
+                lines_created=1,
+                paragraphs_created=1,
+                blocks_created=1,
+                confidence=0.5,
+                layout_analysis=LayoutAnalysis(
+                    layout_type=LayoutType.SINGLE_COLUMN,
+                    reading_order=ReadingOrder.LEFT_TO_RIGHT_TOP_TO_BOTTOM,
+                    column_count=1,
+                    average_line_height=0.0,
+                    average_word_spacing=0.0,
+                    text_alignment="left",
+                    has_tables=False,
+                    has_forms=False
                 )
             )
+            return enhanced_result, metrics
         
-        # Update reading order in blocks
-        for order, index in enumerate(sorted_indices):
-            text_blocks[index].reading_order = order
+        # Perform layout analysis
+        layout_analysis = self._analyze_layout(result.regions)
         
-        return sorted_indices
-    
-    def _classify_layout_type(
-        self, 
-        text_blocks: List[TextBlock], 
-        tables: List[TableStructure], 
-        column_count: int
-    ) -> LayoutType:
-        """Classify the overall layout type of the document"""
-        if not text_blocks:
-            return LayoutType.UNKNOWN
+        # Build hierarchical structure
+        hierarchical_regions = self._build_hierarchy(result.regions, layout_analysis)
         
-        # Check for tables
-        if len(tables) > 0:
-            table_area = sum(
-                (table.bbox.x2 - table.bbox.x1) * (table.bbox.y2 - table.bbox.y1)
-                for table in tables
-            )
-            total_area = sum(
-                (block.bbox.x2 - block.bbox.x1) * (block.bbox.y2 - block.bbox.y1)
-                for block in text_blocks
-            )
-            
-            if table_area > total_area * 0.5:
-                return LayoutType.TABLE
-        
-        # Check for form-like structure
-        form_indicators = sum(
-            1 for block in text_blocks
-            if len(block.full_text.split()) < 5 and ':' in block.full_text
+        # Create enhanced result
+        enhanced_result = OCRResult(
+            text=result.text,
+            confidence=result.confidence,
+            regions=hierarchical_regions,
+            engine_name=result.engine_name,
+            confidence_metrics=result.confidence_metrics
         )
         
-        if form_indicators > len(text_blocks) * 0.3:
-            return LayoutType.FORM
+        # Calculate metrics
+        metrics = self._calculate_metrics(result.regions, hierarchical_regions, layout_analysis)
         
-        # Check column count
-        if column_count > 1:
+        return enhanced_result, metrics
+    
+    def _create_basic_structure(self, result: OCRResult) -> OCRResult:
+        """Create basic hierarchical structure when no regions are available"""
+        if not result.text.strip():
+            return result
+        
+        # Create words from text
+        words = []
+        word_texts = result.text.split()
+        x_pos = 0
+        y_pos = 0
+        char_width = 10  # Estimated character width
+        line_height = 20  # Estimated line height
+        
+        for i, word_text in enumerate(word_texts):
+            # Estimate bounding box
+            word_width = len(word_text) * char_width
+            bbox = BoundingBox(x_pos, y_pos, word_width, line_height)
+            
+            word = Word(
+                text=word_text,
+                bbox=bbox,
+                confidence=result.confidence
+            )
+            words.append(word)
+            
+            x_pos += word_width + char_width  # Add space
+            
+            # Simple line wrapping estimation
+            if x_pos > 500:  # Estimated page width
+                x_pos = 0
+                y_pos += line_height
+        
+        # Create single line containing all words
+        if words:
+            line_bbox = self._calculate_bounding_box([w.bbox for w in words])
+            line = Line(
+                text=result.text,
+                bbox=line_bbox,
+                confidence=result.confidence,
+                words=words
+            )
+            
+            # Create single paragraph containing the line
+            paragraph = Paragraph(
+                text=result.text,
+                bbox=line_bbox,
+                confidence=result.confidence,
+                lines=[line]
+            )
+            
+            # Create single block containing the paragraph
+            block = Block(
+                text=result.text,
+                bbox=line_bbox,
+                confidence=result.confidence,
+                paragraphs=[paragraph]
+            )
+            
+            # Create page containing the block
+            page = Page(
+                text=result.text,
+                bbox=line_bbox,
+                confidence=result.confidence,
+                blocks=[block]
+            )
+            
+            return OCRResult(
+                text=result.text,
+                confidence=result.confidence,
+                regions=[page],
+                engine_name=result.engine_name,
+                confidence_metrics=result.confidence_metrics
+            )
+        
+        return result
+    
+    def _analyze_layout(self, regions: List[TextRegion]) -> LayoutAnalysis:
+        """Analyze the overall layout structure of the document"""
+        if not regions:
+            return LayoutAnalysis(
+                layout_type=LayoutType.SINGLE_COLUMN,
+                reading_order=ReadingOrder.LEFT_TO_RIGHT_TOP_TO_BOTTOM,
+                column_count=1,
+                average_line_height=0.0,
+                average_word_spacing=0.0,
+                text_alignment="left",
+                has_tables=False,
+                has_forms=False
+            )
+        
+        # Calculate basic metrics
+        line_heights = []
+        word_spacings = []
+        y_positions = []
+        x_positions = []
+        
+        for region in regions:
+            if hasattr(region, 'bbox'):
+                line_heights.append(region.bbox.height)
+                y_positions.append(region.bbox.y)
+                x_positions.append(region.bbox.x)
+        
+        avg_line_height = np.mean(line_heights) if line_heights else 20
+        avg_word_spacing = self._estimate_word_spacing(regions)
+        
+        # Detect layout type
+        layout_type = self._detect_layout_type(regions, x_positions)
+        
+        # Detect column count
+        column_count = self._detect_column_count(regions, x_positions)
+        
+        # Detect reading order
+        reading_order = self._detect_reading_order(regions)
+        
+        # Detect text alignment
+        text_alignment = self._detect_text_alignment(regions)
+        
+        # Detect special structures
+        has_tables = self._detect_tables(regions)
+        has_forms = self._detect_forms(regions)
+        
+        return LayoutAnalysis(
+            layout_type=layout_type,
+            reading_order=reading_order,
+            column_count=column_count,
+            average_line_height=avg_line_height,
+            average_word_spacing=avg_word_spacing,
+            text_alignment=text_alignment,
+            has_tables=has_tables,
+            has_forms=has_forms
+        )
+    
+    def _estimate_word_spacing(self, regions: List[TextRegion]) -> float:
+        """Estimate average word spacing"""
+        spacings = []
+        
+        # Sort regions by y-position then x-position
+        sorted_regions = sorted(regions, key=lambda r: (r.bbox.y, r.bbox.x) 
+                               if hasattr(r, 'bbox') else (0, 0))
+        
+        for i in range(len(sorted_regions) - 1):
+            current = sorted_regions[i]
+            next_region = sorted_regions[i + 1]
+            
+            if not (hasattr(current, 'bbox') and hasattr(next_region, 'bbox')):
+                continue
+            
+            # Check if regions are on the same line (similar y-positions)
+            y_diff = abs(current.bbox.y - next_region.bbox.y)
+            if y_diff < current.bbox.height * 0.5:
+                # Calculate horizontal spacing
+                spacing = next_region.bbox.x - (current.bbox.x + current.bbox.width)
+                if spacing > 0:
+                    spacings.append(spacing)
+        
+        return np.median(spacings) if spacings else 10.0
+    
+    def _detect_layout_type(self, regions: List[TextRegion], x_positions: List[float]) -> LayoutType:
+        """Detect the type of document layout"""
+        if not x_positions:
+            return LayoutType.SINGLE_COLUMN
+        
+        # Check for multiple distinct x-positions (indicating columns)
+        unique_x = set(round(x / 50) * 50 for x in x_positions)  # Group by 50-pixel buckets
+        
+        if len(unique_x) >= 3:
             return LayoutType.MULTI_COLUMN
         
-        # Check for mixed content
-        block_types = {block.block_type for block in text_blocks}
-        if len(block_types) > 3:
-            return LayoutType.MIXED
+        # Check for table-like structures (regular grid patterns)
+        if self._has_grid_pattern(regions):
+            return LayoutType.TABLE
+        
+        # Check for form-like structures (labels and fields)
+        if self._has_form_pattern(regions):
+            return LayoutType.FORM
         
         return LayoutType.SINGLE_COLUMN
     
-    def _calculate_layout_confidence(
-        self, 
-        text_blocks: List[TextBlock], 
-        tables: List[TableStructure]
-    ) -> float:
-        """Calculate overall confidence in layout analysis"""
-        if not text_blocks:
-            return 0.0
+    def _detect_column_count(self, regions: List[TextRegion], x_positions: List[float]) -> int:
+        """Detect number of columns in the document"""
+        if not x_positions:
+            return 1
         
-        # Base confidence on text block confidences
-        block_confidence = sum(block.confidence for block in text_blocks) / len(text_blocks)
+        # Cluster x-positions to find column boundaries
+        sorted_x = sorted(set(x_positions))
+        column_starts = []
         
-        # Boost confidence for detected tables
-        table_confidence = (
-            sum(table.confidence for table in tables) / len(tables)
-            if tables else 0.0
+        if not sorted_x:
+            return 1
+        
+        column_starts.append(sorted_x[0])
+        
+        for x in sorted_x[1:]:
+            # If there's a significant gap, it's likely a new column
+            if x - column_starts[-1] > 100:  # 100 pixel threshold
+                column_starts.append(x)
+        
+        return len(column_starts)
+    
+    def _detect_reading_order(self, regions: List[TextRegion]) -> ReadingOrder:
+        """Detect the reading order of the document"""
+        # For now, assume standard left-to-right, top-to-bottom
+        # Can be enhanced with language detection and cultural conventions
+        return ReadingOrder.LEFT_TO_RIGHT_TOP_TO_BOTTOM
+    
+    def _detect_text_alignment(self, regions: List[TextRegion]) -> str:
+        """Detect predominant text alignment"""
+        if not regions:
+            return "left"
+        
+        left_aligned = 0
+        center_aligned = 0
+        right_aligned = 0
+        
+        # Get document bounds
+        all_x = [r.bbox.x for r in regions if hasattr(r, 'bbox')]
+        all_right = [r.bbox.x + r.bbox.width for r in regions if hasattr(r, 'bbox')]
+        
+        if not all_x or not all_right:
+            return "left"
+        
+        doc_left = min(all_x)
+        doc_right = max(all_right)
+        doc_center = (doc_left + doc_right) / 2
+        doc_width = doc_right - doc_left
+        
+        tolerance = doc_width * self.alignment_tolerance
+        
+        for region in regions:
+            if not hasattr(region, 'bbox'):
+                continue
+                
+            region_left = region.bbox.x
+            region_right = region.bbox.x + region.bbox.width
+            region_center = (region_left + region_right) / 2
+            
+            # Check alignment
+            if abs(region_left - doc_left) < tolerance:
+                left_aligned += 1
+            elif abs(region_center - doc_center) < tolerance:
+                center_aligned += 1
+            elif abs(region_right - doc_right) < tolerance:
+                right_aligned += 1
+            else:
+                left_aligned += 1  # Default to left if unclear
+        
+        # Return predominant alignment
+        if center_aligned > max(left_aligned, right_aligned):
+            return "center"
+        elif right_aligned > left_aligned:
+            return "right"
+        else:
+            return "left"
+    
+    def _detect_tables(self, regions: List[TextRegion]) -> bool:
+        """Detect if document contains table structures"""
+        return self._has_grid_pattern(regions)
+    
+    def _detect_forms(self, regions: List[TextRegion]) -> bool:
+        """Detect if document contains form structures"""
+        return self._has_form_pattern(regions)
+    
+    def _has_grid_pattern(self, regions: List[TextRegion]) -> bool:
+        """Check if regions form a grid pattern (indicating table)"""
+        if len(regions) < 6:  # Need at least 2x3 grid
+            return False
+        
+        # Get all y-positions and x-positions
+        y_positions = [r.bbox.y for r in regions if hasattr(r, 'bbox')]
+        x_positions = [r.bbox.x for r in regions if hasattr(r, 'bbox')]
+        
+        if not y_positions or not x_positions:
+            return False
+        
+        # Check for regular spacing in both dimensions
+        unique_y = sorted(set(round(y / 20) * 20 for y in y_positions))
+        unique_x = sorted(set(round(x / 20) * 20 for x in x_positions))
+        
+        # Look for at least 3 rows and 2 columns with regular spacing
+        if len(unique_y) >= 3 and len(unique_x) >= 2:
+            # Check if spacings are relatively uniform
+            y_spacings = [unique_y[i+1] - unique_y[i] for i in range(len(unique_y)-1)]
+            x_spacings = [unique_x[i+1] - unique_x[i] for i in range(len(unique_x)-1)]
+            
+            y_cv = np.std(y_spacings) / np.mean(y_spacings) if y_spacings else 1.0
+            x_cv = np.std(x_spacings) / np.mean(x_spacings) if x_spacings else 1.0
+            
+            # If coefficient of variation is low, it's likely a grid
+            return y_cv < 0.5 and x_cv < 0.5
+        
+        return False
+    
+    def _has_form_pattern(self, regions: List[TextRegion]) -> bool:
+        """Check if regions form a form pattern (labels and fields)"""
+        if len(regions) < 4:
+            return False
+        
+        # Look for patterns like "Label:" followed by space or field
+        form_indicators = 0
+        
+        for region in regions:
+            if hasattr(region, 'text'):
+                text = region.text.strip()
+                # Check for form-like patterns
+                if (text.endswith(':') or 
+                    text.endswith('_') or 
+                    re.match(r'.*\s*:\s*$', text) or
+                    re.match(r'.*__+.*', text)):
+                    form_indicators += 1
+        
+        # If more than 30% of regions look like form elements
+        return form_indicators / len(regions) > 0.3
+    
+    def _build_hierarchy(self, regions: List[TextRegion], 
+                        layout_analysis: LayoutAnalysis) -> List[TextRegion]:
+        """Build hierarchical structure from flat regions"""
+        if not regions:
+            return []
+        
+        # Convert all regions to words first
+        words = self._extract_or_create_words(regions)
+        
+        # Group words into lines
+        lines = self._group_words_into_lines(words, layout_analysis)
+        
+        # Group lines into paragraphs
+        paragraphs = self._group_lines_into_paragraphs(lines, layout_analysis)
+        
+        # Group paragraphs into blocks/columns
+        blocks = self._group_paragraphs_into_blocks(paragraphs, layout_analysis)
+        
+        # Create page containing all blocks
+        page = self._create_page(blocks)
+        
+        return [page]
+    
+    def _extract_or_create_words(self, regions: List[TextRegion]) -> List[Word]:
+        """Extract words from regions or create them from text"""
+        words = []
+        
+        for region in regions:
+            if isinstance(region, Word):
+                words.append(region)
+            else:
+                # Create words from region text
+                if hasattr(region, 'text') and region.text:
+                    region_words = self._split_region_into_words(region)
+                    words.extend(region_words)
+        
+        return words
+    
+    def _split_region_into_words(self, region: TextRegion) -> List[Word]:
+        """Split a text region into individual words"""
+        if not hasattr(region, 'text') or not region.text:
+            return []
+        
+        words = []
+        word_texts = region.text.split()
+        
+        if not hasattr(region, 'bbox') or not word_texts:
+            # Create simple words without positioning
+            for word_text in word_texts:
+                word = Word(
+                    text=word_text,
+                    bbox=BoundingBox(0, 0, len(word_text) * 10, 20),
+                    confidence=getattr(region, 'confidence', 1.0)
+                )
+                words.append(word)
+            return words
+        
+        # Estimate word positions within the region
+        region_bbox = region.bbox
+        total_chars = sum(len(w) for w in word_texts) + len(word_texts) - 1  # Include spaces
+        
+        x_pos = region_bbox.x
+        char_width = region_bbox.width / total_chars if total_chars > 0 else 10
+        
+        for word_text in word_texts:
+            word_width = len(word_text) * char_width
+            
+            word_bbox = BoundingBox(
+                x=x_pos,
+                y=region_bbox.y,
+                width=word_width,
+                height=region_bbox.height
+            )
+            
+            word = Word(
+                text=word_text,
+                bbox=word_bbox,
+                confidence=getattr(region, 'confidence', 1.0)
+            )
+            words.append(word)
+            
+            x_pos += word_width + char_width  # Add space
+        
+        return words
+    
+    def _group_words_into_lines(self, words: List[Word], 
+                               layout_analysis: LayoutAnalysis) -> List[Line]:
+        """Group words into lines based on vertical positioning"""
+        if not words:
+            return []
+        
+        # Sort words by y-position then x-position
+        sorted_words = sorted(words, key=lambda w: (w.bbox.y, w.bbox.x))
+        
+        lines = []
+        current_line_words = []
+        current_y = sorted_words[0].bbox.y
+        line_height_tolerance = layout_analysis.average_line_height * self.line_height_tolerance
+        
+        for word in sorted_words:
+            # Check if word belongs to current line
+            y_diff = abs(word.bbox.y - current_y)
+            
+            if y_diff <= line_height_tolerance and current_line_words:
+                # Add to current line
+                current_line_words.append(word)
+            else:
+                # Start new line
+                if current_line_words:
+                    line = self._create_line_from_words(current_line_words)
+                    lines.append(line)
+                
+                current_line_words = [word]
+                current_y = word.bbox.y
+        
+        # Add the last line
+        if current_line_words:
+            line = self._create_line_from_words(current_line_words)
+            lines.append(line)
+        
+        return lines
+    
+    def _create_line_from_words(self, words: List[Word]) -> Line:
+        """Create a line from a list of words"""
+        if not words:
+            return Line(text="", bbox=BoundingBox(0, 0, 0, 0), confidence=1.0, words=[])
+        
+        # Sort words by x-position
+        sorted_words = sorted(words, key=lambda w: w.bbox.x)
+        
+        # Combine text with proper spacing
+        line_text = " ".join(word.text for word in sorted_words)
+        
+        # Calculate line bounding box
+        line_bbox = self._calculate_bounding_box([w.bbox for w in sorted_words])
+        
+        # Calculate average confidence
+        avg_confidence = np.mean([w.confidence for w in sorted_words])
+        
+        return Line(
+            text=line_text,
+            bbox=line_bbox,
+            confidence=avg_confidence,
+            words=sorted_words
+        )
+    
+    def _group_lines_into_paragraphs(self, lines: List[Line], 
+                                   layout_analysis: LayoutAnalysis) -> List[Paragraph]:
+        """Group lines into paragraphs based on spacing and alignment"""
+        if not lines:
+            return []
+        
+        paragraphs = []
+        current_paragraph_lines = []
+        
+        spacing_threshold = layout_analysis.average_line_height * self.paragraph_spacing_threshold
+        
+        for i, line in enumerate(lines):
+            current_paragraph_lines.append(line)
+            
+            # Check if this is the end of a paragraph
+            is_paragraph_end = False
+            
+            if i < len(lines) - 1:
+                next_line = lines[i + 1]
+                
+                # Check vertical spacing
+                vertical_gap = next_line.bbox.y - (line.bbox.y + line.bbox.height)
+                if vertical_gap > spacing_threshold:
+                    is_paragraph_end = True
+                
+                # Check for significant indentation change
+                indent_diff = abs(next_line.bbox.x - line.bbox.x)
+                if indent_diff > layout_analysis.average_word_spacing * 3:
+                    is_paragraph_end = True
+            else:
+                # Last line
+                is_paragraph_end = True
+            
+            if is_paragraph_end and current_paragraph_lines:
+                paragraph = self._create_paragraph_from_lines(current_paragraph_lines)
+                paragraphs.append(paragraph)
+                current_paragraph_lines = []
+        
+        return paragraphs
+    
+    def _create_paragraph_from_lines(self, lines: List[Line]) -> Paragraph:
+        """Create a paragraph from a list of lines"""
+        if not lines:
+            return Paragraph(text="", bbox=BoundingBox(0, 0, 0, 0), confidence=1.0, lines=[])
+        
+        # Combine text with line breaks
+        paragraph_text = "\n".join(line.text for line in lines)
+        
+        # Calculate paragraph bounding box
+        paragraph_bbox = self._calculate_bounding_box([line.bbox for line in lines])
+        
+        # Calculate average confidence
+        avg_confidence = np.mean([line.confidence for line in lines])
+        
+        return Paragraph(
+            text=paragraph_text,
+            bbox=paragraph_bbox,
+            confidence=avg_confidence,
+            lines=lines
+        )
+    
+    def _group_paragraphs_into_blocks(self, paragraphs: List[Paragraph], 
+                                    layout_analysis: LayoutAnalysis) -> List[Block]:
+        """Group paragraphs into blocks/columns"""
+        if not paragraphs:
+            return []
+        
+        if layout_analysis.column_count <= 1:
+            # Single column - all paragraphs in one block
+            return [self._create_block_from_paragraphs(paragraphs)]
+        
+        # Multi-column layout - group by x-position
+        column_groups = self._group_by_columns(paragraphs, layout_analysis.column_count)
+        
+        blocks = []
+        for column_paragraphs in column_groups:
+            if column_paragraphs:
+                block = self._create_block_from_paragraphs(column_paragraphs)
+                blocks.append(block)
+        
+        return blocks
+    
+    def _group_by_columns(self, paragraphs: List[Paragraph], 
+                         column_count: int) -> List[List[Paragraph]]:
+        """Group paragraphs by columns"""
+        if column_count <= 1:
+            return [paragraphs]
+        
+        # Sort paragraphs by x-position
+        sorted_paragraphs = sorted(paragraphs, key=lambda p: p.bbox.x)
+        
+        # Divide into columns
+        column_groups = [[] for _ in range(column_count)]
+        
+        # Simple division - can be enhanced with clustering
+        for i, paragraph in enumerate(sorted_paragraphs):
+            column_index = i % column_count
+            column_groups[column_index].append(paragraph)
+        
+        return column_groups
+    
+    def _create_block_from_paragraphs(self, paragraphs: List[Paragraph]) -> Block:
+        """Create a block from a list of paragraphs"""
+        if not paragraphs:
+            return Block(text="", bbox=BoundingBox(0, 0, 0, 0), confidence=1.0, paragraphs=[])
+        
+        # Sort paragraphs by reading order (top to bottom)
+        sorted_paragraphs = sorted(paragraphs, key=lambda p: p.bbox.y)
+        
+        # Combine text with paragraph breaks
+        block_text = "\n\n".join(paragraph.text for paragraph in sorted_paragraphs)
+        
+        # Calculate block bounding box
+        block_bbox = self._calculate_bounding_box([p.bbox for p in sorted_paragraphs])
+        
+        # Calculate average confidence
+        avg_confidence = np.mean([p.confidence for p in sorted_paragraphs])
+        
+        return Block(
+            text=block_text,
+            bbox=block_bbox,
+            confidence=avg_confidence,
+            paragraphs=sorted_paragraphs
+        )
+    
+    def _create_page(self, blocks: List[Block]) -> Page:
+        """Create a page from a list of blocks"""
+        if not blocks:
+            return Page(text="", bbox=BoundingBox(0, 0, 0, 0), confidence=1.0, blocks=[])
+        
+        # Sort blocks by reading order
+        sorted_blocks = self._sort_blocks_by_reading_order(blocks)
+        
+        # Combine text with block separators
+        page_text = "\n\n".join(block.text for block in sorted_blocks)
+        
+        # Calculate page bounding box
+        page_bbox = self._calculate_bounding_box([b.bbox for b in sorted_blocks])
+        
+        # Calculate average confidence
+        avg_confidence = np.mean([b.confidence for b in sorted_blocks])
+        
+        return Page(
+            text=page_text,
+            bbox=page_bbox,
+            confidence=avg_confidence,
+            blocks=sorted_blocks
+        )
+    
+    def _sort_blocks_by_reading_order(self, blocks: List[Block]) -> List[Block]:
+        """Sort blocks according to reading order"""
+        # For multi-column layouts, sort by column then by vertical position
+        # For single column, sort by vertical position
+        
+        # Simple top-to-bottom, left-to-right sorting
+        return sorted(blocks, key=lambda b: (b.bbox.y, b.bbox.x))
+    
+    def _calculate_bounding_box(self, bboxes: List[BoundingBox]) -> BoundingBox:
+        """Calculate encompassing bounding box from list of bounding boxes"""
+        if not bboxes:
+            return BoundingBox(0, 0, 0, 0)
+        
+        min_x = min(bbox.x for bbox in bboxes)
+        min_y = min(bbox.y for bbox in bboxes)
+        max_x = max(bbox.x + bbox.width for bbox in bboxes)
+        max_y = max(bbox.y + bbox.height for bbox in bboxes)
+        
+        return BoundingBox(
+            x=min_x,
+            y=min_y,
+            width=max_x - min_x,
+            height=max_y - min_y
+        )
+    
+    def _calculate_metrics(self, original_regions: List[TextRegion], 
+                          hierarchical_regions: List[TextRegion], 
+                          layout_analysis: LayoutAnalysis) -> ReconstructionMetrics:
+        """Calculate metrics from the reconstruction process"""
+        # Count elements at each level
+        words_count = 0
+        lines_count = 0
+        paragraphs_count = 0
+        blocks_count = 0
+        
+        for page in hierarchical_regions:
+            if isinstance(page, Page):
+                for block in page.blocks:
+                    blocks_count += 1
+                    for paragraph in block.paragraphs:
+                        paragraphs_count += 1
+                        for line in paragraph.lines:
+                            lines_count += 1
+                            words_count += len(line.words)
+        
+        # Calculate reconstruction confidence based on structure completeness
+        confidence = self._calculate_reconstruction_confidence(
+            original_regions, hierarchical_regions, layout_analysis
         )
         
-        # Combine confidences
-        overall_confidence = 0.7 * block_confidence + 0.3 * table_confidence
-        
-        # Adjust based on block classification success
-        classified_blocks = sum(
-            1 for block in text_blocks
-            if block.block_type != TextBlockType.UNKNOWN
+        return ReconstructionMetrics(
+            original_regions=len(original_regions),
+            words_created=words_count,
+            lines_created=lines_count,
+            paragraphs_created=paragraphs_count,
+            blocks_created=blocks_count,
+            confidence=confidence,
+            layout_analysis=layout_analysis
         )
-        classification_ratio = classified_blocks / len(text_blocks)
-        
-        overall_confidence *= (0.5 + 0.5 * classification_ratio)
-        
-        return round(min(1.0, max(0.0, overall_confidence)), 3)
     
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get layout analysis statistics"""
-        stats = dict(self.stats)
+    def _calculate_reconstruction_confidence(self, original_regions: List[TextRegion], 
+                                           hierarchical_regions: List[TextRegion], 
+                                           layout_analysis: LayoutAnalysis) -> float:
+        """Calculate confidence in the reconstruction process"""
+        confidence_factors = []
         
-        if self.processing_history:
-            recent_history = self.processing_history[-100:]
-            stats['performance'] = {
-                'avg_processing_time': statistics.mean(
-                    [h['processing_time'] for h in recent_history]
-                ),
-                'avg_blocks_per_document': statistics.mean(
-                    [h['block_count'] for h in recent_history]
-                ),
-                'avg_tables_per_document': statistics.mean(
-                    [h['table_count'] for h in recent_history]
-                ),
-                'samples': len(recent_history)
-            }
+        # Factor 1: Coverage - how much of original content is preserved
+        original_text_length = sum(len(getattr(r, 'text', '')) for r in original_regions)
+        hierarchical_text_length = sum(len(getattr(r, 'text', '')) for r in hierarchical_regions)
         
-        stats['configuration'] = {
-            'enable_table_detection': self.enable_table_detection,
-            'enable_column_detection': self.enable_column_detection,
-            'enable_block_classification': self.enable_block_classification,
-            'min_table_cells': self.min_table_cells,
-            'column_gap_threshold': self.column_gap_threshold
-        }
+        if original_text_length > 0:
+            coverage_ratio = min(1.0, hierarchical_text_length / original_text_length)
+            confidence_factors.append(coverage_ratio)
+        else:
+            confidence_factors.append(1.0)
         
-        return stats
+        # Factor 2: Structure completeness
+        has_words = any(isinstance(r, Page) and r.blocks for r in hierarchical_regions)
+        has_lines = any(isinstance(r, Page) and any(b.paragraphs for b in r.blocks) 
+                       for r in hierarchical_regions if isinstance(r, Page))
+        has_paragraphs = any(isinstance(r, Page) and any(any(p.lines for p in b.paragraphs) 
+                            for b in r.blocks) for r in hierarchical_regions if isinstance(r, Page))
+        
+        structure_completeness = (has_words + has_lines + has_paragraphs) / 3.0
+        confidence_factors.append(structure_completeness)
+        
+        # Factor 3: Layout analysis confidence
+        layout_confidence = 1.0
+        if layout_analysis.layout_type == LayoutType.MIXED:
+            layout_confidence = 0.7  # Mixed layouts are more uncertain
+        elif layout_analysis.layout_type == LayoutType.SINGLE_COLUMN:
+            layout_confidence = 0.9  # Simple layouts are more reliable
+        else:
+            layout_confidence = 0.8  # Multi-column and tables are moderately reliable
+        
+        confidence_factors.append(layout_confidence)
+        
+        # Factor 4: Region count consistency
+        if len(original_regions) > 0:
+            # Penalize if we have too few or too many hierarchical elements
+            expected_hierarchy_ratio = 2.0  # Expect some hierarchy expansion
+            actual_ratio = len(hierarchical_regions) / len(original_regions)
+            ratio_confidence = 1.0 - min(1.0, abs(actual_ratio - expected_hierarchy_ratio) / 2.0)
+            confidence_factors.append(ratio_confidence)
+        else:
+            confidence_factors.append(0.5)
+        
+        # Calculate weighted average
+        return np.mean(confidence_factors)
     
-    def export_layout_data(
-        self, 
-        analysis: LayoutAnalysis, 
-        format_type: str = 'json'
-    ) -> Union[str, Dict[str, Any]]:
+    def get_layout_summary(self, metrics: ReconstructionMetrics) -> Dict[str, any]:
         """
-        Export layout analysis data in various formats
+        Get a summary of the layout reconstruction for debugging/analysis
         
         Args:
-            analysis: Layout analysis result
-            format_type: Export format ('json', 'xml', 'html')
+            metrics: Metrics from reconstruction process
             
         Returns:
-            Formatted layout data
+            Dictionary containing layout summary
         """
-        if format_type == 'json':
-            return analysis.to_dict()
-        
-        elif format_type == 'html':
-            return self._export_to_html(analysis)
-        
-        elif format_type == 'xml':
-            return self._export_to_xml(analysis)
-        
-        else:
-            raise ValueError(f"Unsupported format: {format_type}")
+        return {
+            'layout_type': metrics.layout_analysis.layout_type.value,
+            'reading_order': metrics.layout_analysis.reading_order.value,
+            'column_count': metrics.layout_analysis.column_count,
+            'text_alignment': metrics.layout_analysis.text_alignment,
+            'has_tables': metrics.layout_analysis.has_tables,
+            'has_forms': metrics.layout_analysis.has_forms,
+            'structure_stats': {
+                'original_regions': metrics.original_regions,
+                'words_created': metrics.words_created,
+                'lines_created': metrics.lines_created,
+                'paragraphs_created': metrics.paragraphs_created,
+                'blocks_created': metrics.blocks_created
+            },
+            'reconstruction_confidence': metrics.confidence,
+            'average_line_height': metrics.layout_analysis.average_line_height,
+            'average_word_spacing': metrics.layout_analysis.average_word_spacing
+        }
     
-    def _export_to_html(self, analysis: LayoutAnalysis) -> str:
-        """Export layout analysis to HTML format"""
-        html_parts = ['<div class="document-layout">']
+    def validate_hierarchy(self, hierarchical_regions: List[TextRegion]) -> Dict[str, bool]:
+        """
+        Validate the hierarchical structure for consistency
         
-        for block in analysis.text_blocks:
-            css_class = f"text-block {block.block_type.value}"
-            html_parts.append(f'<div class="{css_class}" data-column="{block.column_index}">')
-            html_parts.append(f'<p>{block.full_text}</p>')
-            html_parts.append('</div>')
+        Args:
+            hierarchical_regions: List of hierarchical text regions
+            
+        Returns:
+            Dictionary of validation results
+        """
+        validation_results = {
+            'has_pages': False,
+            'has_blocks': False,
+            'has_paragraphs': False,
+            'has_lines': False,
+            'has_words': False,
+            'hierarchy_consistent': True,
+            'bounding_boxes_valid': True,
+            'text_consistency': True
+        }
         
-        for table in analysis.tables:
-            html_parts.append('<table class="detected-table">')
-            for row in table.cells:
-                html_parts.append('<tr>')
-                for cell in row:
-                    cell_text = cell.full_text if cell else ""
-                    html_parts.append(f'<td>{cell_text}</td>')
-                html_parts.append('</tr>')
-            html_parts.append('</table>')
+        for region in hierarchical_regions:
+            if isinstance(region, Page):
+                validation_results['has_pages'] = True
+                
+                for block in region.blocks:
+                    validation_results['has_blocks'] = True
+                    
+                    # Check if block text matches combined paragraph text
+                    combined_paragraph_text = "\n\n".join(p.text for p in block.paragraphs)
+                    if block.text.strip() != combined_paragraph_text.strip():
+                        validation_results['text_consistency'] = False
+                    
+                    for paragraph in block.paragraphs:
+                        validation_results['has_paragraphs'] = True
+                        
+                        # Check if paragraph text matches combined line text
+                        combined_line_text = "\n".join(l.text for l in paragraph.lines)
+                        if paragraph.text.strip() != combined_line_text.strip():
+                            validation_results['text_consistency'] = False
+                        
+                        for line in paragraph.lines:
+                            validation_results['has_lines'] = True
+                            
+                            # Check if line text matches combined word text
+                            combined_word_text = " ".join(w.text for w in line.words)
+                            if line.text.strip() != combined_word_text.strip():
+                                validation_results['text_consistency'] = False
+                            
+                            for word in line.words:
+                                validation_results['has_words'] = True
+                                
+                                # Check bounding box validity
+                                if (word.bbox.width <= 0 or word.bbox.height <= 0):
+                                    validation_results['bounding_boxes_valid'] = False
         
-        html_parts.append('</div>')
-        
-        return '\n'.join(html_parts)
-    
-    def _export_to_xml(self, analysis: LayoutAnalysis) -> str:
-        """Export layout analysis to XML format"""
-        xml_parts = ['<?xml version="1.0" encoding="UTF-8"?>']
-        xml_parts.append('<document>')
-        xml_parts.append(f'<layout type="{analysis.layout_type.value}" confidence="{analysis.confidence}">')
-        
-        for i, block in enumerate(analysis.text_blocks):
-            xml_parts.append(f'<text-block id="{i}" type="{block.block_type.value}" column="{block.column_index}">')
-            xml_parts.append(f'<text>{block.full_text}</text>')
-            xml_parts.append(f'<confidence>{block.confidence}</confidence>')
-            xml_parts.append('</text-block>')
-        
-        for i, table in enumerate(analysis.tables):
-            xml_parts.append(f'<table id="{i}" rows="{table.rows}" columns="{table.columns}">')
-            for row_idx, row in enumerate(table.cells):
-                xml_parts.append(f'<row index="{row_idx}">')
-                for col_idx, cell in enumerate(row):
-                    cell_text = cell.full_text if cell else ""
-                    xml_parts.append(f'<cell index="{col_idx}">{cell_text}</cell>')
-                xml_parts.append('</row>')
-            xml_parts.append('</table>')
-        
-        xml_parts.append('</layout>')
-        xml_parts.append('</document>')
-        
-        return '\n'.join(xml_parts)
-
-LayoutAnalyzer = EnhancedLayoutAnalyzer
+        return validation_results

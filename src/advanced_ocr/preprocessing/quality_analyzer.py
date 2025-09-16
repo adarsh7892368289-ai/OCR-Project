@@ -47,8 +47,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 # Import from parent modules (correct relative imports)
-from advanced_ocr.config import OCRConfig
-from advanced_ocr.utils.logger import OCRLogger
+from ..config import OCRConfig
+from ..utils.logger import OCRLogger
 
 
 class QualityLevel(Enum):

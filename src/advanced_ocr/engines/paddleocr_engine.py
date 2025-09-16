@@ -36,12 +36,12 @@ import numpy as np
 from typing import List, Optional, Tuple, Any
 import warnings
 
-from advanced_ocr.engines.base_engine import BaseOCREngine, EngineStatus
-from advanced_ocr.results import OCRResult, BoundingBox, TextRegion
-from advanced_ocr.config import OCRConfig
-from advanced_ocr.utils.model_utils import ModelLoader, cached_model_load
-from advanced_ocr.utils.image_utils import ImageProcessor
-from advanced_ocr.utils.text_utils import TextCleaner
+from ..engines.base_engine import BaseOCREngine, EngineStatus
+from ..results import OCRResult, BoundingBox, TextRegion
+from ..config import OCRConfig
+from ..utils.model_utils import ModelLoader, cached_model_load
+from ..utils.image_utils import ImageProcessor
+from ..utils.text_utils import TextCleaner
 
 # Suppress PaddleOCR warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='paddle')

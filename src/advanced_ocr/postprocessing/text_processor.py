@@ -1,844 +1,447 @@
 """
-Enhanced Text Corrector with AI-Powered Contextual Correction
-Step 5: Advanced Post-processing Implementation
-
-Features:
-- Multi-level text correction (spell, grammar, context)
-- AI-powered contextual understanding
-- Domain-specific correction rules
-- Confidence-based correction decisions
-- Performance monitoring and optimization
+Advanced OCR System - Text Processing Orchestrator
+ONLY JOB: Orchestrate all postprocessing steps
+DEPENDENCIES: result_fusion.py, layout_reconstructor.py, confidence_analyzer.py, text_utils.py
+USED BY: core.py ONLY
 """
 
-import re
-import logging
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field
-from pathlib import Path
-import time
-import json
-from collections import defaultdict, Counter
+from typing import List, Tuple, Dict, Optional
+from dataclasses import dataclass
 from enum import Enum
-import statistics
-import difflib
 
-try:
-    import language_tool_python
-    LANGUAGETOOL_AVAILABLE = True
-except ImportError:
-    LANGUAGETOOL_AVAILABLE = False
-
-try:
-    from transformers import pipeline, AutoTokenizer, AutoModelForMaskedLM
-    import torch
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-
-from advanced_ocr.core.base_engine import OCRResult, TextRegion, BoundingBox
-from advanced_ocr.config import ConfigManager
-from advanced_ocr.utils.logger import OCRLogger
-from advanced_ocr.utils.text_utils import TextUtils
-
-logger = OCRLogger(__name__)
+from ..results import OCRResult, ConfidenceMetrics
+from ..config import OCRConfig
+from ..utils.text_utils import TextCleaner, TextValidator
+from .result_fusion import ResultFusion, FusionMetrics
+from .layout_reconstructor import LayoutReconstructor, ReconstructionMetrics
+from .confidence_analyzer import ConfidenceAnalyzer
 
 
-class CorrectionType(Enum):
-    """Types of text corrections"""
-    SPELLING = "spelling"
-    GRAMMAR = "grammar"
-    PUNCTUATION = "punctuation"
-    CAPITALIZATION = "capitalization"
-    SPACING = "spacing"
-    CONTEXT = "context"
-    OCR_ARTIFACTS = "ocr_artifacts"
-    FORMATTING = "formatting"
-
-
-class CorrectionLevel(Enum):
-    """Correction aggressiveness levels"""
-    CONSERVATIVE = "conservative"  # Only high-confidence corrections
-    MODERATE = "moderate"         # Balanced approach
-    AGGRESSIVE = "aggressive"     # More corrections, higher risk
+class ProcessingStage(Enum):
+    """Stages of text postprocessing"""
+    FUSION = "fusion"
+    CLEANING = "cleaning"
+    LAYOUT_RECONSTRUCTION = "layout_reconstruction"
+    CONFIDENCE_ANALYSIS = "confidence_analysis"
+    VALIDATION = "validation"
 
 
 @dataclass
-class Correction:
-    """Individual text correction"""
-    original_text: str
-    corrected_text: str
-    correction_type: CorrectionType
-    confidence: float
-    start_pos: int
-    end_pos: int
-    reason: str = ""
-    context: str = ""
-    
-    @property
-    def changed(self) -> bool:
-        return self.original_text != self.corrected_text
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'original': self.original_text,
-            'corrected': self.corrected_text,
-            'type': self.correction_type.value,
-            'confidence': self.confidence,
-            'position': (self.start_pos, self.end_pos),
-            'reason': self.reason,
-            'context': self.context,
-            'changed': self.changed
-        }
+class ProcessingMetrics:
+    """Comprehensive metrics from text processing"""
+    fusion_metrics: Optional[FusionMetrics]
+    reconstruction_metrics: Optional[ReconstructionMetrics]
+    cleaning_metrics: Dict[str, any]
+    final_confidence: ConfidenceMetrics
+    processing_time: Dict[str, float]
+    stages_completed: List[ProcessingStage]
 
 
-@dataclass
-class CorrectionResult:
-    """Result of text correction process"""
-    original_text: str
-    corrected_text: str
-    corrections: List[Correction]
-    processing_time: float
-    confidence: float
-    statistics: Dict[str, Any] = field(default_factory=dict)
-    
-    @property
-    def correction_count(self) -> int:
-        return len([c for c in self.corrections if c.changed])
-    
-    @property
-    def improvement_ratio(self) -> float:
-        if not self.original_text:
-            return 0.0
-        return self.correction_count / len(self.original_text.split())
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'original_text': self.original_text,
-            'corrected_text': self.corrected_text,
-            'correction_count': self.correction_count,
-            'improvement_ratio': self.improvement_ratio,
-            'processing_time': self.processing_time,
-            'confidence': self.confidence,
-            'statistics': self.statistics,
-            'corrections': [c.to_dict() for c in self.corrections]
-        }
-
-
-class EnhancedTextCorrector:
+class TextProcessor:
     """
-    Advanced text corrector with AI-powered contextual understanding
+    ONLY RESPONSIBILITY: Orchestrate all postprocessing steps
+    
+    Receives raw OCRResult(s) from core.py and orchestrates the complete postprocessing
+    pipeline. Returns final polished OCRResult with enhanced confidence metrics.
+    Does NOT perform engine coordination, image preprocessing, or engine selection.
     """
     
-    def __init__(self, config_path: Optional[str] = None):
-        self.config = ConfigManager(config_path).get_section('text_corrector', {})
-        self.logger = logger
+    def __init__(self, config: OCRConfig):
+        self.config = config
         
-        # Configuration
-        self.correction_level = CorrectionLevel(
-            self.config.get('correction_level', 'moderate')
-        )
-        self.min_confidence_threshold = self.config.get('min_confidence_threshold', 0.7)
-        self.enable_ai_correction = self.config.get('enable_ai_correction', True)
-        self.enable_grammar_check = self.config.get('enable_grammar_check', True)
-        self.enable_spell_check = self.config.get('enable_spell_check', True)
-        self.enable_context_correction = self.config.get('enable_context_correction', True)
+        # Initialize all postprocessing components
+        self.confidence_analyzer = ConfidenceAnalyzer(config)
+        self.result_fusion = ResultFusion(config, self.confidence_analyzer)
+        self.layout_reconstructor = LayoutReconstructor(config)
+        self.text_cleaner = TextCleaner()
+        self.text_validator = TextValidator()
         
-        # Domain-specific settings
-        self.domain_rules = self.config.get('domain_rules', {})
-        self.custom_dictionary = set(self.config.get('custom_dictionary', []))
+        # Processing pipeline configuration
+        self.enable_fusion = True
+        self.enable_cleaning = config.postprocessing.enable_text_cleaning
+        self.enable_layout_reconstruction = config.postprocessing.enable_layout_reconstruction
+        self.enable_confidence_enhancement = True
+        self.enable_validation = config.postprocessing.enable_validation
         
-        # Initialize components
-        self.text_utils = TextUtils()
-        self._initialize_correction_engines()
-        self._load_correction_patterns()
-        
-        # Statistics
-        self.stats = defaultdict(int)
-        self.correction_history = []
-        
-        self.logger.info(f"Enhanced text corrector initialized with level: {self.correction_level.value}")
+        # Performance tracking
+        self.processing_times = {}
     
-    def _initialize_correction_engines(self):
-        """Initialize correction engines"""
-        
-        # Grammar checker
-        self.grammar_tool = None
-        if LANGUAGETOOL_AVAILABLE and self.enable_grammar_check:
-            try:
-                self.grammar_tool = language_tool_python.LanguageTool('en-US')
-                self.logger.info("LanguageTool grammar checker initialized")
-            except Exception as e:
-                self.logger.warning(f"Could not initialize LanguageTool: {e}")
-        
-        # AI model for contextual correction
-        self.ai_corrector = None
-        if TRANSFORMERS_AVAILABLE and self.enable_ai_correction:
-            try:
-                model_name = self.config.get('ai_model', 'bert-base-uncased')
-                self.ai_corrector = pipeline(
-                    'fill-mask',
-                    model=model_name,
-                    device=0 if torch.cuda.is_available() else -1
-                )
-                self.logger.info(f"AI corrector initialized with model: {model_name}")
-            except Exception as e:
-                self.logger.warning(f"Could not initialize AI corrector: {e}")
-    
-    def _load_correction_patterns(self):
-        """Load OCR-specific correction patterns"""
-        
-        # Common OCR error patterns
-        self.ocr_patterns = [
-            # Character substitutions
-            (r'\b0(?=\w)', 'O'),      # 0 -> O in words
-            (r'\bO(?=\d)', '0'),      # O -> 0 in numbers
-            (r'\b1(?=\w)', 'l'),      # 1 -> l in words
-            (r'\bl(?=\d)', '1'),      # l -> 1 in numbers
-            (r'rn', 'm'),             # rn -> m
-            (r'vv', 'w'),             # vv -> w
-            (r'ii', 'll'),            # ii -> ll
-            (r'\bB(?=\d)', '8'),      # B -> 8 in numbers
-            (r'\b8(?=[a-zA-Z])', 'B'), # 8 -> B in words
-            
-            # Spacing issues
-            (r'([a-z])([A-Z])', r'\1 \2'),  # Split camelCase
-            (r'(\w)([.!?])(\w)', r'\1\2 \3'), # Add space after punctuation
-            (r'\s+', ' '),                     # Multiple spaces to single
-            
-            # Common word corrections
-            (r'\bteh\b', 'the'),
-            (r'\band\b', 'and'),
-            (r'\bwith\b', 'with'),
-            (r'\bfrom\b', 'from'),
-        ]
-        
-        # Load custom patterns from config
-        custom_patterns = self.config.get('custom_patterns', [])
-        for pattern, replacement in custom_patterns:
-            self.ocr_patterns.append((pattern, replacement))
-    
-    def correct_text(
-        self,
-        text: str,
-        context: Optional[str] = None,
-        domain: Optional[str] = None
-    ) -> CorrectionResult:
+    def process_results(self, results: List[OCRResult]) -> Tuple[OCRResult, ProcessingMetrics]:
         """
-        Perform comprehensive text correction
+        Process OCR results through complete postprocessing pipeline
         
         Args:
-            text: Text to correct
-            context: Additional context for better corrections
-            domain: Domain-specific correction rules to apply
+            results: List of raw OCR results from engines
             
         Returns:
-            CorrectionResult with corrected text and details
+            Tuple of (final_processed_result, processing_metrics)
         """
+        if not results:
+            raise ValueError("No OCR results provided for processing")
+        
+        import time
+        
+        stages_completed = []
+        fusion_metrics = None
+        reconstruction_metrics = None
+        cleaning_metrics = {}
+        
+        # Stage 1: Result Fusion (if multiple results)
         start_time = time.time()
+        if len(results) > 1 and self.enable_fusion:
+            current_result, fusion_metrics = self.result_fusion.fuse_results(results)
+            stages_completed.append(ProcessingStage.FUSION)
+        else:
+            # Single result - just use it directly
+            current_result = results[0]
+            if len(results) == 1:
+                # Still analyze confidence for single result
+                enhanced_confidence = self.confidence_analyzer.analyze_single_result(current_result)
+                current_result.confidence_metrics = enhanced_confidence
         
-        if not text or not text.strip():
-            return CorrectionResult(
-                original_text=text,
-                corrected_text=text,
-                corrections=[],
-                processing_time=time.time() - start_time,
-                confidence=1.0
-            )
+        self.processing_times['fusion'] = time.time() - start_time
         
-        try:
-            corrections = []
-            current_text = text.strip()
-            
-            # Step 1: OCR artifact correction
-            current_text, ocr_corrections = self._correct_ocr_artifacts(current_text)
-            corrections.extend(ocr_corrections)
-            
-            # Step 2: Spacing and formatting
-            current_text, spacing_corrections = self._correct_spacing(current_text)
-            corrections.extend(spacing_corrections)
-            
-            # Step 3: Spell checking
-            if self.enable_spell_check:
-                current_text, spell_corrections = self._correct_spelling(current_text)
-                corrections.extend(spell_corrections)
-            
-            # Step 4: Grammar checking
-            if self.enable_grammar_check and self.grammar_tool:
-                current_text, grammar_corrections = self._correct_grammar(current_text)
-                corrections.extend(grammar_corrections)
-            
-            # Step 5: AI-powered contextual correction
-            if self.enable_context_correction and self.ai_corrector:
-                current_text, context_corrections = self._correct_context(
-                    current_text, context
-                )
-                corrections.extend(context_corrections)
-            
-            # Step 6: Domain-specific corrections
-            if domain and domain in self.domain_rules:
-                current_text, domain_corrections = self._apply_domain_rules(
-                    current_text, domain
-                )
-                corrections.extend(domain_corrections)
-            
-            # Step 7: Final cleanup
-            current_text, cleanup_corrections = self._final_cleanup(current_text)
-            corrections.extend(cleanup_corrections)
-            
-            processing_time = time.time() - start_time
-            confidence = self._calculate_correction_confidence(corrections)
-            
-            # Generate statistics
-            statistics_data = self._generate_correction_statistics(
-                text, current_text, corrections
-            )
-            
-            # Update global statistics
-            self.stats['texts_corrected'] += 1
-            self.stats['corrections_made'] += len([c for c in corrections if c.changed])
-            for correction in corrections:
-                self.stats[f'correction_{correction.correction_type.value}'] += 1
-            
-            result = CorrectionResult(
-                original_text=text,
-                corrected_text=current_text,
-                corrections=corrections,
-                processing_time=processing_time,
-                confidence=confidence,
-                statistics=statistics_data
-            )
-            
-            # Store in history for analysis
-            self.correction_history.append({
-                'timestamp': time.time(),
-                'original_length': len(text),
-                'corrected_length': len(current_text),
-                'correction_count': result.correction_count,
-                'processing_time': processing_time,
-                'confidence': confidence
-            })
-            
-            self.logger.info(
-                f"Text correction completed: {result.correction_count} corrections "
-                f"in {processing_time:.3f}s"
-            )
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Error in text correction: {e}")
-            return CorrectionResult(
-                original_text=text,
-                corrected_text=text,
-                corrections=[],
-                processing_time=time.time() - start_time,
-                confidence=0.0
-            )
+        # Stage 2: Text Cleaning
+        start_time = time.time()
+        if self.enable_cleaning:
+            current_result, cleaning_metrics = self._perform_text_cleaning(current_result)
+            stages_completed.append(ProcessingStage.CLEANING)
+        
+        self.processing_times['cleaning'] = time.time() - start_time
+        
+        # Stage 3: Layout Reconstruction
+        start_time = time.time()
+        if self.enable_layout_reconstruction:
+            current_result, reconstruction_metrics = self.layout_reconstructor.reconstruct_layout(current_result)
+            stages_completed.append(ProcessingStage.LAYOUT_RECONSTRUCTION)
+        
+        self.processing_times['layout_reconstruction'] = time.time() - start_time
+        
+        # Stage 4: Final Confidence Analysis
+        start_time = time.time()
+        if self.enable_confidence_enhancement:
+            final_confidence = self._enhance_final_confidence(current_result, fusion_metrics)
+            current_result.confidence_metrics = final_confidence
+            current_result.confidence = final_confidence.overall
+            stages_completed.append(ProcessingStage.CONFIDENCE_ANALYSIS)
+        
+        self.processing_times['confidence_analysis'] = time.time() - start_time
+        
+        # Stage 5: Validation
+        start_time = time.time()
+        if self.enable_validation:
+            validation_results = self._validate_final_result(current_result)
+            cleaning_metrics['validation'] = validation_results
+            stages_completed.append(ProcessingStage.VALIDATION)
+        
+        self.processing_times['validation'] = time.time() - start_time
+        
+        # Compile comprehensive metrics
+        processing_metrics = ProcessingMetrics(
+            fusion_metrics=fusion_metrics,
+            reconstruction_metrics=reconstruction_metrics,
+            cleaning_metrics=cleaning_metrics,
+            final_confidence=current_result.confidence_metrics or ConfidenceMetrics(overall=current_result.confidence),
+            processing_time=self.processing_times.copy(),
+            stages_completed=stages_completed
+        )
+        
+        return current_result, processing_metrics
     
-    def _correct_ocr_artifacts(self, text: str) -> Tuple[str, List[Correction]]:
-        """Correct common OCR artifacts"""
-        corrections = []
-        current_text = text
+    def _perform_text_cleaning(self, result: OCRResult) -> Tuple[OCRResult, Dict[str, any]]:
+        """Perform comprehensive text cleaning"""
+        original_text = result.text
+        cleaning_metrics = {
+            'original_length': len(original_text),
+            'operations_performed': []
+        }
         
-        for pattern, replacement in self.ocr_patterns:
-            matches = list(re.finditer(pattern, current_text, re.IGNORECASE))
-            
-            for match in reversed(matches):  # Reverse to maintain positions
-                original = match.group(0)
-                start, end = match.span()
+        # Clean the main text
+        cleaned_text = self.text_cleaner.clean_ocr_text(original_text)
+        
+        # Track what was cleaned
+        if cleaned_text != original_text:
+            cleaning_metrics['operations_performed'].append('general_cleaning')
+            cleaning_metrics['characters_changed'] = sum(
+                1 for a, b in zip(original_text, cleaned_text) if a != b
+            )
+        
+        # Normalize Unicode
+        normalized_text = self.text_cleaner.normalize_unicode(cleaned_text)
+        if normalized_text != cleaned_text:
+            cleaning_metrics['operations_performed'].append('unicode_normalization')
+        
+        # Remove OCR artifacts
+        artifact_free_text = self.text_cleaner.remove_ocr_artifacts(normalized_text)
+        if artifact_free_text != normalized_text:
+            cleaning_metrics['operations_performed'].append('artifact_removal')
+        
+        final_text = artifact_free_text
+        
+        # Update metrics
+        cleaning_metrics['final_length'] = len(final_text)
+        cleaning_metrics['length_change'] = len(final_text) - len(original_text)
+        cleaning_metrics['cleaning_ratio'] = len(final_text) / len(original_text) if original_text else 1.0
+        
+        # Create cleaned result
+        cleaned_result = OCRResult(
+            text=final_text,
+            confidence=result.confidence,
+            regions=result.regions,
+            engine_name=result.engine_name,
+            confidence_metrics=result.confidence_metrics
+        )
+        
+        # Clean text in hierarchical regions if they exist
+        if result.regions:
+            cleaned_result.regions = self._clean_hierarchical_regions(result.regions)
+        
+        return cleaned_result, cleaning_metrics
+    
+    def _clean_hierarchical_regions(self, regions):
+        """Clean text in hierarchical regions recursively"""
+        cleaned_regions = []
+        
+        for region in regions:
+            if hasattr(region, 'text') and region.text:
+                # Clean the region's text
+                cleaned_text = self.text_cleaner.clean_ocr_text(region.text)
                 
-                # Apply replacement
-                if callable(replacement):
-                    corrected = replacement(match)
-                else:
-                    corrected = re.sub(pattern, replacement, original, flags=re.IGNORECASE)
+                # Create new region with cleaned text
+                region_dict = region.__dict__.copy()
+                region_dict['text'] = cleaned_text
                 
-                if original != corrected:
-                    correction = Correction(
-                        original_text=original,
-                        corrected_text=corrected,
-                        correction_type=CorrectionType.OCR_ARTIFACTS,
-                        confidence=0.9,  # High confidence for pattern-based corrections
-                        start_pos=start,
-                        end_pos=end,
-                        reason=f"OCR artifact pattern: {pattern} -> {replacement}"
-                    )
-                    corrections.append(correction)
-                    
-                    # Apply correction to text
-                    current_text = current_text[:start] + corrected + current_text[end:]
-        
-        return current_text, corrections
-    
-    def _correct_spacing(self, text: str) -> Tuple[str, List[Correction]]:
-        """Correct spacing and formatting issues"""
-        corrections = []
-        current_text = text
-        
-        # Multiple spaces to single space
-        multiple_spaces = re.findall(r'\s{2,}', current_text)
-        current_text = re.sub(r'\s{2,}', ' ', current_text)
-        
-        if multiple_spaces:
-            correction = Correction(
-                original_text="multiple spaces",
-                corrected_text="single space",
-                correction_type=CorrectionType.SPACING,
-                confidence=1.0,
-                start_pos=0,
-                end_pos=len(text),
-                reason="Normalized multiple spaces to single spaces"
-            )
-            corrections.append(correction)
-        
-        # Fix missing spaces after punctuation
-        punctuation_fixes = re.findall(r'([.!?])([A-Z])', current_text)
-        current_text = re.sub(r'([.!?])([A-Z])', r'\1 \2', current_text)
-        
-        if punctuation_fixes:
-            correction = Correction(
-                original_text="missing spaces after punctuation",
-                corrected_text="added spaces after punctuation",
-                correction_type=CorrectionType.SPACING,
-                confidence=0.9,
-                start_pos=0,
-                end_pos=len(text),
-                reason="Added missing spaces after punctuation"
-            )
-            corrections.append(correction)
-        
-        # Remove spaces before punctuation
-        spaces_before_punct = re.findall(r'\s+([.!?,:;])', current_text)
-        current_text = re.sub(r'\s+([.!?,:;])', r'\1', current_text)
-        
-        if spaces_before_punct:
-            correction = Correction(
-                original_text="spaces before punctuation",
-                corrected_text="no spaces before punctuation",
-                correction_type=CorrectionType.SPACING,
-                confidence=0.95,
-                start_pos=0,
-                end_pos=len(text),
-                reason="Removed incorrect spaces before punctuation"
-            )
-            corrections.append(correction)
-        
-        return current_text.strip(), corrections
-    
-    def _correct_spelling(self, text: str) -> Tuple[str, List[Correction]]:
-        """Perform spell checking and correction"""
-        corrections = []
-        current_text = text
-        
-        # Simple dictionary-based spell checking
-        words = re.findall(r'\b\w+\b', current_text)
-        
-        for word in words:
-            if (len(word) > 2 and 
-                word.lower() not in self.custom_dictionary and
-                not self.text_utils.is_valid_word(word)):
+                # Recursively clean child regions
+                if hasattr(region, 'blocks') and region.blocks:
+                    region_dict['blocks'] = self._clean_hierarchical_regions(region.blocks)
+                elif hasattr(region, 'paragraphs') and region.paragraphs:
+                    region_dict['paragraphs'] = self._clean_hierarchical_regions(region.paragraphs)
+                elif hasattr(region, 'lines') and region.lines:
+                    region_dict['lines'] = self._clean_hierarchical_regions(region.lines)
+                elif hasattr(region, 'words') and region.words:
+                    region_dict['words'] = self._clean_hierarchical_regions(region.words)
                 
-                # Get spell suggestions
-                suggestions = self.text_utils.get_spell_suggestions(word)
-                
-                if suggestions:
-                    best_suggestion = suggestions[0]
-                    confidence = self._calculate_spelling_confidence(word, best_suggestion)
-                    
-                    if confidence >= self.min_confidence_threshold:
-                        # Find and replace the word
-                        pattern = r'\b' + re.escape(word) + r'\b'
-                        matches = list(re.finditer(pattern, current_text, re.IGNORECASE))
-                        
-                        for match in reversed(matches):
-                            start, end = match.span()
-                            
-                            correction = Correction(
-                                original_text=word,
-                                corrected_text=best_suggestion,
-                                correction_type=CorrectionType.SPELLING,
-                                confidence=confidence,
-                                start_pos=start,
-                                end_pos=end,
-                                reason=f"Spell check suggestion: {word} -> {best_suggestion}"
-                            )
-                            corrections.append(correction)
-                            
-                            # Apply correction
-                            current_text = current_text[:start] + best_suggestion + current_text[end:]
-        
-        return current_text, corrections
-    
-    def _correct_grammar(self, text: str) -> Tuple[str, List[Correction]]:
-        """Perform grammar checking using LanguageTool"""
-        corrections = []
-        current_text = text
-        
-        if not self.grammar_tool:
-            return current_text, corrections
-        
-        try:
-            matches = self.grammar_tool.check(current_text)
-            
-            # Apply corrections in reverse order to maintain positions
-            for match in reversed(matches):
-                if (match.replacements and 
-                    len(match.replacements[0]) > 0 and
-                    match.replacements[0] != current_text[match.offset:match.offset + match.errorLength]):
-                    
-                    original = current_text[match.offset:match.offset + match.errorLength]
-                    suggested = match.replacements[0]
-                    
-                    # Calculate confidence based on match category and context
-                    confidence = self._calculate_grammar_confidence(match)
-                    
-                    if confidence >= self.min_confidence_threshold:
-                        correction = Correction(
-                            original_text=original,
-                            corrected_text=suggested,
-                            correction_type=CorrectionType.GRAMMAR,
-                            confidence=confidence,
-                            start_pos=match.offset,
-                            end_pos=match.offset + match.errorLength,
-                            reason=match.message
-                        )
-                        corrections.append(correction)
-                        
-                        # Apply correction
-                        current_text = (current_text[:match.offset] + 
-                                      suggested + 
-                                      current_text[match.offset + match.errorLength:])
-        
-        except Exception as e:
-            self.logger.warning(f"Grammar checking error: {e}")
-        
-        return current_text, corrections
-    
-    def _correct_context(self, text: str, context: Optional[str] = None) -> Tuple[str, List[Correction]]:
-        """Perform AI-powered contextual correction"""
-        corrections = []
-        current_text = text
-        
-        if not self.ai_corrector:
-            return current_text, corrections
-        
-        try:
-            # Find potential context-based corrections
-            sentences = re.split(r'[.!?]+', current_text)
-            
-            for i, sentence in enumerate(sentences):
-                if len(sentence.strip()) < 5:
-                    continue
-                
-                # Look for words that might need contextual correction
-                words = sentence.split()
-                for j, word in enumerate(words):
-                    if self._needs_contextual_check(word):
-                        # Create masked sentence for AI correction
-                        masked_sentence = ' '.join(words[:j] + ['[MASK]'] + words[j+1:])
-                        
-                        try:
-                            predictions = self.ai_corrector(masked_sentence)
-                            if predictions and len(predictions) > 0:
-                                best_pred = predictions[0]
-                                suggested_word = best_pred['token_str']
-                                confidence = best_pred['score']
-                                
-                                if (confidence >= 0.8 and 
-                                    suggested_word.lower() != word.lower() and
-                                    len(suggested_word) > 1):
-                                    
-                                    correction = Correction(
-                                        original_text=word,
-                                        corrected_text=suggested_word,
-                                        correction_type=CorrectionType.CONTEXT,
-                                        confidence=confidence,
-                                        start_pos=0,  # Simplified for now
-                                        end_pos=0,
-                                        reason=f"Contextual AI correction: {word} -> {suggested_word}"
-                                    )
-                                    corrections.append(correction)
-                                    
-                                    # Apply correction to current text
-                                    current_text = current_text.replace(word, suggested_word, 1)
-                        
-                        except Exception as e:
-                            continue  # Skip this word if AI correction fails
-        
-        except Exception as e:
-            self.logger.warning(f"Contextual correction error: {e}")
-        
-        return current_text, corrections
-    
-    def _apply_domain_rules(self, text: str, domain: str) -> Tuple[str, List[Correction]]:
-        """Apply domain-specific correction rules"""
-        corrections = []
-        current_text = text
-        
-        if domain not in self.domain_rules:
-            return current_text, corrections
-        
-        rules = self.domain_rules[domain]
-        
-        for rule in rules.get('patterns', []):
-            pattern = rule.get('pattern', '')
-            replacement = rule.get('replacement', '')
-            confidence = rule.get('confidence', 0.8)
-            
-            if pattern and replacement:
-                matches = list(re.finditer(pattern, current_text, re.IGNORECASE))
-                
-                for match in reversed(matches):
-                    original = match.group(0)
-                    start, end = match.span()
-                    
-                    correction = Correction(
-                        original_text=original,
-                        corrected_text=replacement,
-                        correction_type=CorrectionType.FORMATTING,
-                        confidence=confidence,
-                        start_pos=start,
-                        end_pos=end,
-                        reason=f"Domain rule for {domain}: {pattern} -> {replacement}"
-                    )
-                    corrections.append(correction)
-                    
-                    current_text = current_text[:start] + replacement + current_text[end:]
-        
-        return current_text, corrections
-    
-    def _final_cleanup(self, text: str) -> Tuple[str, List[Correction]]:
-        """Perform final text cleanup"""
-        corrections = []
-        current_text = text.strip()
-        
-        # Capitalize first letter of sentences
-        sentences = re.split(r'([.!?]\s*)', current_text)
-        cleaned_sentences = []
-        
-        for sentence in sentences:
-            if sentence and sentence[0].islower() and sentence[0].isalpha():
-                cleaned = sentence[0].upper() + sentence[1:]
-                if cleaned != sentence:
-                    correction = Correction(
-                        original_text=sentence[:1],
-                        corrected_text=cleaned[:1],
-                        correction_type=CorrectionType.CAPITALIZATION,
-                        confidence=0.95,
-                        start_pos=0,
-                        end_pos=1,
-                        reason="Capitalized first letter of sentence"
-                    )
-                    corrections.append(correction)
-                cleaned_sentences.append(cleaned)
+                # Create new region instance
+                cleaned_region = type(region)(**region_dict)
+                cleaned_regions.append(cleaned_region)
             else:
-                cleaned_sentences.append(sentence)
+                cleaned_regions.append(region)
         
-        current_text = ''.join(cleaned_sentences)
-        
-        return current_text, corrections
+        return cleaned_regions
     
-    def _needs_contextual_check(self, word: str) -> bool:
-        """Determine if a word needs contextual checking"""
-        # Check for common OCR confusion words
-        confusion_words = {
-            'to', 'too', 'two', 'there', 'their', 'they\'re',
-            'your', 'you\'re', 'its', 'it\'s', 'then', 'than',
-            'accept', 'except', 'affect', 'effect'
+    def _enhance_final_confidence(self, result: OCRResult, 
+                                 fusion_metrics: Optional[FusionMetrics]) -> ConfidenceMetrics:
+        """Enhance confidence metrics with postprocessing context"""
+        # Start with existing confidence or analyze fresh
+        if result.confidence_metrics:
+            base_confidence = result.confidence_metrics
+        else:
+            base_confidence = self.confidence_analyzer.analyze_single_result(result)
+        
+        # Enhancement factors based on postprocessing
+        enhancement_factors = {}
+        
+        # Factor 1: Fusion quality (if applicable)
+        if fusion_metrics:
+            fusion_quality = fusion_metrics.agreement_ratio * fusion_metrics.fusion_confidence
+            enhancement_factors['fusion_quality'] = fusion_quality
+        else:
+            enhancement_factors['fusion_quality'] = 1.0  # No fusion needed
+        
+        # Factor 2: Text quality after cleaning
+        text_quality = self.text_validator.calculate_text_quality(result.text)
+        enhancement_factors['text_quality'] = text_quality
+        
+        # Factor 3: Structural completeness
+        if result.regions:
+            structural_completeness = self._assess_structural_completeness(result.regions)
+            enhancement_factors['structural_completeness'] = structural_completeness
+        else:
+            enhancement_factors['structural_completeness'] = 0.5  # No structure
+        
+        # Factor 4: Text validation score
+        validation_score = self.text_validator.validate_text_content(result.text)
+        enhancement_factors['validation_score'] = validation_score
+        
+        # Calculate enhanced overall confidence
+        enhancement_weights = {
+            'fusion_quality': 0.3,
+            'text_quality': 0.3,
+            'structural_completeness': 0.2,
+            'validation_score': 0.2
         }
         
-        return word.lower() in confusion_words or len(word) < 3
+        weighted_enhancement = sum(
+            factor * enhancement_weights[name] 
+            for name, factor in enhancement_factors.items()
+        )
+        
+        # Combine with base confidence (weighted average)
+        enhanced_overall = (base_confidence.overall * 0.7 + weighted_enhancement * 0.3)
+        enhanced_overall = min(1.0, max(0.0, enhanced_overall))
+        
+        # Create enhanced confidence metrics
+        enhanced_factors = base_confidence.factors.copy()
+        enhanced_factors.update(enhancement_factors)
+        
+        return ConfidenceMetrics(
+            overall=enhanced_overall,
+            word_level=base_confidence.word_level,
+            char_level=base_confidence.char_level,
+            spatial_consistency=base_confidence.spatial_consistency,
+            dictionary_match=base_confidence.dictionary_match,
+            engine_reliability=base_confidence.engine_reliability,
+            factors=enhanced_factors
+        )
     
-    def _calculate_spelling_confidence(self, original: str, suggested: str) -> float:
-        """Calculate confidence for spelling corrections"""
-        # Use edit distance and other factors
-        edit_distance = self.text_utils.calculate_edit_distance(original, suggested)
-        max_len = max(len(original), len(suggested))
-        
-        if max_len == 0:
-            return 0.0
-        
-        similarity = 1.0 - (edit_distance / max_len)
-        
-        # Boost confidence for common corrections
-        common_corrections = {
-            'teh': 'the', 'recieve': 'receive', 'seperate': 'separate'
+    def _assess_structural_completeness(self, regions) -> float:
+        """Assess how complete the hierarchical structure is"""
+        structure_levels = {
+            'pages': False,
+            'blocks': False,
+            'paragraphs': False,
+            'lines': False,
+            'words': False
         }
         
-        if original.lower() in common_corrections:
-            similarity = min(1.0, similarity + 0.2)
+        # Check what levels are present in the hierarchy
+        for region in regions:
+            if hasattr(region, 'blocks'):  # Page
+                structure_levels['pages'] = True
+                for block in region.blocks:
+                    structure_levels['blocks'] = True
+                    if hasattr(block, 'paragraphs'):
+                        for paragraph in block.paragraphs:
+                            structure_levels['paragraphs'] = True
+                            if hasattr(paragraph, 'lines'):
+                                for line in paragraph.lines:
+                                    structure_levels['lines'] = True
+                                    if hasattr(line, 'words'):
+                                        structure_levels['words'] = True
         
-        return similarity
+        # Calculate completeness score
+        levels_present = sum(structure_levels.values())
+        total_levels = len(structure_levels)
+        
+        return levels_present / total_levels
     
-    def _calculate_grammar_confidence(self, match) -> float:
-        """Calculate confidence for grammar corrections"""
-        # Base confidence on match category
-        category_confidence = {
-            'TYPOS': 0.9,
-            'GRAMMAR': 0.8,
-            'STYLE': 0.6,
-            'REDUNDANCY': 0.7,
-            'CONFUSED_WORDS': 0.85
+    def _validate_final_result(self, result: OCRResult) -> Dict[str, any]:
+        """Validate the final processed result"""
+        validation_results = {
+            'text_valid': True,
+            'structure_valid': True,
+            'confidence_reasonable': True,
+            'issues_found': []
         }
         
-        category = match.category if hasattr(match, 'category') else 'GRAMMAR'
-        base_confidence = category_confidence.get(category, 0.7)
+        # Text validation
+        if not result.text or not result.text.strip():
+            validation_results['text_valid'] = False
+            validation_results['issues_found'].append('empty_text')
         
-        # Adjust based on correction level
-        if self.correction_level == CorrectionLevel.CONSERVATIVE:
-            return base_confidence * 0.8
-        elif self.correction_level == CorrectionLevel.AGGRESSIVE:
-            return min(1.0, base_confidence * 1.2)
+        # Text quality validation
+        text_quality = self.text_validator.validate_text_content(result.text)
+        if text_quality < 0.5:
+            validation_results['text_valid'] = False
+            validation_results['issues_found'].append('poor_text_quality')
         
-        return base_confidence
+        # Confidence validation
+        if result.confidence < 0.1 or result.confidence > 1.0:
+            validation_results['confidence_reasonable'] = False
+            validation_results['issues_found'].append('invalid_confidence_range')
+        
+        # Structure validation
+        if result.regions:
+            hierarchy_validation = self.layout_reconstructor.validate_hierarchy(result.regions)
+            if not hierarchy_validation.get('hierarchy_consistent', True):
+                validation_results['structure_valid'] = False
+                validation_results['issues_found'].append('inconsistent_hierarchy')
+            
+            if not hierarchy_validation.get('text_consistency', True):
+                validation_results['structure_valid'] = False
+                validation_results['issues_found'].append('text_hierarchy_mismatch')
+            
+            if not hierarchy_validation.get('bounding_boxes_valid', True):
+                validation_results['structure_valid'] = False
+                validation_results['issues_found'].append('invalid_bounding_boxes')
+        
+        # Overall validation
+        validation_results['overall_valid'] = (
+            validation_results['text_valid'] and 
+            validation_results['structure_valid'] and 
+            validation_results['confidence_reasonable']
+        )
+        
+        return validation_results
     
-    def _calculate_correction_confidence(self, corrections: List[Correction]) -> float:
-        """Calculate overall correction confidence"""
-        if not corrections:
-            return 1.0
+    def get_processing_summary(self, metrics: ProcessingMetrics) -> Dict[str, any]:
+        """
+        Get a comprehensive summary of the processing pipeline
         
-        changed_corrections = [c for c in corrections if c.changed]
-        if not changed_corrections:
-            return 1.0
+        Args:
+            metrics: Metrics from processing pipeline
+            
+        Returns:
+            Dictionary containing processing summary
+        """
+        summary = {
+            'stages_completed': [stage.value for stage in metrics.stages_completed],
+            'total_processing_time': sum(metrics.processing_time.values()),
+            'stage_times': metrics.processing_time,
+            'final_confidence': metrics.final_confidence.overall
+        }
         
-        # Weighted average of individual confidences
-        total_weight = 0
-        weighted_sum = 0
+        # Add fusion summary if available
+        if metrics.fusion_metrics:
+            summary['fusion'] = self.result_fusion.get_fusion_summary(metrics.fusion_metrics)
         
-        for correction in changed_corrections:
-            # Weight by correction type importance
-            type_weights = {
-                CorrectionType.SPELLING: 1.0,
-                CorrectionType.GRAMMAR: 0.9,
-                CorrectionType.OCR_ARTIFACTS: 1.1,
-                CorrectionType.SPACING: 0.8,
-                CorrectionType.CONTEXT: 0.7,
-                CorrectionType.CAPITALIZATION: 0.6,
-                CorrectionType.PUNCTUATION: 0.8,
-                CorrectionType.FORMATTING: 0.5
+        # Add layout summary if available
+        if metrics.reconstruction_metrics:
+            summary['layout'] = self.layout_reconstructor.get_layout_summary(metrics.reconstruction_metrics)
+        
+        # Add cleaning summary
+        if metrics.cleaning_metrics:
+            summary['cleaning'] = {
+                'operations_performed': metrics.cleaning_metrics.get('operations_performed', []),
+                'text_length_change': metrics.cleaning_metrics.get('length_change', 0),
+                'cleaning_ratio': metrics.cleaning_metrics.get('cleaning_ratio', 1.0)
             }
-            
-            weight = type_weights.get(correction.correction_type, 0.7)
-            weighted_sum += correction.confidence * weight
-            total_weight += weight
         
-        return weighted_sum / total_weight if total_weight > 0 else 1.0
+        # Add confidence breakdown
+        if metrics.final_confidence.factors:
+            summary['confidence_factors'] = metrics.final_confidence.factors
+        
+        return summary
     
-    def _generate_correction_statistics(
-        self, 
-        original: str, 
-        corrected: str, 
-        corrections: List[Correction]
-    ) -> Dict[str, Any]:
-        """Generate detailed correction statistics"""
+    def optimize_for_content_type(self, content_type: str):
+        """
+        Optimize processing pipeline for specific content types
         
-        stats = {
-            'original_length': len(original),
-            'corrected_length': len(corrected),
-            'total_corrections': len(corrections),
-            'applied_corrections': len([c for c in corrections if c.changed]),
-            'correction_types': {}
-        }
-        
-        # Count corrections by type
-        for correction in corrections:
-            if correction.changed:
-                type_name = correction.correction_type.value
-                if type_name not in stats['correction_types']:
-                    stats['correction_types'][type_name] = 0
-                stats['correction_types'][type_name] += 1
-        
-        # Calculate text similarity
-        similarity = difflib.SequenceMatcher(None, original, corrected).ratio()
-        stats['text_similarity'] = similarity
-        stats['change_ratio'] = 1.0 - similarity
-        
-        # Word-level statistics
-        original_words = len(original.split()) if original else 0
-        corrected_words = len(corrected.split()) if corrected else 0
-        
-        stats['word_count'] = {
-            'original': original_words,
-            'corrected': corrected_words,
-            'change': corrected_words - original_words
-        }
-        
-        return stats
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get comprehensive correction statistics"""
-        stats = dict(self.stats)
-        
-        if self.correction_history:
-            recent_history = self.correction_history[-100:]
+        Args:
+            content_type: Type of content ('handwritten', 'printed', 'mixed', 'form', 'table')
+        """
+        if content_type == 'handwritten':
+            # More aggressive cleaning for handwritten text
+            self.enable_cleaning = True
+            # Handwritten text benefits less from strict layout reconstruction
+            self.enable_layout_reconstruction = False
             
-            stats['performance'] = {
-                'avg_processing_time': statistics.mean([h['processing_time'] for h in recent_history]),
-                'avg_corrections_per_text': statistics.mean([h['correction_count'] for h in recent_history]),
-                'avg_confidence': statistics.mean([h['confidence'] for h in recent_history]),
-                'total_processed': len(self.correction_history)
-            }
+        elif content_type == 'printed':
+            # Standard processing for printed text
+            self.enable_cleaning = True
+            self.enable_layout_reconstruction = True
             
-            # Text length impact
-            stats['text_analysis'] = {
-                'avg_original_length': statistics.mean([h['original_length'] for h in recent_history]),
-                'avg_corrected_length': statistics.mean([h['corrected_length'] for h in recent_history]),
-                'avg_length_change': statistics.mean([
-                    h['corrected_length'] - h['original_length'] for h in recent_history
-                ])
-            }
-        
-        stats['configuration'] = {
-            'correction_level': self.correction_level.value,
-            'min_confidence_threshold': self.min_confidence_threshold,
-            'enable_ai_correction': self.enable_ai_correction,
-            'enable_grammar_check': self.enable_grammar_check,
-            'enable_spell_check': self.enable_spell_check,
-            'components_available': {
-                'languagetool': LANGUAGETOOL_AVAILABLE,
-                'transformers': TRANSFORMERS_AVAILABLE,
-                'grammar_tool': self.grammar_tool is not None,
-                'ai_corrector': self.ai_corrector is not None
-            }
-        }
-        
-        return stats
-    
-    def add_custom_pattern(self, pattern: str, replacement: str, correction_type: CorrectionType = CorrectionType.OCR_ARTIFACTS):
-        """Add custom correction pattern"""
-        try:
-            self.ocr_patterns.append((pattern, replacement))
-            self.logger.info(f"Added custom pattern: {pattern} -> {replacement}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Error adding custom pattern: {e}")
-            return False
-    
-    def add_domain_rules(self, domain: str, rules: Dict[str, Any]):
-        """Add domain-specific correction rules"""
-        try:
-            self.domain_rules[domain] = rules
-            self.logger.info(f"Added domain rules for: {domain}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Error adding domain rules: {e}")
-            return False
-    
-    def export_corrections(self, correction_result: CorrectionResult, output_path: Union[str, Path]) -> bool:
-        """Export correction analysis to file"""
-        try:
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+        elif content_type == 'form':
+            # Forms need careful layout reconstruction
+            self.enable_layout_reconstruction = True
+            self.enable_cleaning = True
             
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(correction_result.to_dict(), f, indent=2, ensure_ascii=False)
+        elif content_type == 'table':
+            # Tables require precise layout reconstruction
+            self.enable_layout_reconstruction = True
+            self.enable_cleaning = False  # Avoid over-cleaning tabular data
             
-            self.logger.info(f"Corrections exported to {output_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error exporting corrections: {e}")
-            return False
-        
-# Add alias for backward compatibility
-TextCorrector = EnhancedTextCorrector
+        else:  # mixed or unknown
+            # Conservative approach
+            self.enable_cleaning = True
+            self.enable_layout_reconstruction = True

@@ -45,11 +45,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 # Import from parent modules (correct relative imports)
-from ...config import OCRConfig
-from ...utils.logger import OCRLogger
-from ...utils.image_utils import ImageProcessor
-from ...utils.model_utils import ModelLoader
-from ...results import TextRegion, BoundingBox
+from ..config import OCRConfig
+from ..utils.logger import OCRLogger
+from ..utils.image_utils import ImageProcessor
+from ..utils.model_utils import ModelLoader
+from ..results import TextRegion, BoundingBox
 from .quality_analyzer import QualityAnalyzer, QualityMetrics, QualityLevel
 from .text_detector import TextDetector
 

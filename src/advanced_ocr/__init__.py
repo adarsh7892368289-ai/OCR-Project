@@ -1,41 +1,28 @@
-# src/advanced_ocr/__init__.py
 """
-Advanced OCR Package Initialization
-
-This module initializes the advanced OCR package and provides the main API
-for OCR processing with multiple engines and optimization features.
-
-The package provides:
-- Multi-engine OCR processing with intelligent selection
-- Advanced image preprocessing and enhancement
-- Hierarchical text result structures
-- Performance monitoring and optimization
-- Batch processing capabilities
-
-Classes:
-    OCRResult: Primary OCR result container
-    EngineManager: Multi-engine coordination and management
-    BatchResult: Container for batch processing results
-
-Functions:
-    process_image: Main OCR processing function
-    batch_process: Batch processing function
-
-Example:
-    >>> from advanced_ocr import process_image, EngineManager
-    >>> result = process_image("document.jpg")
-    >>> print(f"Extracted text: {result.text}")
-
+Advanced OCR System - Public API
+ONLY JOB: Provide clean public interface  
+DEPENDENCIES: core.py, config.py
+USED BY: End users
 """
 
+from .core import OCRCore
+from .config import OCRConfig
 from .results import OCRResult, BatchResult
-from .core import EngineManager
 
-__version__ = "1.0.0"
+class OCR:
+    """Main OCR class - Public API interface"""
+    
+    def __init__(self, config=None):
+        """Initialize OCR with optional configuration"""
+        self.core = OCRCore(config)
+    
+    def extract(self, image_input, config_override=None):
+        """Extract text from single image"""
+        return self.core.extract_text(image_input, config_override)
+    
+    def batch_extract(self, image_inputs, config_override=None):
+        """Extract text from multiple images"""
+        return self.core.batch_extract(image_inputs, config_override)
 
-__all__ = [
-    'OCRResult',
-    'BatchResult',
-    'EngineManager',
-    '__version__'
-]
+# Public exports
+__all__ = ['OCR', 'OCRConfig', 'OCRResult', 'BatchResult']
