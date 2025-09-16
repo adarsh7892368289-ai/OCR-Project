@@ -1,17 +1,37 @@
+# src/advanced_ocr/engines/engine_coordinator.py
 """
-Smart Engine Selection & Coordination Module for Advanced OCR System
+Advanced OCR Engine Coordinator Module
 
-Intelligently selects and coordinates OCR engines based on content analysis
-and quality metrics for optimal text extraction performance.
+This module provides intelligent OCR engine selection and coordination for optimal text extraction
+performance in the advanced OCR system. It analyzes content types and quality metrics to dynamically
+select and orchestrate multiple OCR engines, ensuring the best possible results through strategic
+engine combination and execution strategies.
 
-Architecture:
-- Uses content_classifier.py for intelligent content-based routing
-- Coordinates multiple specialized engines based on content type
-- Manages parallel/sequential engine execution
-- Returns raw OCRResult(s) to core.py for postprocessing
-- No result fusion - pure engine coordination
+The module focuses on:
+- Content-based intelligent routing using content classification
+- Multiple execution strategies (single best, multi-consensus, hybrid adaptive)
+- Parallel engine execution with configurable concurrency limits
+- Automatic fallback mechanisms for engine failures
+- Quality-based engine selection adjustments
+- Performance metrics tracking and optimization
+- Lazy engine initialization and resource management
 
-Author: Advanced OCR System
+Classes:
+    EngineStrategy: Enum defining engine selection strategies
+    EngineSelection: Dataclass containing engine selection results and reasoning
+    CoordinationResult: Dataclass containing coordination results and metadata
+    EngineCoordinator: Main coordinator class managing engine selection and execution
+
+Functions:
+    coordinate_extraction: Main method for coordinating OCR engine execution
+
+Example:
+    >>> from advanced_ocr.engines.engine_coordinator import EngineCoordinator
+    >>> config = OCRConfig()
+    >>> coordinator = EngineCoordinator(config)
+    >>> result = coordinator.coordinate_extraction(preprocessing_result)
+    >>> print(f"Coordinated {len(result.results)} engine results")
+
 """
 
 import asyncio
@@ -20,16 +40,16 @@ from typing import List, Dict, Optional, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-from ..preprocessing.content_classifier import ContentClassifier, ContentClassification
-from ..preprocessing.image_processor import PreprocessingResult  
-from .base_engine import BaseOCREngine
-from .tesseract_enhanced import TesseractEngine
-from .paddleocr_optimized import PaddleOCREngine
-from .easyocr_enhanced import EasyOCREngine
-from .trocr_optimized import TrOCREngine
-from ..results import OCRResult
-from ..config import OCRConfig
-from ..utils.logger import Logger
+from advanced_ocr.preprocessing.content_classifier import ContentClassifier, ContentClassification
+from advanced_ocr.preprocessing.image_processor import PreprocessingResult
+from advanced_ocr.engines.base_engine import BaseOCREngine
+from advanced_ocr.engines.tesseract_engine import TesseractEngine
+from advanced_ocr.engines.paddleocr_engine import PaddleOCREngine
+from advanced_ocr.engines.easyocr_engine import EasyOCREngine
+from advanced_ocr.engines.trocr_engine import TrOCREngine
+from advanced_ocr.results import OCRResult
+from advanced_ocr.config import OCRConfig
+from advanced_ocr.utils.logger import OCRLogger
 
 
 class EngineStrategy(Enum):
@@ -73,7 +93,7 @@ class EngineCoordinator:
     
     def __init__(self, config: OCRConfig):
         self.config = config
-        self.logger = Logger(__name__)
+        self.logger = OCRLogger(__name__)
         
         # Initialize content classifier
         self.content_classifier = ContentClassifier(config)

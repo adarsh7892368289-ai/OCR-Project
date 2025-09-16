@@ -1,385 +1,457 @@
+# src/advanced_ocr/engines/tesseract_engine.py
+"""
+Advanced OCR Tesseract Engine
+
+This module provides the Tesseract-based OCR engine implementation for the advanced OCR
+system. Tesseract is a widely-used open-source OCR engine that excels at recognizing
+printed text with good accuracy and supports multiple languages.
+
+The module focuses on:
+- Printed text recognition with high accuracy
+- Multi-language OCR support (100+ languages)
+- Optimized configuration for different text types
+- Region-based and full-image OCR processing
+- Confidence scoring and text validation
+- Tesseract-specific image preprocessing enhancements
+
+Classes:
+    TesseractEngine: Main Tesseract-based OCR engine implementation
+    TesseractEnhancedEngine: Enhanced variant with additional preprocessing
+
+Functions:
+    _extract_implementation: Core OCR extraction logic
+    _extract_full_image: Full image OCR processing
+    _extract_from_regions: Region-based OCR processing
+    _process_tesseract_results: Result processing and formatting
+
+Example:
+    >>> engine = TesseractEngine(config)
+    >>> engine.initialize()
+    >>> result = engine.extract(image, text_regions)
+    >>> print(f"Extracted text: {result.text}")
+
+"""
+
+
+import cv2
 import numpy as np
 import pytesseract
-from typing import List, Dict, Any, Optional
-import time
+from typing import List, Optional, Dict, Any, Tuple
 from PIL import Image
-import os
-import subprocess
+import logging
 
-from ..core.base_engine import (
-    BaseOCREngine, 
-    OCRResult, 
-    DocumentResult, 
-    TextRegion,
-    BoundingBox,
-    TextType
-)
+from .base_engine import BaseOCREngine, EngineStatus
+from ..results import OCRResult, TextRegion, Word, Line, BoundingBox, ConfidenceMetrics
+from ..utils.image_utils import ImageProcessor, CoordinateTransformer
+from ..utils.text_utils import TextCleaner, TextValidator
+from ..config import EngineConfig
 
-def find_tesseract():
-    """Find Tesseract installation automatically"""
-    possible_paths = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Users\adbm\AppData\Local\Programs\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        r'C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'.format(os.getenv('USERNAME', '')),
-        'tesseract',  # Linux/Mac default
-        '/usr/bin/tesseract',
-        '/usr/local/bin/tesseract'
-    ]
-    
-    for path in possible_paths:
-        try:
-            if os.name == 'nt':  # Windows
-                if os.path.exists(path):
-                    return path
-            else:  # Linux/Mac
-                result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    return result.stdout.strip()
-        except:
-            continue
-    return None
 
 class TesseractEngine(BaseOCREngine):
     """
-    Modern Tesseract OCR Engine - Aligned with Pipeline
+    Tesseract OCR Engine with optimized configuration.
     
-    Clean integration with your pipeline:
-    - Takes preprocessed images from YOUR preprocessing pipeline
-    - Returns single OCRResult compatible with YOUR base engine
-    - Works with YOUR engine manager and postprocessing
+    Focuses purely on text extraction from preprocessed images and text regions.
+    No preprocessing, no postprocessing - just efficient Tesseract text extraction.
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__("Tesseract", config)
+    def __init__(self, config: EngineConfig):
+        """Initialize Tesseract engine with optimized settings."""
+        super().__init__("tesseract", config)
+        
+        # Initialize pipeline utilities correctly
+        self.image_processor = ImageProcessor()
+        self.text_cleaner = TextCleaner()
+        self.text_validator = TextValidator()
+        self.coord_transformer = CoordinateTransformer()
+        
+        # Tesseract-specific configurations from config
         self.tesseract_config = self._build_tesseract_config()
+        self.oem_mode = getattr(config, 'oem_mode', 3)  # LSTM OCR Engine Mode
+        self.psm_mode = getattr(config, 'psm_mode', 6)  # Assume uniform block of text
         
-        # Layout preservation settings
-        self.line_height_threshold = self.config.get("line_height_threshold", 15)
-        self.word_spacing_threshold = self.config.get("word_spacing_threshold", 20)
+        # Performance optimizations from config
+        self.dpi = getattr(config, 'dpi', 300)
+        self.timeout = getattr(config, 'timeout', 30)  # seconds
         
-        self.supports_handwriting = False
-        self.supports_multiple_languages = True
-        self.supports_orientation_detection = True
-        self.supports_structure_analysis = True
+        # Language support from config
+        self.languages = getattr(config, 'languages', 'eng')
         
-    def _build_tesseract_config(self) -> str:
-        """Build optimized Tesseract configuration"""
-        config_parts = ["--oem 1"]  # LSTM neural net mode
+        self._validate_tesseract_installation()
         
-        # Page segmentation mode
-        psm = self.config.get("psm", 6)
-        config_parts.append(f"--psm {psm}")
-        
-        # Language configuration
-        lang = self.config.get("lang", "eng")
-        if isinstance(lang, list):
-            lang = "+".join(lang)
-        config_parts.append(f"-l {lang}")
-        
-        return " ".join(config_parts)
-        
-    def initialize(self) -> bool:
-        """Initialize Tesseract engine"""
+    def _validate_tesseract_installation(self) -> None:
+        """Validate that Tesseract is properly installed."""
         try:
-            tesseract_cmd = find_tesseract()
-            if not tesseract_cmd:
-                self.logger.error("Tesseract not found")
-                return False
-                
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
             version = pytesseract.get_tesseract_version()
-            self.supported_languages = self._get_available_languages()
-            
-            self.is_initialized = True
-            self.model_loaded = True
-            
-            self.logger.info(f"Tesseract {version} initialized with {len(self.supported_languages)} languages")
-            return True
-            
+            self.logger.info(f"Tesseract version: {version}")
+            self._status = EngineStatus.READY
         except Exception as e:
-            self.logger.error(f"Tesseract initialization failed: {e}")
-            return False
-            
-    def _get_available_languages(self) -> List[str]:
-        """Get available languages"""
-        try:
-            langs = pytesseract.get_languages()
-            return [lang for lang in langs if lang != 'osd']
-        except:
-            return ["eng"]
-            
-    def get_supported_languages(self) -> List[str]:
-        """Get supported languages"""
-        return getattr(self, 'supported_languages', ["eng"])
+            self.logger.error(f"Tesseract validation failed: {e}")
+            self._status = EngineStatus.ERROR
+            raise RuntimeError(f"Tesseract installation invalid: {e}")
+    
+    def _build_tesseract_config(self) -> str:
+        """Build optimized Tesseract configuration string."""
+        config_parts = []
         
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
+        # Basic configuration
+        config_parts.extend([
+            f'--oem {self.oem_mode}',
+            f'--psm {self.psm_mode}'
+        ])
+        
+        # Advanced options
+        config_options = [
+            'preserve_interword_spaces=1',
+            'tessedit_do_invert=0',
+            'tessedit_char_blacklist=',
+            'load_system_dawg=1',
+            'load_freq_dawg=1'
+        ]
+        
+        # Add character whitelist if specified in config
+        if hasattr(self.config, 'char_whitelist') and self.config.char_whitelist:
+            config_options.append(f'tessedit_char_whitelist={self.config.char_whitelist}')
+        
+        # Add config options with -c prefix
+        for option in config_options:
+            config_parts.append(f'-c {option}')
+            
+        return ' '.join(config_parts)
+    
+    def extract(self, image: np.ndarray, text_regions: List[BoundingBox]) -> OCRResult:
         """
-        FIXED: Process preprocessed image and return single OCRResult with preserved layout
+        Extract text from preprocessed image using provided text regions.
         
         Args:
-            preprocessed_image: Image from YOUR preprocessing pipeline
-            **kwargs: Additional parameters
+            image: ALREADY PREPROCESSED image from image_processor.py
+            text_regions: Text regions from text_detector.py (via image_processor.py)
             
         Returns:
-            OCRResult: Single result compatible with YOUR base engine
+            OCRResult with extracted text and basic confidence scores
         """
-        start_time = time.time()
-        
+        if self._status != EngineStatus.READY:
+            raise RuntimeError(f"Engine not ready: {self._status}")
+            
         try:
-            if not self.validate_image(preprocessed_image):
-                raise ValueError("Invalid preprocessed image")
+            self._status = EngineStatus.PROCESSING
             
-            # Convert to PIL Image for Tesseract
-            pil_image = self._numpy_to_pil(preprocessed_image)
+            # Convert numpy array to PIL Image for Tesseract
+            if isinstance(image, np.ndarray):
+                # Handle different channel formats
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    # BGR to RGB conversion
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(image)
+            else:
+                pil_image = image
             
-            # Extract OCR data
-            ocr_data = pytesseract.image_to_data(
-                pil_image,
-                config=self.tesseract_config,
-                output_type=pytesseract.Output.DICT
+            # Extract text from each region
+            extracted_words = []
+            total_confidence = 0.0
+            processed_regions = 0
+            
+            for region in text_regions:
+                try:
+                    # Extract region from image
+                    region_image = self._extract_region(pil_image, region)
+                    
+                    if region_image is None:
+                        continue
+                    
+                    # Run Tesseract on region
+                    region_result = self._extract_from_region(region_image, region)
+                    
+                    if region_result:
+                        extracted_words.extend(region_result['words'])
+                        total_confidence += region_result['confidence']
+                        processed_regions += 1
+                        
+                except Exception as e:
+                    self.logger.warning(f"Failed to process region {region}: {e}")
+                    continue
+            
+            # Calculate overall confidence
+            overall_confidence = total_confidence / max(processed_regions, 1)
+            
+            # Create confidence metrics
+            confidence_metrics = ConfidenceMetrics(
+                overall_confidence=overall_confidence,
+                engine_confidence=overall_confidence,
+                consensus_confidence=0.0,  # Single engine, no consensus
+                validation_confidence=self._calculate_validation_confidence(extracted_words)
             )
             
-            # FIXED: Combine all Tesseract detections with layout preservation
-            result = self._combine_tesseract_results_with_layout(ocr_data)
+            # Build result
+            result = OCRResult(
+                engine_name=self.name,
+                text=self._combine_words_to_text(extracted_words),
+                words=extracted_words,
+                confidence=confidence_metrics,
+                processing_time=0.0,  # Will be set by base class
+                metadata={
+                    'tesseract_version': str(pytesseract.get_tesseract_version()),
+                    'config_used': self.tesseract_config,
+                    'regions_processed': processed_regions,
+                    'total_regions': len(text_regions)
+                }
+            )
             
-            # Set processing time and engine info
-            processing_time = time.time() - start_time
-            result.processing_time = processing_time
-            result.engine_name = self.name
-            
-            # Update stats
-            self.processing_stats['total_processed'] += 1
-            self.processing_stats['total_time'] += processing_time
-            if result.text.strip():
-                self.processing_stats['successful_extractions'] += 1
-            
+            self._status = EngineStatus.READY
             return result
             
         except Exception as e:
-            self.logger.error(f"OCR extraction failed: {e}")
-            processing_time = time.time() - start_time
-            self.processing_stats['errors'] += 1
-            
-            # Return empty result instead of raising
-            return OCRResult(
-                text="",
-                confidence=0.0,
-                processing_time=processing_time,
-                engine_name=self.name,
-                metadata={"error": str(e)}
-            )
+            self._status = EngineStatus.ERROR
+            self.logger.error(f"Tesseract extraction failed: {e}")
+            raise RuntimeError(f"Text extraction failed: {e}")
     
-    def _numpy_to_pil(self, image: np.ndarray) -> Image.Image:
-        """Convert numpy array to PIL Image"""
-        if len(image.shape) == 3:
-            if image.shape[2] == 3:
-                # Assume BGR, convert to RGB
-                image_rgb = image[:, :, ::-1]  # BGR to RGB
-                return Image.fromarray(image_rgb)
-            else:
-                return Image.fromarray(image)
-        else:
-            # Grayscale
-            return Image.fromarray(image)
-    
-    def _combine_tesseract_results_with_layout(self, data: Dict) -> OCRResult:
-        """
-        FIXED: Combine all Tesseract detections with preserved document layout
-        """
-        regions = []
-        detection_count = 0
-        
-        for i in range(len(data['text'])):
-            text = data['text'][i].strip()
-            conf = float(data['conf'][i])
+    def _extract_region(self, image: Image.Image, region: BoundingBox) -> Optional[Image.Image]:
+        """Extract a region from the image."""
+        try:
+            # Convert coordinates to integers
+            x1, y1, x2, y2 = region.to_xyxy()
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             
-            if not text or conf <= 0:
-                continue
+            # Validate coordinates
+            if x1 >= x2 or y1 >= y2:
+                return None
                 
-            bbox = BoundingBox(
-                x=int(data['left'][i]),
-                y=int(data['top'][i]),
-                width=int(data['width'][i]),
-                height=int(data['height'][i]),
-                confidence=conf / 100.0,
-                text_type=TextType.PRINTED
-            )
+            # Ensure coordinates are within image bounds
+            img_width, img_height = image.size
+            x1 = max(0, min(x1, img_width))
+            y1 = max(0, min(y1, img_height))
+            x2 = max(x1, min(x2, img_width))
+            y2 = max(y1, min(y2, img_height))
             
-            # Create text region with spatial information
-            region = TextRegion(
-                text=text,
-                confidence=conf / 100.0,
-                bbox=bbox,
-                text_type=TextType.PRINTED,
-                language="en"
-            )
+            # Extract region
+            region_image = image.crop((x1, y1, x2, y2))
             
-            regions.append(region)
-            detection_count += 1
-        
-        # FIXED: Reconstruct text with proper layout based on spatial positioning
-        formatted_text = self._reconstruct_document_layout(regions)
-        
-        # Calculate overall confidence
-        overall_confidence = sum(r.confidence for r in regions) / len(regions) if regions else 0.0
-        
-        # Create overall bounding box from all regions
-        overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
-        
-        # Return single OCRResult with preserved layout
-        return OCRResult(
-            text=formatted_text,
-            confidence=overall_confidence,
-            regions=regions,
-            bbox=overall_bbox,
-            level="page",
-            engine_name=self.name,
-            text_type=TextType.PRINTED,
-            metadata={
-                'detection_method': 'tesseract',
-                'detection_count': detection_count,
-                'tesseract_config': self.tesseract_config,
-                'individual_confidences': [r.confidence for r in regions],
-                'layout_preserved': True
-            }
-        )
+            # Skip tiny regions
+            if region_image.width < 10 or region_image.height < 10:
+                return None
+                
+            return region_image
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to extract region {region}: {e}")
+            return None
     
-    def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
-        """
-        CORE FIX: Reconstruct document text with proper line breaks and formatting
-        """
-        if not regions:
+    def _extract_from_region(self, region_image: Image.Image, region_bbox: BoundingBox) -> Optional[Dict[str, Any]]:
+        """Extract text from a single region using Tesseract."""
+        try:
+            # Get detailed data from Tesseract
+            data = pytesseract.image_to_data(
+                region_image,
+                lang=self.languages,
+                config=self.tesseract_config,
+                output_type=pytesseract.Output.DICT,
+                timeout=self.timeout
+            )
+            
+            # Process Tesseract output
+            words = []
+            confidences = []
+            
+            for i in range(len(data['text'])):
+                text = data['text'][i].strip()
+                
+                if not text or len(text) < 1:
+                    continue
+                
+                # Clean text using text_utils.py
+                cleaned_text = self.text_cleaner.clean_ocr_text(text)
+                if not cleaned_text:
+                    continue
+                
+                # Validate text using text_utils.py  
+                if not self.text_validator.is_valid_text(cleaned_text):
+                    continue
+                
+                confidence = float(data['conf'][i])
+                if confidence < 0:  # Tesseract uses -1 for no confidence
+                    confidence = 0.0
+                
+                # Convert relative coordinates to absolute
+                rel_x = data['left'][i]
+                rel_y = data['top'][i]
+                rel_width = data['width'][i]
+                rel_height = data['height'][i]
+                
+                # Transform coordinates using image_utils.py
+                abs_x = region_bbox.x + rel_x
+                abs_y = region_bbox.y + rel_y
+                
+                word_bbox = BoundingBox(
+                    x=abs_x,
+                    y=abs_y,
+                    width=rel_width,
+                    height=rel_height
+                )
+                
+                # Create Word object
+                word = Word(
+                    text=cleaned_text,
+                    bbox=word_bbox,
+                    confidence=confidence / 100.0  # Convert to 0-1 range
+                )
+                
+                words.append(word)
+                confidences.append(confidence)
+            
+            if not words:
+                return None
+            
+            # Calculate region confidence
+            region_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+            
+            return {
+                'words': words,
+                'confidence': region_confidence / 100.0  # Convert to 0-1 range
+            }
+            
+        except Exception as e:
+            self.logger.warning(f"Tesseract processing failed for region: {e}")
+            return None
+    
+    def _calculate_validation_confidence(self, words: List[Word]) -> float:
+        """Calculate validation confidence based on text characteristics."""
+        if not words:
+            return 0.0
+        
+        total_score = 0.0
+        
+        for word in words:
+            # Length score (longer words generally more reliable)
+            length_score = min(len(word.text) / 10.0, 1.0)
+            
+            # Character validity score
+            valid_chars = sum(1 for c in word.text if c.isalnum() or c.isspace())
+            char_score = valid_chars / max(len(word.text), 1)
+            
+            # Dictionary validation using text_utils.py
+            dict_score = 1.0 if self.text_validator.is_valid_text(word.text) else 0.5
+            
+            word_score = (length_score * 0.3 + char_score * 0.4 + dict_score * 0.3)
+            total_score += word_score
+        
+        return total_score / len(words)
+    
+    def _combine_words_to_text(self, words: List[Word]) -> str:
+        """Combine words into readable text."""
+        if not words:
             return ""
         
-        # Sort regions by vertical position (top to bottom), then horizontal (left to right)
-        sorted_regions = sorted(regions, key=lambda r: (r.bbox.y, r.bbox.x))
+        # Sort words by position (top-to-bottom, left-to-right)
+        sorted_words = sorted(words, key=lambda w: (w.bbox.y, w.bbox.x))
         
-        # Group regions into lines based on Y-coordinate proximity
+        # Group words into lines based on Y position
         lines = []
         current_line = []
-        current_line_y = None
+        last_y = None
+        y_threshold = 10  # pixels
         
-        for region in sorted_regions:
-            region_center_y = region.bbox.y + region.bbox.height // 2
-            
-            if current_line_y is None:
-                # First region
-                current_line_y = region_center_y
-                current_line.append(region)
+        for word in sorted_words:
+            if last_y is None or abs(word.bbox.y - last_y) > y_threshold:
+                # New line
+                if current_line:
+                    lines.append(current_line)
+                current_line = [word]
+                last_y = word.bbox.y
             else:
-                # Check if this region is on the same line
-                y_distance = abs(region_center_y - current_line_y)
+                current_line.append(word)
                 
-                if y_distance <= self.line_height_threshold:
-                    # Same line - add to current line
-                    current_line.append(region)
-                else:
-                    # New line - finish current line and start new one
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = [region]
-                    current_line_y = region_center_y
-        
-        # Add the last line
         if current_line:
             lines.append(current_line)
         
-        # Build the formatted text
-        formatted_lines = []
+        # Join words in each line, then join lines
+        text_lines = []
+        for line in lines:
+            # Sort words in line by X position
+            line_words = sorted(line, key=lambda w: w.bbox.x)
+            line_text = ' '.join(word.text for word in line_words)
+            text_lines.append(line_text)
         
-        for line_regions in lines:
-            # Sort regions in the line by X-coordinate (left to right)
-            line_regions.sort(key=lambda r: r.bbox.x)
-            
-            # Combine text from regions in the line with appropriate spacing
-            line_text_parts = []
-            prev_region = None
-            
-            for region in line_regions:
-                if prev_region is not None:
-                    # Calculate horizontal distance between regions
-                    horizontal_gap = region.bbox.x - (prev_region.bbox.x + prev_region.bbox.width)
-                    
-                    # Add extra spaces for large gaps (likely separate words/columns)
-                    if horizontal_gap > self.word_spacing_threshold:
-                        # Multiple spaces for large gaps
-                        spaces = " " * min(4, max(2, horizontal_gap // 10))
-                        line_text_parts.append(spaces)
-                    else:
-                        # Single space for normal word separation
-                        line_text_parts.append(" ")
-                
-                line_text_parts.append(region.text)
-                prev_region = region
-            
-            # Join the line parts and add to formatted lines
-            line_text = "".join(line_text_parts).strip()
-            if line_text:  # Only add non-empty lines
-                formatted_lines.append(line_text)
-        
-        # Join all lines with newlines to preserve document structure
-        return "\n".join(formatted_lines)
-    
-    def _calculate_overall_bbox(self, regions: List[TextRegion]) -> BoundingBox:
-        """Calculate overall bounding box from all text regions"""
-        if not regions:
-            return BoundingBox(0, 0, 100, 30)
-        
-        min_x = min(r.bbox.x for r in regions)
-        min_y = min(r.bbox.y for r in regions)
-        max_x = max(r.bbox.x + r.bbox.width for r in regions)
-        max_y = max(r.bbox.y + r.bbox.height for r in regions)
-        
-        return BoundingBox(
-            x=min_x,
-            y=min_y,
-            width=max_x - min_x,
-            height=max_y - min_y,
-            confidence=sum(r.confidence for r in regions) / len(regions)
-        )
-    
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
-        """Process multiple images - returns single result per image"""
-        results = []
-        for image in images:
-            result = self.process_image(image, **kwargs)
-            results.append(result)
-        return results
+        return '\n'.join(text_lines)
     
     def get_engine_info(self) -> Dict[str, Any]:
-        """Get engine information"""
-        info = {
-            'name': self.name,
-            'version': None,
-            'type': 'traditional_ocr',
-            'supported_languages': self.get_supported_languages(),
-            'capabilities': {
-                'handwriting': self.supports_handwriting,
-                'multiple_languages': self.supports_multiple_languages,
-                'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis,
-                'layout_preservation': True  # NEW: Added layout preservation capability
-            },
-            'optimal_for': ['printed_text', 'documents', 'books', 'forms'],
-            'performance_profile': {
-                'accuracy': 'high',
-                'speed': 'medium',
-                'memory_usage': 'low',
-                'gpu_required': False
-            },
-            'pipeline_integration': {
-                'uses_preprocessing_pipeline': True,
-                'returns_single_result': True,
-                'compatible_with_base_engine': True,
-                'works_with_engine_manager': True,
-                'preserves_document_layout': True  # NEW: Layout preservation feature
-            }
+        """Get engine information."""
+        try:
+            version = str(pytesseract.get_tesseract_version())
+        except:
+            version = "unknown"
+            
+        return {
+            'engine': 'tesseract',
+            'version': version,
+            'languages': self.languages,
+            'oem_mode': self.oem_mode,
+            'psm_mode': self.psm_mode,
+            'status': self._status.value
         }
+    
+    def cleanup(self) -> None:
+        """Cleanup engine resources."""
+        # Tesseract doesn't require explicit cleanup
+        self._status = EngineStatus.READY
+        self.logger.info("Tesseract engine cleaned up")
+
+
+class TesseractEnhancedEngine(TesseractEngine):
+    """
+    Enhanced Tesseract engine with advanced preprocessing for specific use cases.
+    
+    This variant applies Tesseract-specific optimizations before text extraction.
+    Use this when you need Tesseract-specific image enhancements.
+    """
+    
+    def __init__(self, config: EngineConfig):
+        super().__init__(config)
+        self.enhance_for_tesseract = getattr(config, 'enhance_for_tesseract', True)
+    
+    def _extract_region(self, image: Image.Image, region: BoundingBox) -> Optional[Image.Image]:
+        """Extract and enhance region specifically for Tesseract."""
+        region_image = super()._extract_region(image, region)
+        
+        if region_image is None or not self.enhance_for_tesseract:
+            return region_image
         
         try:
-            info['version'] = str(pytesseract.get_tesseract_version())
-        except:
-            info['version'] = 'unknown'
+            # Convert to numpy for processing
+            img_array = np.array(region_image)
             
-        return info
+            # Tesseract-specific enhancements
+            # 1. Ensure sufficient contrast
+            img_array = self._enhance_contrast(img_array)
+            
+            # 2. Resize if too small (Tesseract works better with larger images)
+            if img_array.shape[0] < 32 or img_array.shape[1] < 32:
+                scale_factor = max(32 / img_array.shape[0], 32 / img_array.shape[1])
+                new_height = int(img_array.shape[0] * scale_factor)
+                new_width = int(img_array.shape[1] * scale_factor)
+                img_array = cv2.resize(img_array, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            
+            # 3. Ensure it's grayscale (Tesseract often works better with grayscale)
+            if len(img_array.shape) == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+            
+            return Image.fromarray(img_array)
+            
+        except Exception as e:
+            self.logger.warning(f"Region enhancement failed, using original: {e}")
+            return region_image
+    
+    def _enhance_contrast(self, img_array: np.ndarray) -> np.ndarray:
+        """Apply CLAHE for better contrast."""
+        try:
+            if len(img_array.shape) == 3:
+                # Convert to LAB color space for better contrast enhancement
+                lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                lab[:,:,0] = clahe.apply(lab[:,:,0])
+                return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+            else:
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                return clahe.apply(img_array)
+        except Exception:
+            return img_array

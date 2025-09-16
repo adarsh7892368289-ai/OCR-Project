@@ -1,3 +1,35 @@
+# src/advanced_ocr/core.py
+"""
+Advanced OCR Engine Management Core
+
+This module provides the core engine management functionality for the advanced OCR
+system, enabling intelligent coordination of multiple OCR engines with performance
+tracking and optimization.
+
+The module focuses on:
+- Multi-engine processing and comparison
+- Intelligent engine selection based on content type
+- Performance tracking and bottleneck identification
+- Parallel processing capabilities
+- Engine initialization and cleanup
+
+Classes:
+    EngineManager: Main engine coordination and management class
+    EnginePerformance: Performance metrics tracking for individual engines
+
+Functions:
+    process_with_best_engine: Process image with automatically selected best engine
+    process_with_multiple_engines: Process with multiple engines for comparison
+    batch_process: Process multiple images efficiently
+
+Example:
+    >>> manager = EngineManager()
+    >>> manager.register_engine("tesseract", tesseract_engine)
+    >>> result = manager.process_with_best_engine(image)
+    >>> print(f"OCR result: {result.text}")
+
+"""
+
 import os
 import time
 import numpy as np

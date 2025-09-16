@@ -35,12 +35,12 @@ try:
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
-from ..core.base_engine import OCRResult, TextRegion, BoundingBox
-from ..config import ConfigManager
-from ..utils.logger import get_logger
-from ..utils.text_utils import TextUtils
+from advanced_ocr.core.base_engine import OCRResult, TextRegion, BoundingBox
+from advanced_ocr.config import ConfigManager
+from advanced_ocr.utils.logger import OCRLogger
+from advanced_ocr.utils.text_utils import TextUtils
 
-logger = get_logger(__name__)
+logger = OCRLogger(__name__)
 
 
 class CorrectionType(Enum):
@@ -131,7 +131,7 @@ class EnhancedTextCorrector:
     
     def __init__(self, config_path: Optional[str] = None):
         self.config = ConfigManager(config_path).get_section('text_corrector', {})
-        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+        self.logger = logger
         
         # Configuration
         self.correction_level = CorrectionLevel(

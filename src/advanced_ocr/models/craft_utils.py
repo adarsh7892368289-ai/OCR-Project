@@ -1,4 +1,37 @@
-# src/models/craft_utils.py - FINAL ERROR-FREE VERSION
+# src/advanced_ocr/models/craft_utils.py
+"""
+Advanced OCR CRAFT Utilities
+
+This module provides utilities and helper functions for the CRAFT (Character Region
+Awareness For Text detection) text detection algorithm. CRAFT is a scene text detection
+method that detects individual characters and links them to form text regions.
+
+The module focuses on:
+- CRAFT neural network architecture implementation
+- Feature extraction and fusion networks
+- Post-processing of detection results
+- Text region extraction and validation
+- Model loading and inference utilities
+- Image preprocessing for CRAFT input
+
+Classes:
+    VGG16FeatureExtractor: VGG16 backbone for feature extraction
+    FeatureFusionNetwork: Multi-scale feature fusion network
+    CRAFTModel: Complete CRAFT text detection model
+    CRAFTPostProcessor: Post-processing utilities for CRAFT outputs
+
+Functions:
+    download_craft_model: Download pre-trained CRAFT model
+    create_craft_config: Create default CRAFT configuration
+    preprocess_image_for_craft: Preprocess image for CRAFT inference
+
+Example:
+    >>> model = CRAFTModel()
+    >>> text_map, link_map = model(image)
+    >>> processor = CRAFTPostProcessor()
+    >>> boxes = processor.get_text_boxes(text_map, link_map)
+
+"""
 
 import torch
 import torch.nn as nn

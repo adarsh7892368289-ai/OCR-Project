@@ -1,3 +1,4 @@
+# src/advanced_ocr/preprocessing/quality_analyzer.py
 """
 Advanced OCR Image Quality Analysis Module
 
@@ -46,8 +47,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 # Import from parent modules (correct relative imports)
-from ...config import OCRConfig
-from ...utils.logger import OCRLogger
+from advanced_ocr.config import OCRConfig
+from advanced_ocr.utils.logger import OCRLogger
 
 
 class QualityLevel(Enum):
@@ -661,7 +662,7 @@ def create_quality_analyzer(config: Optional[OCRConfig] = None) -> QualityAnalyz
         QualityAnalyzer: Configured quality analyzer
     """
     if config is None:
-        from ...config import OCRConfig
+        from advanced_ocr.config import OCRConfig
         config = OCRConfig()
     
     return QualityAnalyzer(config)

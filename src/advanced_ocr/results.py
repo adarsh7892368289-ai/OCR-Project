@@ -9,7 +9,7 @@ Classes:
     OCRResult: Primary container for OCR extraction results
     BoundingBox: Flexible coordinate representation with format conversion
     ConfidenceMetrics: Multi-dimensional confidence scoring
-    TextElement: Base class for hierarchical text structures
+    TextRegion: Base class for hierarchical text structures
     Word, Line, Paragraph, Block, Page: Hierarchical text elements
     ProcessingMetrics: Performance tracking and optimization metrics
     BatchResult: Container for multi-document processing results
@@ -179,8 +179,8 @@ class ProcessingMetrics:
 
 
 @dataclass
-class TextElement:
-    """Base hierarchical text element with spatial and metadata information."""
+class TextRegion:
+    """Base hierarchical text region with spatial and metadata information."""
     text: str
     bbox: BoundingBox
     confidence: ConfidenceMetrics
@@ -202,7 +202,7 @@ class TextElement:
 
 
 @dataclass
-class Word(TextElement):
+class Word(TextRegion):
     """Word-level text element with character details."""
     level: TextLevel = field(default=TextLevel.WORD, init=False)
     char_bboxes: Optional[List[BoundingBox]] = None
@@ -217,7 +217,7 @@ class Word(TextElement):
 
 
 @dataclass
-class Line(TextElement):
+class Line(TextRegion):
     """Line-level text element containing words."""
     level: TextLevel = field(default=TextLevel.LINE, init=False)
     words: List[Word] = field(default_factory=list)
@@ -236,7 +236,7 @@ class Line(TextElement):
 
 
 @dataclass
-class Paragraph(TextElement):
+class Paragraph(TextRegion):
     """Paragraph-level text element containing lines."""
     level: TextLevel = field(default=TextLevel.PARAGRAPH, init=False)
     lines: List[Line] = field(default_factory=list)
@@ -255,7 +255,7 @@ class Paragraph(TextElement):
 
 
 @dataclass
-class Block(TextElement):
+class Block(TextRegion):
     """Block-level text element containing paragraphs."""
     level: TextLevel = field(default=TextLevel.BLOCK, init=False)
     paragraphs: List[Paragraph] = field(default_factory=list)
@@ -416,14 +416,12 @@ class BatchResult:
 
 
 # Type aliases for convenience
-TextRegion = TextElement
 BBox = BoundingBox
 
 # Library exports
 __all__ = [
     'OCRResult',
     'BatchResult',
-    'TextElement',
     'Word',
     'Line',
     'Paragraph',

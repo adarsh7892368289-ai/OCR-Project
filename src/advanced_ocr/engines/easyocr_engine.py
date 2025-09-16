@@ -1,388 +1,391 @@
-import cv2
-import numpy as np
-import easyocr
-from typing import List, Dict, Any, Tuple, Optional
-import time
-from PIL import Image
 
-from ..core.base_engine import (
-    BaseOCREngine, 
-    OCRResult, 
-    DocumentResult, 
-    TextRegion,
-    BoundingBox,
-    TextType
-)
+# src/advanced_ocr/engines/easyocr_engine.py
+"""
+Advanced OCR EasyOCR Engine
+
+This module provides the EasyOCR-based OCR engine implementation for the advanced OCR
+system. EasyOCR is optimized for handwritten text recognition and supports multiple
+languages with GPU acceleration capabilities.
+
+The module focuses on:
+- Handwritten text recognition with high accuracy
+- Multi-language OCR support (80+ languages)
+- GPU acceleration for improved performance
+- Robust processing of varied text orientations
+- Natural scene text recognition capabilities
+- Region-based and full-image OCR processing
+
+Classes:
+    EasyOCREngine: EasyOCR-based OCR engine implementation
+
+Functions:
+    _extract_implementation: Core OCR extraction logic
+    _extract_full_image: Full image OCR processing
+    _extract_from_regions: Region-based OCR processing
+    _process_easyocr_results: Result processing and formatting
+
+Example:
+    >>> engine = EasyOCREngine(config)
+    >>> engine.initialize()
+    >>> result = engine.extract(image, text_regions)
+    >>> print(f"Extracted text: {result.text}")
+
+"""
+
+import numpy as np
+from typing import List, Optional, Tuple, Any
+import warnings
+
+from advanced_ocr.engines.base_engine import BaseOCREngine, EngineStatus
+from advanced_ocr.results import OCRResult, BoundingBox, TextRegion
+from advanced_ocr.config import OCRConfig
+from advanced_ocr.utils.model_utils import ModelLoader, cached_model_load
+from advanced_ocr.utils.image_utils import ImageProcessor
+from advanced_ocr.utils.text_utils import TextCleaner
+
+# Suppress EasyOCR warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='easyocr')
+
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
+    # Create a dummy class for type hints when EasyOCR is not available
+    class easyocr:
+        class Reader:
+            pass
+
 
 class EasyOCREngine(BaseOCREngine):
     """
-    Modern EasyOCR Engine - Aligned with Pipeline
+    EasyOCR-based OCR engine optimized for handwritten text and multiple languages
     
-    Clean integration with your pipeline:
-    - Takes preprocessed images from YOUR preprocessing pipeline
-    - Returns single OCRResult compatible with YOUR base engine
-    - Works with YOUR engine manager and postprocessing
-    - Excellent for handwritten and printed text
+    Strengths:
+    - Excellent for handwritten text
+    - Strong multi-language support
+    - Good GPU acceleration
+    - Robust for varied text orientations
+    - Works well with natural scene text
+    
+    Pipeline Integration:
+    - Receives preprocessed image from engine_coordinator.py
+    - Processes provided text regions or full image
+    - Returns raw OCRResult for postprocessing
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__("EasyOCR", config)
-        self.reader = None
-        self.languages = self.config.get("languages", ["en"])
-        self.gpu = self.config.get("gpu", True)
-        self.model_storage_directory = self.config.get("model_dir", None)
+    def __init__(self, config: OCRConfig):
+        """Initialize EasyOCR engine"""
+        super().__init__(config)
         
-        # Layout preservation settings
-        self.line_height_threshold = self.config.get("line_height_threshold", 15)
-        self.word_spacing_threshold = self.config.get("word_spacing_threshold", 20)
+        if not EASYOCR_AVAILABLE:
+            raise ImportError("EasyOCR not installed. Install with: pip install easyocr")
         
-        # Engine capabilities
-        self.supports_handwriting = True
-        self.supports_multiple_languages = True
-        self.supports_orientation_detection = False  # EasyOCR handles this internally
-        self.supports_structure_analysis = False
+        # EasyOCR-specific configuration
+        self.easy_config = getattr(config.engines, 'easyocr', {})
         
-    def initialize(self) -> bool:
-        """Initialize EasyOCR reader with error resilience"""
+        # Language support
+        self.languages = self.easy_config.get('languages', ['en'])
+        if isinstance(self.languages, str):
+            self.languages = [self.languages]
+        
+        # GPU configuration
+        self.use_gpu = self.easy_config.get('use_gpu', False)
+        self.gpu_device = self.easy_config.get('gpu_device', 0)
+        
+        # Performance settings
+        self.batch_size = self.easy_config.get('batch_size', 8)
+        self.workers = self.easy_config.get('workers', 1)
+        
+        # Detection and recognition thresholds
+        self.text_threshold = self.easy_config.get('text_threshold', 0.7)
+        self.low_text = self.easy_config.get('low_text', 0.4)
+        self.link_threshold = self.easy_config.get('link_threshold', 0.4)
+        
+        # Model components
+        self._easyocr_reader: Optional[easyocr.Reader] = None
+        self._model_loader = ModelLoader()
+        self._image_processor = ImageProcessor()
+        self._text_cleaner = TextCleaner()
+        
+        self.logger.info(f"EasyOCR engine configured: langs={self.languages}, gpu={self.use_gpu}")
+    
+    def _initialize_implementation(self):
+        """Initialize EasyOCR reader"""
+        self.logger.info("Loading EasyOCR model...")
+        
         try:
-            self.logger.info(f"Initializing EasyOCR with languages: {self.languages}")
-            
-            self.reader = easyocr.Reader(
-                self.languages,
-                gpu=self.gpu,
-                model_storage_directory=self.model_storage_directory,
-                download_enabled=True,
-                detector=True,
-                recognizer=True,
-                verbose=False
+            # Load EasyOCR with configuration
+            self._easyocr_reader = cached_model_load(
+                model_key=f"easyocr_{'_'.join(self.languages)}_{self.use_gpu}",
+                load_func=self._load_easyocr_reader,
+                cache_timeout=3600  # 1 hour cache
             )
             
-            self.supported_languages = self.languages
-            self.is_initialized = True
-            self.model_loaded = True
+            # Test model with dummy input
+            test_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
+            _ = self._easyocr_reader.readtext(test_image, batch_size=1)
             
-            self.logger.info(f"EasyOCR initialized successfully (GPU: {self.gpu})")
-            return True
+            self.logger.info("EasyOCR model loaded successfully")
             
         except Exception as e:
-            self.logger.error(f"EasyOCR initialization failed: {e}")
-            self.reader = None
-            self.is_initialized = False
-            self.model_loaded = False
-            return False
-            
-    def get_supported_languages(self) -> List[str]:
-        """Get comprehensive list of supported languages"""
-        return [
-            'en', 'ch_sim', 'ch_tra', 'ja', 'ko', 'th', 'vi', 'ar', 'hi', 'ur', 
-            'fa', 'ru', 'bg', 'uk', 'be', 'te', 'kn', 'ta', 'bn', 'as', 'mr', 
-            'ne', 'si', 'my', 'km', 'lo', 'sa', 'fr', 'de', 'es', 'pt', 'it',
-            'nl', 'sv', 'da', 'no', 'fi', 'lt', 'lv', 'et', 'pl', 'cs', 'sk',
-            'sl', 'hu', 'ro', 'hr', 'sr', 'bs', 'mk', 'sq', 'mt', 'cy', 'ga',
-            'tr', 'az', 'uz', 'mn'
-        ]
-        
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
+            self.logger.error(f"Failed to load EasyOCR: {e}")
+            raise
+    
+    def _load_easyocr_reader(self) -> easyocr.Reader:
+        """Load EasyOCR reader with configuration"""
+        return easyocr.Reader(
+            lang_list=self.languages,
+            gpu=self.use_gpu,
+            model_storage_directory=None,  # Use default
+            user_network_directory=None,  # Use default
+            recog_network='TRBC',  # Use default recognition network
+            detect_network='craft',  # Use CRAFT for detection
+            verbose=False  # Suppress logs
+        )
+    
+    def _extract_implementation(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
         """
-        FIXED: Process preprocessed image and return single OCRResult with preserved layout
+        Extract text using EasyOCR
         
         Args:
-            preprocessed_image: Image from YOUR preprocessing pipeline
-            **kwargs: Additional parameters
+            image: Preprocessed image from image_processor.py
+            text_regions: Text regions from text_detector.py (can be empty)
             
         Returns:
-            OCRResult: Single result compatible with YOUR base engine
+            Raw OCRResult with extracted text and bounding boxes
         """
-        start_time = time.time()
+        
+        # Ensure model is loaded
+        if self._easyocr_reader is None:
+            self.initialize()
+        
+        # Convert image format if needed
+        ocr_image = self._prepare_image_for_easyocr(image)
+        
+        # Extract text based on available regions
+        if text_regions and len(text_regions) > 0:
+            return self._extract_from_regions(ocr_image, text_regions)
+        else:
+            return self._extract_full_image(ocr_image)
+    
+    def _prepare_image_for_easyocr(self, image: np.ndarray) -> np.ndarray:
+        """Prepare image format for EasyOCR"""
+        
+        # EasyOCR expects RGB format
+        if len(image.shape) == 2:
+            # Grayscale to RGB
+            image = self._image_processor.convert_grayscale_to_rgb(image)
+        elif len(image.shape) == 3 and image.shape[2] == 4:
+            # RGBA to RGB
+            image = self._image_processor.convert_rgba_to_rgb(image)
+        elif len(image.shape) == 3 and image.shape[2] == 3:
+            # Already RGB
+            pass
+        
+        # Ensure uint8 format
+        if image.dtype != np.uint8:
+            image = self._image_processor.normalize_to_uint8(image)
+        
+        return image
+    
+    def _extract_full_image(self, image: np.ndarray) -> OCRResult:
+        """Extract text from full image using EasyOCR"""
         
         try:
-            # Validate initialization
-            if not self.is_initialized or self.reader is None:
-                if not self.initialize():
-                    raise RuntimeError("EasyOCR engine not initialized")
-            
-            # Validate preprocessed input
-            if not self.validate_image(preprocessed_image):
-                raise ValueError("Invalid preprocessed image")
-            
-            # Convert preprocessed image to EasyOCR format
-            easyocr_image = self._prepare_for_easyocr(preprocessed_image)
-            
-            # Extract OCR data with optimized parameters
-            ocr_detections = self.reader.readtext(
-                easyocr_image,
-                detail=1,  # Get detailed results with bounding boxes
-                paragraph=False,  # Word-level processing
-                width_ths=0.7,
-                height_ths=0.7,
-                decoder="greedy",
-                beamWidth=5,
-                batch_size=1
+            # Run EasyOCR on full image
+            results = self._easyocr_reader.readtext(
+                image,
+                batch_size=self.batch_size,
+                workers=self.workers,
+                text_threshold=self.text_threshold,
+                low_text=self.low_text,
+                link_threshold=self.link_threshold,
+                canvas_size=2560,  # Max canvas size for processing
+                mag_ratio=1.0,  # Magnification ratio
+                slope_ths=0.1,  # Slope threshold for text line detection
+                ycenter_ths=0.5,  # Y-center threshold for text grouping
+                height_ths=0.7,  # Height threshold for text filtering
+                width_ths=0.5,  # Width threshold for text filtering
+                add_margin=0.1  # Add margin to detected text boxes
             )
             
-            # FIXED: Combine all EasyOCR detections with layout preservation
-            result = self._combine_easyocr_results_with_layout(ocr_detections)
+            if not results:
+                return OCRResult(
+                    text="",
+                    confidence=0.0,
+                    bounding_boxes=[],
+                    metadata={'easyocr_results': 'empty'}
+                )
             
-            # Set processing time and engine info
-            processing_time = time.time() - start_time
-            result.processing_time = processing_time
-            result.engine_name = self.name
-            
-            # Update stats
-            self.processing_stats['total_processed'] += 1
-            self.processing_stats['total_time'] += processing_time
-            if result.text.strip():
-                self.processing_stats['successful_extractions'] += 1
-            
-            return result
+            # Process EasyOCR results
+            return self._process_easyocr_results(results)
             
         except Exception as e:
-            self.logger.error(f"EasyOCR extraction failed: {e}")
-            processing_time = time.time() - start_time
-            self.processing_stats['errors'] += 1
-            
-            # Return empty result instead of raising
-            return OCRResult(
-                text="",
-                confidence=0.0,
-                processing_time=processing_time,
-                engine_name=self.name,
-                metadata={"error": str(e)}
-            )
+            self.logger.error(f"EasyOCR full image extraction failed: {e}")
+            raise RuntimeError(f"EasyOCR extraction error: {e}")
     
-    def _prepare_for_easyocr(self, image: np.ndarray) -> np.ndarray:
-        """
-        Minimal conversion for EasyOCR compatibility
-        Only format conversion - YOUR preprocessing pipeline handles enhancement
-        """
-        # EasyOCR expects RGB format
-        if len(image.shape) == 3:
-            if image.shape[2] == 3:
-                # Assume BGR from OpenCV, convert to RGB
-                return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            else:
-                return image
-        else:
-            # Convert grayscale to RGB
-            return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    
-    def _combine_easyocr_results_with_layout(self, detections: List) -> OCRResult:
-        """
-        FIXED: Combine all EasyOCR detections with preserved document layout
-        """
-        regions = []
-        detection_count = 0
+    def _extract_from_regions(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
+        """Extract text from specific regions using EasyOCR"""
         
-        for detection in detections:
-            if len(detection) >= 3:
-                bbox_points, text, confidence = detection
+        all_text_parts = []
+        all_boxes = []
+        confidence_scores = []
+        
+        for region in text_regions:
+            try:
+                # Extract region from image
+                region_image = self._extract_region_image(image, region)
                 
-                # Filter very low confidence results
-                if not text.strip() or confidence <= 0.1:
+                if region_image.size == 0:
                     continue
                 
-                # Convert polygon to bounding box
-                x, y, w, h = self._polygon_to_bbox(bbox_points)
-                bbox = BoundingBox(
-                    x=x, y=y, width=w, height=h, 
-                    confidence=confidence,
-                    text_type=TextType.MIXED
+                # Run EasyOCR on region
+                results = self._easyocr_reader.readtext(
+                    region_image,
+                    batch_size=self.batch_size,
+                    workers=self.workers,
+                    text_threshold=self.text_threshold,
+                    low_text=self.low_text,
+                    link_threshold=self.link_threshold
                 )
                 
-                # Create text region with spatial information
-                region = TextRegion(
-                    text=text.strip(),
-                    confidence=confidence,
-                    bbox=bbox,
-                    text_type=TextType.MIXED,
-                    language="en"
-                )
-                
-                regions.append(region)
-                detection_count += 1
-        
-        # FIXED: Reconstruct text with proper layout based on spatial positioning
-        formatted_text = self._reconstruct_document_layout(regions)
-        
-        # Calculate overall confidence
-        overall_confidence = sum(r.confidence for r in regions) / len(regions) if regions else 0.0
-        
-        # Create overall bounding box from all regions
-        overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
-        
-        # Return single OCRResult with preserved layout
-        return OCRResult(
-            text=formatted_text,
-            confidence=overall_confidence,
-            regions=regions,
-            bbox=overall_bbox,
-            level="page",
-            engine_name=self.name,
-            text_type=TextType.MIXED,
-            metadata={
-                'detection_method': 'easyocr',
-                'detection_count': detection_count,
-                'gpu_enabled': self.gpu,
-                'languages': self.languages,
-                'individual_confidences': [r.confidence for r in regions],
-                'layout_preserved': True
-            }
-        )
-    
-    def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
-        """
-        CORE FIX: Reconstruct document text with proper line breaks and formatting
-        """
-        if not regions:
-            return ""
-        
-        # Sort regions by vertical position (top to bottom), then horizontal (left to right)
-        sorted_regions = sorted(regions, key=lambda r: (r.bbox.y, r.bbox.x))
-        
-        # Group regions into lines based on Y-coordinate proximity
-        lines = []
-        current_line = []
-        current_line_y = None
-        
-        for region in sorted_regions:
-            region_center_y = region.bbox.y + region.bbox.height // 2
-            
-            if current_line_y is None:
-                # First region
-                current_line_y = region_center_y
-                current_line.append(region)
-            else:
-                # Check if this region is on the same line
-                y_distance = abs(region_center_y - current_line_y)
-                
-                if y_distance <= self.line_height_threshold:
-                    # Same line - add to current line
-                    current_line.append(region)
-                else:
-                    # New line - finish current line and start new one
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = [region]
-                    current_line_y = region_center_y
-        
-        # Add the last line
-        if current_line:
-            lines.append(current_line)
-        
-        # Build the formatted text
-        formatted_lines = []
-        
-        for line_regions in lines:
-            # Sort regions in the line by X-coordinate (left to right)
-            line_regions.sort(key=lambda r: r.bbox.x)
-            
-            # Combine text from regions in the line with appropriate spacing
-            line_text_parts = []
-            prev_region = None
-            
-            for region in line_regions:
-                if prev_region is not None:
-                    # Calculate horizontal distance between regions
-                    horizontal_gap = region.bbox.x - (prev_region.bbox.x + prev_region.bbox.width)
+                if results:
+                    # Process region results
+                    region_result = self._process_easyocr_results(results)
                     
-                    # Add extra spaces for large gaps (likely separate words/columns)
-                    if horizontal_gap > self.word_spacing_threshold:
-                        # Multiple spaces for large gaps
-                        spaces = " " * min(4, max(2, horizontal_gap // 10))
-                        line_text_parts.append(spaces)
-                    else:
-                        # Single space for normal word separation
-                        line_text_parts.append(" ")
+                    if region_result.text.strip():
+                        all_text_parts.append(region_result.text.strip())
+                        
+                        # Adjust bounding boxes to global coordinates
+                        for bbox in region_result.bounding_boxes:
+                            adjusted_bbox = BoundingBox(
+                                x=bbox.x + region.x,
+                                y=bbox.y + region.y,
+                                width=bbox.width,
+                                height=bbox.height,
+                                confidence=bbox.confidence
+                            )
+                            all_boxes.append(adjusted_bbox)
+                        
+                        confidence_scores.append(region_result.confidence)
                 
-                line_text_parts.append(region.text)
-                prev_region = region
-            
-            # Join the line parts and add to formatted lines
-            line_text = "".join(line_text_parts).strip()
-            if line_text:  # Only add non-empty lines
-                formatted_lines.append(line_text)
+            except Exception as e:
+                self.logger.warning(f"Failed to process region {region}: {e}")
+                continue
         
-        # Join all lines with newlines to preserve document structure
-        return "\n".join(formatted_lines)
-    
-    def _polygon_to_bbox(self, points: List[List[float]]) -> Tuple[int, int, int, int]:
-        """Convert polygon points to bounding box coordinates"""
-        x_coords = [p[0] for p in points]
-        y_coords = [p[1] for p in points]
+        # Combine results
+        combined_text = ' '.join(all_text_parts)
+        avg_confidence = np.mean(confidence_scores) if confidence_scores else 0.0
         
-        x_min, x_max = min(x_coords), max(x_coords)
-        y_min, y_max = min(y_coords), max(y_coords)
-        
-        return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
-    
-    def _calculate_overall_bbox(self, regions: List[TextRegion]) -> BoundingBox:
-        """Calculate overall bounding box from all text regions"""
-        if not regions:
-            return BoundingBox(0, 0, 100, 30)
-        
-        min_x = min(r.bbox.x for r in regions)
-        min_y = min(r.bbox.y for r in regions)
-        max_x = max(r.bbox.x + r.bbox.width for r in regions)
-        max_y = max(r.bbox.y + r.bbox.height for r in regions)
-        
-        return BoundingBox(
-            x=min_x,
-            y=min_y,
-            width=max_x - min_x,
-            height=max_y - min_y,
-            confidence=sum(r.confidence for r in regions) / len(regions)
+        return OCRResult(
+            text=combined_text,
+            confidence=float(avg_confidence),
+            bounding_boxes=all_boxes,
+            metadata={
+                'regions_processed': len(text_regions),
+                'successful_extractions': len(all_text_parts)
+            }
         )
     
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
-        """Process multiple images - returns single result per image"""
-        results = []
-        for image in images:
-            result = self.process_image(image, **kwargs)
-            results.append(result)
-        return results
+    def _extract_region_image(self, image: np.ndarray, region: TextRegion) -> np.ndarray:
+        """Extract region from image with bounds checking"""
+        
+        # Ensure coordinates are within image bounds
+        y1 = max(0, int(region.y))
+        y2 = min(image.shape[0], int(region.y + region.height))
+        x1 = max(0, int(region.x))
+        x2 = min(image.shape[1], int(region.x + region.width))
+        
+        if y1 >= y2 or x1 >= x2:
+            return np.array([])  # Empty array for invalid region
+        
+        return image[y1:y2, x1:x2]
     
-    def get_engine_info(self) -> Dict[str, Any]:
-        """Get comprehensive engine information"""
-        info = {
-            'name': self.name,
-            'version': None,
-            'type': 'deep_learning_ocr',
-            'supported_languages': self.get_supported_languages(),
-            'capabilities': {
-                'handwriting': self.supports_handwriting,
-                'multiple_languages': self.supports_multiple_languages,
-                'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis,
-                'layout_preservation': True  # NEW: Added layout preservation capability
-            },
-            'optimal_for': ['handwritten_text', 'mixed_text', 'multilingual', 'natural_scenes'],
-            'performance_profile': {
-                'accuracy': 'high',
-                'speed': 'medium',
-                'memory_usage': 'high' if self.gpu else 'medium',
-                'gpu_required': False,
-                'gpu_recommended': True
-            },
-            'model_info': {
-                'detection_model': 'CRAFT',
-                'recognition_model': 'CRNN',
-                'languages_loaded': self.languages,
-                'gpu_enabled': self.gpu
-            },
-            'pipeline_integration': {
-                'uses_preprocessing_pipeline': True,
-                'returns_single_result': True,
-                'compatible_with_base_engine': True,
-                'works_with_engine_manager': True,
-                'preserves_document_layout': True  # NEW: Layout preservation feature
+    def _process_easyocr_results(self, easyocr_results: List[Any]) -> OCRResult:
+        """Process raw EasyOCR results into OCRResult format"""
+        
+        if not easyocr_results:
+            return OCRResult(text="", confidence=0.0, bounding_boxes=[])
+        
+        text_parts = []
+        bounding_boxes = []
+        confidence_scores = []
+        
+        for detection in easyocr_results:
+            if not detection or len(detection) != 3:
+                continue
+            
+            bbox_coords, text, confidence = detection
+            
+            if not text or not text.strip():
+                continue
+            
+            # Clean text using text_utils
+            cleaned_text = self._text_cleaner.clean_ocr_text(text)
+            if not cleaned_text.strip():
+                continue
+            
+            text_parts.append(cleaned_text)
+            confidence_scores.append(confidence)
+            
+            # Convert coordinates to BoundingBox
+            if bbox_coords and len(bbox_coords) == 4:
+                bbox = self._coords_to_bounding_box(bbox_coords, confidence)
+                if bbox:
+                    bounding_boxes.append(bbox)
+        
+        # Combine text parts
+        combined_text = ' '.join(text_parts)
+        avg_confidence = np.mean(confidence_scores) if confidence_scores else 0.0
+        
+        return OCRResult(
+            text=combined_text,
+            confidence=float(avg_confidence),
+            bounding_boxes=bounding_boxes,
+            metadata={
+                'easyocr_detections': len(easyocr_results),
+                'valid_extractions': len(text_parts)
             }
-        }
+        )
+    
+    def _coords_to_bounding_box(self, coords: List[List[float]], confidence: float) -> Optional[BoundingBox]:
+        """Convert EasyOCR coordinates to BoundingBox"""
         
         try:
-            # Try to get EasyOCR version if available
-            import easyocr
-            info['version'] = getattr(easyocr, '__version__', 'unknown')
-        except:
-            info['version'] = 'unknown'
+            # EasyOCR returns 4 corner points: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            x_coords = [point[0] for point in coords]
+            y_coords = [point[1] for point in coords]
             
-        return info
+            x_min, x_max = min(x_coords), max(x_coords)
+            y_min, y_max = min(y_coords), max(y_coords)
+            
+            return BoundingBox(
+                x=int(x_min),
+                y=int(y_min),
+                width=int(x_max - x_min),
+                height=int(y_max - y_min),
+                confidence=confidence
+            )
+            
+        except (IndexError, TypeError, ValueError):
+            return None
+    
+    def _cleanup_implementation(self):
+        """Clean up EasyOCR resources"""
+        if self._easyocr_reader is not None:
+            # EasyOCR doesn't have explicit cleanup, but we can clear references
+            self._easyocr_reader = None
+            self.logger.debug("EasyOCR reader reference cleared")
+    
+    def get_engine_info(self) -> dict:
+        """Get EasyOCR-specific engine information"""
+        return {
+            'engine_type': 'easyocr',
+            'languages': self.languages,
+            'use_gpu': self.use_gpu,
+            'batch_size': self.batch_size,
+            'text_threshold': self.text_threshold,
+            'available': EASYOCR_AVAILABLE,
+            'status': self.get_status().value
+        }

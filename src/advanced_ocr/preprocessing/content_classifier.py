@@ -1,3 +1,4 @@
+# src/advanced_ocr/preprocessing/content_classifier.py
 """
 Advanced OCR Content Classification Module
 
@@ -36,10 +37,10 @@ import numpy as np
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 
-from ..utils.model_utils import ModelManager
+from ..utils.model_utils import ModelLoader
 from ..utils.image_utils import ImageProcessor
 from ..config import OCRConfig
-from ..utils.logger import Logger
+from ..utils.logger import OCRLogger
 
 
 @dataclass
@@ -64,8 +65,8 @@ class ContentClassifier:
     
     def __init__(self, config: OCRConfig):
         self.config = config
-        self.logger = Logger(__name__)
-        self.model_manager = ModelManager(config)
+        self.logger = OCRLogger(__name__)
+        self.model_loader = ModelLoader(config)
         
         # Classification parameters
         self.confidence_threshold = config.classification.confidence_threshold
@@ -80,7 +81,7 @@ class ContentClassifier:
         if self._model is None:
             try:
                 # Load lightweight CNN model for content classification
-                self._model = self.model_manager.load_model(
+                self._model = self.model_loader.load_model(
                     'content_classifier',
                     model_type='sklearn',  # Using sklearn for lightweight deployment
                     cache_key='content_classifier_v1'

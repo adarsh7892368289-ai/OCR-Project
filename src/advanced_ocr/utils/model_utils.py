@@ -56,9 +56,9 @@ except ImportError:
     TF_AVAILABLE = False
     tf = None
 
-from ..config import OCRConfig
-from ..utils.logger import OCRLogger
+from advanced_ocr.config import OCRConfig
 
+from advanced_ocr.utils.logger import OCRLogger
 
 class ModelCache:
     """
@@ -78,7 +78,7 @@ class ModelCache:
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._access_times: Dict[str, float] = {}
         self._lock = threading.RLock()
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("ModelCache")
     
     def get(self, key: str) -> Optional[Any]:
         """
@@ -254,7 +254,7 @@ class ModelDownloader:
         """
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("ModelDownloader")
     
     def download_model(self, url: str, filename: str, 
                       expected_hash: Optional[str] = None,
@@ -356,7 +356,7 @@ class ModelVersionManager:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("ModelVersionManager")
     
     def check_model_compatibility(self, model_name: str, 
                                 model_version: str) -> Tuple[bool, str]:
@@ -435,12 +435,12 @@ class ModelLoader:
         self.config = config
         self.models_dir = Path(models_dir)
         self.cache = ModelCache(
-            max_memory_mb=config.get("model_cache.max_memory_mb", 2048),
-            max_models=config.get("model_cache.max_models", 5)
+            max_memory_mb=config.performance.memory_limit_mb,
+            max_models=5
         )
         self.downloader = ModelDownloader(models_dir)
         self.version_manager = ModelVersionManager(config)
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("ModelLoader")
         
         # Model loading functions registry
         self._loaders: Dict[str, callable] = {}

@@ -33,10 +33,10 @@ try:
 except ImportError:
     REPORTLAB_AVAILABLE = False
 
-from ..core.base_engine import OCRResult, DocumentResult, TextRegion, BoundingBox
-from ..config import ConfigManager
-from ..utils.logger import get_logger
-from .structure_extractor import StructureExtractor, StructureType, DocumentStructure
+from advanced_ocr.core.base_engine import OCRResult, DocumentResult, TextRegion, BoundingBox
+from advanced_ocr.config import ConfigManager
+from advanced_ocr.utils.logger import OCRLogger
+from advanced_ocr.postprocessing.structure_extractor import StructureExtractor, StructureType, DocumentStructure
 
 logger = get_logger(__name__)
 

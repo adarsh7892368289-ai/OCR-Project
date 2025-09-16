@@ -1,6 +1,6 @@
 # src/advanced_ocr/utils/logger.py
 """
-Advanced OCR Performance Logging and Metrics System
+Advanced OCR Logging and Metrics System
 
 This module provides comprehensive logging infrastructure for the advanced OCR
 system with focus on performance tracking, bottleneck identification, and
@@ -14,18 +14,18 @@ The logging system tracks:
 - Real-time processing metrics for the <3 second requirement
 
 Classes:
-    PerformanceLogger: Main performance tracking and logging interface
+    OCRLogger: Main performance tracking and logging interface
     ProcessingStageTimer: Context manager for timing processing stages
     MetricsCollector: Real-time metrics collection and aggregation
     OCRDebugLogger: Development debugging with optional image snapshots
     LogConfig: Configuration for logging behavior and output formats
 
 Example:
-    >>> logger = PerformanceLogger("ocr_system")
+    >>> logger = OCRLogger("ocr_system")
     >>> with logger.stage_timer("preprocessing") as timer:
     ...     # preprocessing code here
     ...     timer.log_metric("regions_detected", 45)
-    >>> 
+    >>>
     >>> logger.log_performance_summary()
     >>> logger.check_performance_targets()
 """
@@ -209,13 +209,13 @@ class ProcessingStageTimer:
         ...     timer.log_metric("confidence_threshold", 0.7)
     """
     
-    def __init__(self, stage_name: str, logger: 'PerformanceLogger'):
+    def __init__(self, stage_name: str, logger: 'OCRLogger'):
         """
         Initialize stage timer.
-        
+
         Args:
             stage_name: Name of the processing stage
-            logger: Parent performance logger instance
+            logger: Parent OCR logger instance
         """
         self.stage_name = stage_name
         self.logger = logger
@@ -397,14 +397,14 @@ class MetricsCollector:
             self.engine_performance.clear()
 
 
-class PerformanceLogger:
+class OCRLogger:
     """
-    Main performance logging interface for the advanced OCR system.
-    
+    Main OCR logging interface for the advanced OCR system.
+
     Provides comprehensive logging capabilities with focus on performance tracking,
     bottleneck identification, and optimization metrics for the critical performance
     requirements (text detection regions, TrOCR efficiency, processing speed).
-    
+
     Features:
     - Structured JSON logging for analysis
     - Real-time performance monitoring
@@ -412,15 +412,15 @@ class PerformanceLogger:
     - Memory usage tracking
     - Critical performance bottleneck detection
     - Development debugging with image snapshots
-    
+
     Example:
-        >>> logger = PerformanceLogger("ocr_pipeline")
+        >>> logger = OCRLogger("ocr_pipeline")
         >>> logger.info("Starting OCR processing", extra={"image_size": (1920, 1080)})
-        >>> 
+        >>>
         >>> with logger.stage_timer("preprocessing") as timer:
         ...     processed_image = preprocess_image(image)
         ...     timer.log_metric("enhancement_applied", "contrast_boost")
-        >>> 
+        >>>
         >>> logger.log_critical_metrics(processing_time=2.1, regions_filtered=45, chars_extracted=1200)
     """
     
@@ -680,7 +680,7 @@ class PerformanceLogger:
             )
 
 
-class OCRDebugLogger(PerformanceLogger):
+class OCRDebugLogger(OCRLogger):
     """
     Extended logger with debugging capabilities for development.
     
@@ -741,16 +741,16 @@ class OCRDebugLogger(PerformanceLogger):
 
 
 # Factory functions for common logger configurations
-def create_performance_logger(name: str, log_level: str = "INFO") -> PerformanceLogger:
+def create_performance_logger(name: str, log_level: str = "INFO") -> OCRLogger:
     """
     Create performance logger with standard configuration.
-    
+
     Args:
         name: Logger name
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        
+
     Returns:
-        PerformanceLogger configured for performance tracking
+        OCRLogger configured for performance tracking
     """
     config = LogConfig(
         log_level=LogLevel(log_level.upper()),
@@ -758,7 +758,7 @@ def create_performance_logger(name: str, log_level: str = "INFO") -> Performance
         enable_performance_logging=True,
         enable_debug_snapshots=False
     )
-    return PerformanceLogger(name, config)
+    return OCRLogger(name, config)
 
 
 def create_debug_logger(name: str, debug_dir: str = "debug_output") -> OCRDebugLogger:
@@ -782,7 +782,7 @@ def create_debug_logger(name: str, debug_dir: str = "debug_output") -> OCRDebugL
 
 
 __all__ = [
-    'PerformanceLogger',
+    'OCRLogger',
     'OCRDebugLogger',
     'ProcessingStageTimer',
     'MetricsCollector',
@@ -794,3 +794,4 @@ __all__ = [
     'create_performance_logger',
     'create_debug_logger'
 ]
+
