@@ -1,554 +1,440 @@
+# src/advanced_ocr/results.py
 """
-Advanced OCR System - Result Data Classes
-=========================================
+Advanced OCR Results Library
 
-Production-grade result classes for OCR operations with comprehensive metadata,
-confidence scoring, and structured document representation.
+This module provides comprehensive data structures for representing OCR results
+with hierarchical text organization, spatial information, and confidence metrics.
 
-Author: Production OCR Team
-Version: 2.0.0
+Classes:
+    OCRResult: Primary container for OCR extraction results
+    BoundingBox: Flexible coordinate representation with format conversion
+    ConfidenceMetrics: Multi-dimensional confidence scoring
+    TextElement: Base class for hierarchical text structures
+    Word, Line, Paragraph, Block, Page: Hierarchical text elements
+    ProcessingMetrics: Performance tracking and optimization metrics
+    BatchResult: Container for multi-document processing results
+
+Example:
+    >>> result = OCRResult(
+    ...     text="Hello World",
+    ...     confidence=0.95,
+    ...     engine_name="tesseract"
+    ... )
+    >>> print(f"Extracted: {result.text} (confidence: {result.confidence})")
+    
+    >>> bbox = BoundingBox((10, 20, 100, 50), BoundingBoxFormat.XYXY)
+    >>> x, y, w, h = bbox.to_xywh()
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple, Union
-from datetime import datetime
+from typing import List, Dict, Any, Optional, Union, Tuple
+from enum import Enum
+import time
 import json
-from pathlib import Path
+
+
+class BoundingBoxFormat(Enum):
+    XYXY = "xyxy"
+    XYWH = "xywh" 
+    CENTER_WH = "center_wh"
+    POLYGON = "polygon"
+
+
+class TextLevel(Enum):
+    CHARACTER = "character"
+    WORD = "word"
+    LINE = "line"
+    PARAGRAPH = "paragraph" 
+    BLOCK = "block"
+    PAGE = "page"
+    DOCUMENT = "document"
+
+
+class ContentType(Enum):
+    PRINTED_TEXT = "printed_text"
+    HANDWRITTEN_TEXT = "handwritten_text"
+    MIXED_TEXT = "mixed_text"
+    TABLE = "table"
+    FORM_FIELD = "form_field"
+    HEADER = "header"
+    FOOTER = "footer"
+    CAPTION = "caption"
+    SIGNATURE = "signature"
+    UNKNOWN = "unknown"
 
 
 @dataclass
-class TextRegion:
-    """
-    Represents a detected text region with position and confidence information.
+class BoundingBox:
+    """Flexible bounding box with multiple coordinate format support."""
+    coordinates: Union[Tuple[float, float, float, float], List[Tuple[float, float]]]
+    format: BoundingBoxFormat = BoundingBoxFormat.XYXY
+    confidence: float = 1.0
     
-    This class stores information about individual text regions detected in an image,
-    including their spatial coordinates, text content, and confidence metrics.
-    """
+    def to_xyxy(self) -> Tuple[float, float, float, float]:
+        """Convert to (x1, y1, x2, y2) format."""
+        if self.format == BoundingBoxFormat.XYXY:
+            return self.coordinates
+        elif self.format == BoundingBoxFormat.XYWH:
+            x, y, w, h = self.coordinates
+            return (x, y, x + w, y + h)
+        elif self.format == BoundingBoxFormat.CENTER_WH:
+            cx, cy, w, h = self.coordinates
+            return (cx - w/2, cy - h/2, cx + w/2, cy + h/2)
+        elif self.format == BoundingBoxFormat.POLYGON:
+            xs = [point[0] for point in self.coordinates]
+            ys = [point[1] for point in self.coordinates]
+            return (min(xs), min(ys), max(xs), max(ys))
     
-    # Spatial coordinates (x, y, width, height)
-    bbox: Tuple[int, int, int, int]
+    def to_xywh(self) -> Tuple[float, float, float, float]:
+        """Convert to (x, y, width, height) format."""
+        x1, y1, x2, y2 = self.to_xyxy()
+        return (x1, y1, x2 - x1, y2 - y1)
     
-    # Extracted text content
-    text: str
+    def area(self) -> float:
+        """Calculate bounding box area."""
+        if self.format == BoundingBoxFormat.POLYGON:
+            coords = self.coordinates
+            n = len(coords)
+            area = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                area += coords[i][0] * coords[j][1]
+                area -= coords[j][0] * coords[i][1]
+            return abs(area) / 2.0
+        else:
+            x, y, w, h = self.to_xywh()
+            return w * h
     
-    # Confidence score (0.0 to 1.0)
-    confidence: float
-    
-    # Engine that detected this region
-    engine_name: str = ""
-    
-    # Additional properties
-    font_size: Optional[float] = None
-    is_handwritten: Optional[bool] = None
-    language: Optional[str] = None
-    text_direction: str = "ltr"  # left-to-right, right-to-left, top-to-bottom
+    def iou(self, other: 'BoundingBox') -> float:
+        """Calculate Intersection over Union with another bounding box."""
+        x1, y1, x2, y2 = self.to_xyxy()
+        ox1, oy1, ox2, oy2 = other.to_xyxy()
+        
+        ix1, iy1 = max(x1, ox1), max(y1, oy1)
+        ix2, iy2 = min(x2, ox2), min(y2, oy2)
+        
+        if ix1 >= ix2 or iy1 >= iy2:
+            return 0.0
+        
+        intersection = (ix2 - ix1) * (iy2 - iy1)
+        union = self.area() + other.area() - intersection
+        
+        return intersection / union if union > 0 else 0.0
+
+
+@dataclass
+class ConfidenceMetrics:
+    """Multi-dimensional confidence scoring for OCR results."""
+    overall: float
+    text_detection: float = 0.0
+    text_recognition: float = 0.0
+    layout_analysis: float = 0.0
+    language_detection: float = 0.0
+    char_confidences: Optional[List[float]] = None
+    min_confidence: Optional[float] = None
+    max_confidence: Optional[float] = None
+    std_confidence: Optional[float] = None
     
     def __post_init__(self):
-        """Validate region data after initialization."""
-        if not (0.0 <= self.confidence <= 1.0):
-            raise ValueError(f"Confidence must be between 0.0 and 1.0, got {self.confidence}")
-        
-        if len(self.bbox) != 4:
-            raise ValueError(f"BBox must have 4 coordinates (x, y, w, h), got {len(self.bbox)}")
-    
-    @property
-    def area(self) -> int:
-        """Calculate the area of the text region."""
-        return self.bbox[2] * self.bbox[3]
-    
-    @property
-    def center(self) -> Tuple[int, int]:
-        """Get the center coordinates of the text region."""
-        x, y, w, h = self.bbox
-        return (x + w // 2, y + h // 2)
-    
-    def overlaps_with(self, other: 'TextRegion', threshold: float = 0.5) -> bool:
-        """Check if this region overlaps with another region."""
-        x1, y1, w1, h1 = self.bbox
-        x2, y2, w2, h2 = other.bbox
-        
-        # Calculate intersection
-        left = max(x1, x2)
-        top = max(y1, y2)
-        right = min(x1 + w1, x2 + w2)
-        bottom = min(y1 + h1, y2 + h2)
-        
-        if left >= right or top >= bottom:
-            return False
-        
-        intersection_area = (right - left) * (bottom - top)
-        union_area = self.area + other.area - intersection_area
-        
-        return (intersection_area / union_area) >= threshold
+        """Calculate derived confidence metrics."""
+        if self.char_confidences:
+            self.min_confidence = min(self.char_confidences)
+            self.max_confidence = max(self.char_confidences)
+            if len(self.char_confidences) > 1:
+                import statistics
+                self.std_confidence = statistics.stdev(self.char_confidences)
+            else:
+                self.std_confidence = 0.0
 
 
 @dataclass
-class QualityMetrics:
-    """
-    Image quality assessment metrics for OCR preprocessing decisions.
-    
-    Contains various image quality indicators that help determine
-    the best preprocessing strategy and expected OCR accuracy.
-    """
-    
-    # Overall quality score (0.0 to 1.0)
-    overall_score: float
-    
-    # Individual quality components
-    sharpness_score: float
-    contrast_score: float
-    brightness_score: float
-    noise_level: float
-    
-    # Resolution information
-    dpi: Optional[int] = None
-    resolution: Optional[Tuple[int, int]] = None
-    
-    # Content analysis
-    text_density: float = 0.0
-    has_tables: bool = False
-    has_images: bool = False
-    skew_angle: float = 0.0
-    
-    def __post_init__(self):
-        """Validate quality metrics after initialization."""
-        scores = [self.overall_score, self.sharpness_score, self.contrast_score, 
-                 self.brightness_score, self.noise_level, self.text_density]
-        
-        for score in scores:
-            if not (0.0 <= score <= 1.0):
-                raise ValueError(f"All quality scores must be between 0.0 and 1.0")
-    
-    @property
-    def needs_enhancement(self) -> bool:
-        """Determine if image needs enhancement based on quality metrics."""
-        return (self.overall_score < 0.7 or 
-                self.sharpness_score < 0.6 or 
-                self.contrast_score < 0.6 or
-                self.noise_level > 0.4)
-    
-    @property
-    def recommended_preprocessing(self) -> List[str]:
-        """Get recommended preprocessing operations based on quality metrics."""
-        operations = []
-        
-        if self.sharpness_score < 0.6:
-            operations.append("sharpen")
-        
-        if self.contrast_score < 0.6:
-            operations.append("enhance_contrast")
-        
-        if self.noise_level > 0.4:
-            operations.append("denoise")
-        
-        if abs(self.skew_angle) > 1.0:
-            operations.append("deskew")
-        
-        if self.brightness_score < 0.4 or self.brightness_score > 0.8:
-            operations.append("adjust_brightness")
-        
-        return operations
-
-
-@dataclass
-class ProcessingMetadata:
-    """
-    Comprehensive metadata about OCR processing pipeline execution.
-    
-    Tracks timing, engine usage, preprocessing steps, and system information
-    for debugging and performance optimization.
-    """
-    
-    # Timing information
+class ProcessingMetrics:
+    """Performance tracking for optimization requirements."""
     total_processing_time: float = 0.0
     preprocessing_time: float = 0.0
     ocr_processing_time: float = 0.0
     postprocessing_time: float = 0.0
-    
-    # Engine information
-    engines_used: List[str] = field(default_factory=list)
-    primary_engine: str = ""
-    engine_selection_reason: str = ""
-    
-    # Processing pipeline
-    preprocessing_steps: List[str] = field(default_factory=list)
-    postprocessing_steps: List[str] = field(default_factory=list)
-    
-    # System information
-    timestamp: datetime = field(default_factory=datetime.now)
-    system_info: Dict[str, Any] = field(default_factory=dict)
-    gpu_used: bool = False
-    
-    # Quality and performance metrics
-    input_image_size: Optional[Tuple[int, int]] = None
-    processed_image_size: Optional[Tuple[int, int]] = None
-    total_regions_detected: int = 0
-    regions_processed: int = 0
-    
-    def add_timing(self, operation: str, duration: float):
-        """Add timing information for a specific operation."""
-        if operation == "preprocessing":
-            self.preprocessing_time += duration
-        elif operation == "ocr":
-            self.ocr_processing_time += duration
-        elif operation == "postprocessing":
-            self.postprocessing_time += duration
-        
-        self.total_processing_time += duration
-    
-    def add_preprocessing_step(self, step: str):
-        """Add a preprocessing step to the pipeline log."""
-        self.preprocessing_steps.append(step)
-    
-    def add_postprocessing_step(self, step: str):
-        """Add a postprocessing step to the pipeline log."""
-        self.postprocessing_steps.append(step)
+    regions_detected: int = 0
+    regions_after_filtering: int = 0
+    region_filtering_time: float = 0.0
+    engine_selection_time: float = 0.0
+    engine_initialization_time: float = 0.0
+    character_extraction_rate: float = 0.0
+    peak_memory_usage: float = 0.0
+    memory_efficiency: float = 0.0
     
     @property
-    def processing_speed_chars_per_second(self) -> float:
-        """Calculate processing speed in characters per second."""
+    def text_detection_efficiency(self) -> float:
+        """Calculate text detection filtering efficiency."""
+        if self.regions_detected == 0:
+            return 0.0
+        return self.regions_after_filtering / self.regions_detected
+    
+    @property
+    def speed_accuracy_ratio(self) -> float:
+        """Speed vs accuracy performance metric."""
         if self.total_processing_time == 0:
             return 0.0
-        return getattr(self, '_total_chars', 0) / self.total_processing_time
+        return self.character_extraction_rate / self.total_processing_time
+
+
+@dataclass
+class TextElement:
+    """Base hierarchical text element with spatial and metadata information."""
+    text: str
+    bbox: BoundingBox
+    confidence: ConfidenceMetrics
+    level: TextLevel
+    element_id: Optional[str] = None
+    content_type: ContentType = ContentType.PRINTED_TEXT
+    language: str = "en"
+    reading_order: Optional[int] = None
+    font_size: Optional[float] = None
+    font_family: Optional[str] = None
+    is_bold: bool = False
+    is_italic: bool = False
+    text_color: Optional[Tuple[int, int, int]] = None
+    background_color: Optional[Tuple[int, int, int]] = None
+    parent_id: Optional[str] = None
+    children_ids: List[str] = field(default_factory=list)
+    processing_time: float = 0.0
+    engine_name: str = ""
+
+
+@dataclass
+class Word(TextElement):
+    """Word-level text element with character details."""
+    level: TextLevel = field(default=TextLevel.WORD, init=False)
+    char_bboxes: Optional[List[BoundingBox]] = None
+    alternatives: List[str] = field(default_factory=list)
+    is_numeric: bool = False
+    contains_special_chars: bool = False
     
-    def set_total_characters(self, char_count: int):
-        """Set total character count for speed calculation."""
-        self._total_chars = char_count
+    def __post_init__(self):
+        """Initialize word-level properties."""
+        self.is_numeric = self.text.replace('.', '').replace(',', '').isdigit()
+        self.contains_special_chars = not self.text.replace(' ', '').isalnum()
+
+
+@dataclass
+class Line(TextElement):
+    """Line-level text element containing words."""
+    level: TextLevel = field(default=TextLevel.LINE, init=False)
+    words: List[Word] = field(default_factory=list)
+    baseline: Optional[Tuple[float, float, float, float]] = None
+    text_direction: str = "ltr"
+    line_height: Optional[float] = None
+    
+    def get_text(self, separator: str = " ") -> str:
+        """Get full line text from constituent words."""
+        return separator.join(word.text for word in self.words)
+    
+    def __post_init__(self):
+        """Initialize line text from words."""
+        if not self.text and self.words:
+            self.text = self.get_text()
+
+
+@dataclass
+class Paragraph(TextElement):
+    """Paragraph-level text element containing lines."""
+    level: TextLevel = field(default=TextLevel.PARAGRAPH, init=False)
+    lines: List[Line] = field(default_factory=list)
+    alignment: str = "left"
+    indentation: float = 0.0
+    line_spacing: Optional[float] = None
+    
+    def get_text(self, line_separator: str = "\n") -> str:
+        """Get full paragraph text from constituent lines."""
+        return line_separator.join(line.get_text() for line in self.lines)
+    
+    def __post_init__(self):
+        """Initialize paragraph text from lines."""
+        if not self.text and self.lines:
+            self.text = self.get_text()
+
+
+@dataclass
+class Block(TextElement):
+    """Block-level text element containing paragraphs."""
+    level: TextLevel = field(default=TextLevel.BLOCK, init=False)
+    paragraphs: List[Paragraph] = field(default_factory=list)
+    block_type: str = "text"
+    column_index: int = 0
+    
+    def get_text(self, paragraph_separator: str = "\n\n") -> str:
+        """Get full block text from constituent paragraphs."""
+        return paragraph_separator.join(para.get_text() for para in self.paragraphs)
+    
+    def __post_init__(self):
+        """Initialize block text from paragraphs."""
+        if not self.text and self.paragraphs:
+            self.text = self.get_text()
+
+
+@dataclass
+class Page:
+    """Page-level container for OCR results with layout information."""
+    page_number: int
+    blocks: List[Block] = field(default_factory=list)
+    width: float = 0.0
+    height: float = 0.0
+    dpi: float = 300.0
+    rotation: float = 0.0
+    confidence: ConfidenceMetrics = field(default_factory=lambda: ConfidenceMetrics(overall=0.0))
+    detected_languages: List[str] = field(default_factory=lambda: ["en"])
+    processing_time: float = 0.0
+    reading_order: List[str] = field(default_factory=list)
+    column_count: int = 1
+    has_tables: bool = False
+    has_images: bool = False
+    
+    def get_text(self, block_separator: str = "\n\n") -> str:
+        """Get full page text from all blocks."""
+        return block_separator.join(block.get_text() for block in self.blocks)
+    
+    def get_all_words(self) -> List[Word]:
+        """Get all words on the page in a flat list."""
+        words = []
+        for block in self.blocks:
+            for paragraph in block.paragraphs:
+                for line in paragraph.lines:
+                    words.extend(line.words)
+        return words
+    
+    def word_count(self) -> int:
+        """Get total word count for the page."""
+        return len(self.get_all_words())
 
 
 @dataclass
 class OCRResult:
-    """
-    Single OCR operation result with comprehensive metadata and analysis.
-    
-    This is the primary result class returned by OCR operations, containing
-    extracted text, confidence metrics, spatial information, and processing metadata.
-    """
-    
-    # Primary extracted content
+    """Primary OCR result container with hierarchical structure and metadata."""
     text: str
-    
-    # Confidence metrics
-    overall_confidence: float
-    
-    # Spatial information
-    regions: List[TextRegion] = field(default_factory=list)
-    
-    # Quality and metadata
-    quality_metrics: Optional[QualityMetrics] = None
-    processing_metadata: ProcessingMetadata = field(default_factory=ProcessingMetadata)
-    
-    # Content analysis
-    detected_language: Optional[str] = None
-    content_type: str = "mixed"  # printed, handwritten, mixed
-    has_tables: bool = False
-    has_mathematical_content: bool = False
-    
-    # Error and warning information
-    warnings: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    confidence: float
+    processing_time: float = 0.0
+    engine_name: str = ""
+    pages: List[Page] = field(default_factory=list)
+    detected_languages: List[str] = field(default_factory=lambda: ["en"])
+    dominant_language: str = "en"
+    text_orientation: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    success: bool = True
+    error_message: Optional[str] = None
+    total_words: int = 0
+    total_characters: int = 0
+    avg_word_confidence: float = 0.0
+    processing_metrics: Optional[ProcessingMetrics] = None
     
     def __post_init__(self):
-        """Validate and initialize result after creation."""
-        if not (0.0 <= self.overall_confidence <= 1.0):
-            raise ValueError(f"Overall confidence must be between 0.0 and 1.0, got {self.overall_confidence}")
+        """Initialize derived properties."""
+        if not self.text and self.pages:
+            self.text = self.get_full_text()
         
-        # Set character count for processing speed calculation
-        if hasattr(self.processing_metadata, 'set_total_characters'):
-            self.processing_metadata.set_total_characters(len(self.text))
+        self.total_characters = len(self.text)
+        self.total_words = self.get_word_count()
+        self.avg_word_confidence = self.calculate_avg_word_confidence()
     
-    @property
-    def word_count(self) -> int:
-        """Get the number of words in extracted text."""
-        return len(self.text.split()) if self.text.strip() else 0
+    def get_full_text(self, page_separator: str = "\n\n---\n\n") -> str:
+        """Get complete document text from all pages."""
+        return page_separator.join(page.get_text() for page in self.pages)
     
-    @property
-    def character_count(self) -> int:
-        """Get the number of characters in extracted text."""
-        return len(self.text)
+    def get_word_count(self) -> int:
+        """Get total word count across all pages."""
+        return sum(page.word_count() for page in self.pages)
     
-    @property
-    def line_count(self) -> int:
-        """Get the number of lines in extracted text."""
-        return len(self.text.splitlines()) if self.text.strip() else 0
+    def get_all_words(self) -> List[Word]:
+        """Get all words from all pages in a flat list."""
+        words = []
+        for page in self.pages:
+            words.extend(page.get_all_words())
+        return words
     
-    @property
-    def is_high_quality(self) -> bool:
-        """Determine if this is a high-quality OCR result."""
-        return (self.overall_confidence >= 0.8 and 
-                len(self.errors) == 0 and 
-                self.character_count > 0)
-    
-    @property
-    def has_warnings_or_errors(self) -> bool:
-        """Check if result has any warnings or errors."""
-        return len(self.warnings) > 0 or len(self.errors) > 0
-    
-    def add_warning(self, message: str):
-        """Add a warning message to the result."""
-        if message not in self.warnings:
-            self.warnings.append(message)
-    
-    def add_error(self, message: str):
-        """Add an error message to the result."""
-        if message not in self.errors:
-            self.errors.append(message)
-    
-    def get_text_by_confidence(self, min_confidence: float) -> str:
-        """Get text from regions above specified confidence threshold."""
-        high_confidence_regions = [
-            region for region in self.regions 
-            if region.confidence >= min_confidence
-        ]
-        
-        # Sort by vertical position, then horizontal
-        high_confidence_regions.sort(key=lambda r: (r.bbox[1], r.bbox[0]))
-        
-        return " ".join(region.text for region in high_confidence_regions)
-    
-    def get_regions_by_type(self, content_type: str) -> List[TextRegion]:
-        """Get regions filtered by content type (printed/handwritten)."""
-        if content_type == "printed":
-            return [r for r in self.regions if r.is_handwritten is False]
-        elif content_type == "handwritten":
-            return [r for r in self.regions if r.is_handwritten is True]
-        else:
-            return self.regions.copy()
+    def calculate_avg_word_confidence(self) -> float:
+        """Calculate average confidence across all words."""
+        words = self.get_all_words()
+        if not words:
+            return 0.0
+        return sum(word.confidence.overall for word in words) / len(words)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert result to dictionary for serialization."""
+        """Convert to dictionary for serialization."""
         return {
-            "text": self.text,
-            "overall_confidence": self.overall_confidence,
-            "word_count": self.word_count,
-            "character_count": self.character_count,
-            "line_count": self.line_count,
-            "detected_language": self.detected_language,
-            "content_type": self.content_type,
-            "has_tables": self.has_tables,
-            "has_mathematical_content": self.has_mathematical_content,
-            "is_high_quality": self.is_high_quality,
-            "processing_time": self.processing_metadata.total_processing_time,
-            "engines_used": self.processing_metadata.engines_used,
-            "warnings": self.warnings,
-            "errors": self.errors,
-            "regions_count": len(self.regions)
+            'text': self.text,
+            'confidence': self.confidence,
+            'processing_time': self.processing_time,
+            'engine_name': self.engine_name,
+            'total_words': self.total_words,
+            'total_characters': self.total_characters,
+            'avg_word_confidence': self.avg_word_confidence,
+            'detected_languages': self.detected_languages,
+            'dominant_language': self.dominant_language,
+            'success': self.success,
+            'error_message': self.error_message,
+            'timestamp': self.timestamp,
+            'metadata': self.metadata,
+            'pages': len(self.pages)
         }
     
-    def to_json(self, include_regions: bool = False) -> str:
-        """Convert result to JSON string."""
-        data = self.to_dict()
-        
-        if include_regions:
-            data["regions"] = [
-                {
-                    "bbox": region.bbox,
-                    "text": region.text,
-                    "confidence": region.confidence,
-                    "engine_name": region.engine_name
-                }
-                for region in self.regions
-            ]
-        
-        return json.dumps(data, indent=2, default=str)
+    def to_json(self, indent: int = 2) -> str:
+        """Export to JSON format."""
+        return json.dumps(self.to_dict(), indent=indent)
+    
+    def export_words_with_bbox(self) -> List[Dict[str, Any]]:
+        """Export word-level results with bounding boxes."""
+        results = []
+        for word in self.get_all_words():
+            x1, y1, x2, y2 = word.bbox.to_xyxy()
+            results.append({
+                'text': word.text,
+                'confidence': word.confidence.overall,
+                'bbox': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
+                'language': word.language
+            })
+        return results
 
 
 @dataclass
-class DocumentResult:
-    """
-    Multi-page document processing result with document-level analysis.
-    
-    Represents the result of processing an entire document (potentially multi-page)
-    with document-level structure analysis and aggregated statistics.
-    """
-    
-    # Page-level results
-    pages: List[OCRResult]
-    
-    # Document-level aggregated content
-    full_text: str = ""
-    
-    # Document structure analysis
-    document_structure: Dict[str, Any] = field(default_factory=dict)
-    table_of_contents: List[Dict[str, Any]] = field(default_factory=list)
-    
-    # Aggregated statistics
+class BatchResult:
+    """Container for multiple OCR results from batch processing."""
+    results: List[OCRResult]
     total_pages: int = 0
-    total_word_count: int = 0
-    total_character_count: int = 0
-    average_confidence: float = 0.0
-    
-    # Document-level metadata
-    document_metadata: Dict[str, Any] = field(default_factory=dict)
-    processing_summary: Dict[str, Any] = field(default_factory=dict)
+    total_processing_time: float = 0.0
+    avg_confidence: float = 0.0
+    success_rate: float = 1.0
+    engines_used: List[str] = field(default_factory=list)
     
     def __post_init__(self):
-        """Calculate aggregated statistics after initialization."""
-        self.total_pages = len(self.pages)
-        
-        if self.pages:
-            # Aggregate statistics
-            self.total_word_count = sum(page.word_count for page in self.pages)
-            self.total_character_count = sum(page.character_count for page in self.pages)
-            self.average_confidence = sum(page.overall_confidence for page in self.pages) / len(self.pages)
-            
-            # Combine full text if not provided
-            if not self.full_text:
-                self.full_text = "\n\n".join(page.text for page in self.pages)
-            
-            # Aggregate processing summary
-            self._calculate_processing_summary()
-    
-    def _calculate_processing_summary(self):
-        """Calculate document-level processing summary."""
-        if not self.pages:
-            return
-        
-        total_processing_time = sum(
-            page.processing_metadata.total_processing_time for page in self.pages
-        )
-        
-        all_engines = set()
-        for page in self.pages:
-            all_engines.update(page.processing_metadata.engines_used)
-        
-        all_warnings = []
-        all_errors = []
-        for page in self.pages:
-            all_warnings.extend(page.warnings)
-            all_errors.extend(page.errors)
-        
-        self.processing_summary = {
-            "total_processing_time": total_processing_time,
-            "average_processing_time_per_page": total_processing_time / len(self.pages),
-            "engines_used": list(all_engines),
-            "total_warnings": len(all_warnings),
-            "total_errors": len(all_errors),
-            "successful_pages": len([p for p in self.pages if p.is_high_quality]),
-            "success_rate": len([p for p in self.pages if p.is_high_quality]) / len(self.pages)
-        }
-    
-    @property
-    def is_high_quality(self) -> bool:
-        """Determine if the entire document processing was high quality."""
-        return (self.average_confidence >= 0.8 and 
-                self.processing_summary.get("success_rate", 0) >= 0.8)
-    
-    def get_page(self, page_number: int) -> Optional[OCRResult]:
-        """Get specific page result (1-indexed)."""
-        if 1 <= page_number <= len(self.pages):
-            return self.pages[page_number - 1]
-        return None
-    
-    def get_high_confidence_pages(self, min_confidence: float = 0.8) -> List[OCRResult]:
-        """Get pages with confidence above threshold."""
-        return [page for page in self.pages if page.overall_confidence >= min_confidence]
-    
-    def get_text_by_page_range(self, start_page: int, end_page: int) -> str:
-        """Get text from specific page range (1-indexed, inclusive)."""
-        if start_page < 1 or end_page > len(self.pages) or start_page > end_page:
-            raise ValueError(f"Invalid page range: {start_page}-{end_page}")
-        
-        selected_pages = self.pages[start_page-1:end_page]
-        return "\n\n".join(page.text for page in selected_pages)
-    
-    def save_results(self, output_path: Union[str, Path], format: str = "json"):
-        """Save document results to file."""
-        output_path = Path(output_path)
-        
-        if format.lower() == "json":
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(self.to_dict(), f, indent=2, default=str, ensure_ascii=False)
-        
-        elif format.lower() == "txt":
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(self.full_text)
-        
-        else:
-            raise ValueError(f"Unsupported format: {format}. Use 'json' or 'txt'")
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert document result to dictionary for serialization."""
-        return {
-            "total_pages": self.total_pages,
-            "total_word_count": self.total_word_count,
-            "total_character_count": self.total_character_count,
-            "average_confidence": self.average_confidence,
-            "is_high_quality": self.is_high_quality,
-            "processing_summary": self.processing_summary,
-            "document_metadata": self.document_metadata,
-            "pages": [page.to_dict() for page in self.pages]
-        }
+        """Initialize batch-level properties."""
+        if self.results:
+            self.total_pages = len(self.results)
+            self.total_processing_time = sum(r.processing_time for r in self.results)
+            self.avg_confidence = sum(r.confidence for r in self.results) / len(self.results)
+            self.success_rate = sum(1 for r in self.results if r.success) / len(self.results)
+            self.engines_used = list(set(r.engine_name for r in self.results))
 
 
-# Convenience functions for result creation
-def create_empty_result(error_message: str = "") -> OCRResult:
-    """Create an empty OCR result with optional error message."""
-    result = OCRResult(
-        text="",
-        overall_confidence=0.0,
-        processing_metadata=ProcessingMetadata()
-    )
-    
-    if error_message:
-        result.add_error(error_message)
-    
-    return result
+# Type aliases for convenience
+TextRegion = TextElement
+BBox = BoundingBox
 
-
-def create_simple_result(text: str, confidence: float, engine_name: str = "") -> OCRResult:
-    """Create a simple OCR result with basic information."""
-    metadata = ProcessingMetadata()
-    if engine_name:
-        metadata.engines_used = [engine_name]
-        metadata.primary_engine = engine_name
-    
-    return OCRResult(
-        text=text,
-        overall_confidence=confidence,
-        processing_metadata=metadata
-    )
-
-
-def merge_results(results: List[OCRResult], strategy: str = "highest_confidence") -> OCRResult:
-    """
-    Merge multiple OCR results using specified strategy.
-    
-    Args:
-        results: List of OCR results to merge
-        strategy: Merging strategy ('highest_confidence', 'longest_text', 'consensus')
-    
-    Returns:
-        Merged OCR result
-    """
-    if not results:
-        return create_empty_result("No results to merge")
-    
-    if len(results) == 1:
-        return results[0]
-    
-    if strategy == "highest_confidence":
-        return max(results, key=lambda r: r.overall_confidence)
-    
-    elif strategy == "longest_text":
-        return max(results, key=lambda r: len(r.text))
-    
-    elif strategy == "consensus":
-        # Simple consensus: average confidence, combine unique text
-        combined_text = " ".join(set(r.text.strip() for r in results if r.text.strip()))
-        avg_confidence = sum(r.overall_confidence for r in results) / len(results)
-        
-        merged_metadata = ProcessingMetadata()
-        all_engines = set()
-        for result in results:
-            all_engines.update(result.processing_metadata.engines_used)
-        merged_metadata.engines_used = list(all_engines)
-        
-        return OCRResult(
-            text=combined_text,
-            overall_confidence=avg_confidence,
-            processing_metadata=merged_metadata
-        )
-    
-    else:
-        raise ValueError(f"Unknown merge strategy: {strategy}")
+# Library exports
+__all__ = [
+    'OCRResult',
+    'BatchResult',
+    'TextElement',
+    'Word',
+    'Line',
+    'Paragraph',
+    'Block',
+    'Page',
+    'BoundingBox',
+    'ConfidenceMetrics',
+    'ProcessingMetrics',
+    'BoundingBoxFormat',
+    'TextLevel',
+    'ContentType',
+    'TextRegion',
+    'BBox'
+]

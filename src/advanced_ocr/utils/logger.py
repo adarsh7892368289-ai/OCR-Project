@@ -1,599 +1,796 @@
+# src/advanced_ocr/utils/logger.py
 """
-Advanced OCR Logging System.
+Advanced OCR Performance Logging and Metrics System
 
-This module provides comprehensive logging capabilities for OCR operations,
-including performance monitoring, structured logging, and error tracking.
-It supports multiple output formats and integrates seamlessly with OCR engines.
+This module provides comprehensive logging infrastructure for the advanced OCR
+system with focus on performance tracking, bottleneck identification, and
+real-time monitoring of critical optimization metrics.
 
-Features:
-    - Structured JSON logging for machine processing
-    - Performance metrics collection and analysis
-    - OCR-specific context logging (engine, confidence, etc.)
-    - Thread-safe operations
-    - Rotating file handlers with size limits
-    - Console and file output support
+The logging system tracks:
+- Processing stage performance (preprocessing, OCR, postprocessing)
+- Critical performance bottlenecks (text detection regions, TrOCR efficiency)
+- Memory usage and resource consumption
+- Engine performance comparison and optimization
+- Real-time processing metrics for the <3 second requirement
+
+Classes:
+    PerformanceLogger: Main performance tracking and logging interface
+    ProcessingStageTimer: Context manager for timing processing stages
+    MetricsCollector: Real-time metrics collection and aggregation
+    OCRDebugLogger: Development debugging with optional image snapshots
+    LogConfig: Configuration for logging behavior and output formats
+
+Example:
+    >>> logger = PerformanceLogger("ocr_system")
+    >>> with logger.stage_timer("preprocessing") as timer:
+    ...     # preprocessing code here
+    ...     timer.log_metric("regions_detected", 45)
+    >>> 
+    >>> logger.log_performance_summary()
+    >>> logger.check_performance_targets()
 """
 
 import logging
-import sys
-import os
-from pathlib import Path
-from typing import Optional, Dict, Any, Union
-from datetime import datetime
-import json
-import traceback
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-import threading
-from dataclasses import dataclass, asdict
-from contextlib import contextmanager
 import time
+import json
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Any, Optional, Union, IO
+from pathlib import Path
+from enum import Enum
+import psutil
+import os
+
+
+class LogLevel(Enum):
+    """Logging levels for different types of messages."""
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
+class LogFormat(Enum):
+    """Supported log output formats."""
+    JSON = "json"
+    TEXT = "text"
+    STRUCTURED = "structured"
+
 
 @dataclass
-class PerformanceMetric:
+class LogConfig:
     """
-    Data structure for storing performance metrics.
-
-    This dataclass holds information about the execution of an operation,
-    including timing, memory usage, success status, and additional metadata.
-
+    Configuration for logging system behavior.
+    
     Attributes:
-        operation_name (str): Name of the operation being measured.
-        start_time (float): Timestamp when the operation started.
-        end_time (float): Timestamp when the operation ended.
-        duration (float): Total duration of the operation in seconds.
-        memory_usage_mb (Optional[float]): Memory usage in MB, if available.
-        success (bool): Whether the operation completed successfully.
-        error_message (Optional[str]): Error message if the operation failed.
-        metadata (Dict[str, Any]): Additional metadata associated with the operation.
+        log_level (LogLevel): Minimum logging level
+        log_format (LogFormat): Output format for log messages
+        log_to_file (bool): Enable file logging
+        log_to_console (bool): Enable console logging  
+        log_file_path (Optional[str]): Path for log file output
+        max_log_size_mb (int): Maximum log file size before rotation
+        enable_performance_logging (bool): Enable detailed performance tracking
+        enable_debug_snapshots (bool): Save debug images during development
+        metrics_collection_interval (float): Metrics collection frequency in seconds
     """
-    operation_name: str
+    log_level: LogLevel = LogLevel.INFO
+    log_format: LogFormat = LogFormat.STRUCTURED
+    log_to_file: bool = True
+    log_to_console: bool = True
+    log_file_path: Optional[str] = None
+    max_log_size_mb: int = 100
+    enable_performance_logging: bool = True
+    enable_debug_snapshots: bool = False
+    metrics_collection_interval: float = 0.1
+
+
+@dataclass
+class ProcessingStageMetrics:
+    """
+    Metrics for individual processing stages.
+    
+    Tracks performance data for each stage of the OCR pipeline to identify
+    bottlenecks and optimization opportunities.
+    
+    Attributes:
+        stage_name (str): Name of the processing stage
+        start_time (float): Stage start timestamp
+        end_time (float): Stage end timestamp
+        duration (float): Processing duration in seconds
+        memory_start (float): Memory usage at stage start (MB)
+        memory_peak (float): Peak memory usage during stage (MB)
+        memory_end (float): Memory usage at stage end (MB)
+        cpu_usage (float): Average CPU usage during stage
+        custom_metrics (Dict[str, Any]): Stage-specific metrics
+    """
+    stage_name: str
     start_time: float
-    end_time: float
-    duration: float
-    memory_usage_mb: Optional[float] = None
-    success: bool = True
-    error_message: Optional[str] = None
-    metadata: Dict[str, Any] = None
+    end_time: float = 0.0
+    duration: float = 0.0
+    memory_start: float = 0.0
+    memory_peak: float = 0.0
+    memory_end: float = 0.0
+    cpu_usage: float = 0.0
+    custom_metrics: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Initialize memory tracking."""
+        if self.memory_start == 0.0:
+            self.memory_start = self._get_memory_usage()
+    
+    def finalize(self):
+        """Finalize stage metrics calculation."""
+        if self.end_time == 0.0:
+            self.end_time = time.time()
+        self.duration = self.end_time - self.start_time
+        self.memory_end = self._get_memory_usage()
+    
+    @staticmethod
+    def _get_memory_usage() -> float:
+        """Get current memory usage in MB."""
+        try:
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / 1024 / 1024
+        except:
+            return 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert the performance metric to a dictionary for JSON serialization.
 
-        Returns:
-            Dict[str, Any]: Dictionary representation of the metric.
-        """
-        return asdict(self)
-
-class PerformanceMonitor:
+@dataclass
+class CriticalPerformanceMetrics:
     """
-    Thread-safe performance monitoring and metrics collection.
-
-    This class provides a thread-safe way to record, store, and retrieve
-    performance metrics for various operations. It supports statistical
-    analysis and can handle concurrent access from multiple threads.
+    Critical performance metrics for optimization requirements.
+    
+    Tracks the specific performance issues identified in the project:
+    - Text detection region count (target: 20-80 regions)
+    - TrOCR character extraction rate (target: >1000 chars)  
+    - Total processing time (target: <3 seconds)
+    
+    Attributes:
+        total_processing_time (float): End-to-end processing time
+        text_regions_before_filtering (int): Initial region count from detection
+        text_regions_after_filtering (int): Final region count after optimization
+        characters_extracted (int): Total characters extracted by OCR engines
+        character_extraction_rate (float): Characters per second extraction rate
+        memory_peak_usage (float): Peak memory usage during processing
+        performance_targets_met (bool): Whether all targets were achieved
+        bottlenecks_identified (List[str]): List of identified performance bottlenecks
     """
+    total_processing_time: float = 0.0
+    text_regions_before_filtering: int = 0
+    text_regions_after_filtering: int = 0
+    characters_extracted: int = 0
+    character_extraction_rate: float = 0.0
+    memory_peak_usage: float = 0.0
+    performance_targets_met: bool = False
+    bottlenecks_identified: List[str] = field(default_factory=list)
+    
+    def calculate_efficiency_metrics(self):
+        """Calculate derived efficiency metrics."""
+        # Text detection efficiency
+        if self.text_regions_before_filtering > 0:
+            detection_efficiency = self.text_regions_after_filtering / self.text_regions_before_filtering
+            if detection_efficiency < 0.1:
+                self.bottlenecks_identified.append(f"poor_detection_efficiency_{detection_efficiency:.3f}")
+        
+        # Character extraction rate
+        if self.total_processing_time > 0:
+            self.character_extraction_rate = self.characters_extracted / self.total_processing_time
+            if self.character_extraction_rate < 300:
+                self.bottlenecks_identified.append(f"slow_char_extraction_{self.character_extraction_rate:.1f}")
+        
+        # Performance targets check
+        self.performance_targets_met = (
+            self.total_processing_time < 3.0 and
+            self.text_regions_after_filtering <= 100 and
+            self.character_extraction_rate >= 300
+        )
+        
+        # Identify bottlenecks
+        if self.total_processing_time >= 3.0:
+            self.bottlenecks_identified.append(f"total_time_slow_{self.total_processing_time:.2f}s")
+        
+        if self.text_regions_after_filtering > 100:
+            self.bottlenecks_identified.append(f"too_many_regions_{self.text_regions_after_filtering}")
 
-    def __init__(self):
-        """
-        Initialize the performance monitor.
 
-        Creates a thread lock and initializes the metrics storage.
+class ProcessingStageTimer:
+    """
+    Context manager for timing processing stages with detailed metrics collection.
+    
+    Provides automatic timing, memory tracking, and custom metrics logging
+    for individual processing stages in the OCR pipeline.
+    
+    Example:
+        >>> with logger.stage_timer("text_detection") as timer:
+        ...     regions = detect_text_regions(image)
+        ...     timer.log_metric("regions_detected", len(regions))
+        ...     timer.log_metric("confidence_threshold", 0.7)
+    """
+    
+    def __init__(self, stage_name: str, logger: 'PerformanceLogger'):
         """
+        Initialize stage timer.
+        
+        Args:
+            stage_name: Name of the processing stage
+            logger: Parent performance logger instance
+        """
+        self.stage_name = stage_name
+        self.logger = logger
+        self.metrics = ProcessingStageMetrics(
+            stage_name=stage_name,
+            start_time=time.time()
+        )
+        self._memory_monitor_active = False
+        self._memory_monitor_thread: Optional[threading.Thread] = None
+    
+    def __enter__(self) -> 'ProcessingStageTimer':
+        """Enter context manager and start monitoring."""
+        self._start_memory_monitoring()
+        self.logger._log_stage_start(self.stage_name)
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager and finalize metrics."""
+        self._stop_memory_monitoring()
+        self.metrics.finalize()
+        self.logger._log_stage_complete(self.stage_name, self.metrics)
+    
+    def log_metric(self, name: str, value: Any):
+        """
+        Log custom metric for this processing stage.
+        
+        Args:
+            name: Metric name
+            value: Metric value
+        """
+        self.metrics.custom_metrics[name] = value
+        self.logger._log_custom_metric(self.stage_name, name, value)
+    
+    def update_peak_memory(self, memory_usage: float):
+        """Update peak memory usage if current usage is higher."""
+        if memory_usage > self.metrics.memory_peak:
+            self.metrics.memory_peak = memory_usage
+    
+    def _start_memory_monitoring(self):
+        """Start background memory monitoring thread."""
+        if not self.logger.config.enable_performance_logging:
+            return
+        
+        self._memory_monitor_active = True
+        self._memory_monitor_thread = threading.Thread(
+            target=self._monitor_memory,
+            daemon=True
+        )
+        self._memory_monitor_thread.start()
+    
+    def _stop_memory_monitoring(self):
+        """Stop background memory monitoring."""
+        self._memory_monitor_active = False
+        if self._memory_monitor_thread:
+            self._memory_monitor_thread.join(timeout=1.0)
+    
+    def _monitor_memory(self):
+        """Background memory monitoring loop."""
+        while self._memory_monitor_active:
+            try:
+                current_memory = ProcessingStageMetrics._get_memory_usage()
+                self.update_peak_memory(current_memory)
+                time.sleep(self.logger.config.metrics_collection_interval)
+            except:
+                break
+
+
+class MetricsCollector:
+    """
+    Real-time metrics collection and aggregation system.
+    
+    Collects and aggregates performance metrics across processing sessions
+    to provide insights into system performance trends and optimization opportunities.
+    """
+    
+    def __init__(self, logger_name: str):
+        """
+        Initialize metrics collector.
+        
+        Args:
+            logger_name: Name for this metrics collector instance
+        """
+        self.logger_name = logger_name
+        self.session_metrics: List[CriticalPerformanceMetrics] = []
+        self.stage_metrics: Dict[str, List[ProcessingStageMetrics]] = {}
+        self.engine_performance: Dict[str, List[Dict[str, Any]]] = {}
         self._lock = threading.Lock()
-        self._metrics: Dict[str, list] = {}
-
-    def record_metric(self, metric: PerformanceMetric):
+    
+    def add_session_metrics(self, metrics: CriticalPerformanceMetrics):
         """
-        Record a performance metric.
-
+        Add metrics from a completed processing session.
+        
         Args:
-            metric (PerformanceMetric): The performance metric to record.
+            metrics: Performance metrics from processing session
         """
         with self._lock:
-            if metric.operation_name not in self._metrics:
-                self._metrics[metric.operation_name] = []
-            self._metrics[metric.operation_name].append(metric)
-
-    def get_metrics(self, operation_name: Optional[str] = None) -> Dict[str, Any]:
+            metrics.calculate_efficiency_metrics()
+            self.session_metrics.append(metrics)
+    
+    def add_stage_metrics(self, metrics: ProcessingStageMetrics):
         """
-        Get performance metrics.
-
+        Add metrics from a completed processing stage.
+        
         Args:
-            operation_name (Optional[str]): Specific operation name to filter by.
-                If None, returns all metrics.
-
+            metrics: Stage performance metrics
+        """
+        with self._lock:
+            if metrics.stage_name not in self.stage_metrics:
+                self.stage_metrics[metrics.stage_name] = []
+            self.stage_metrics[metrics.stage_name].append(metrics)
+    
+    def add_engine_performance(self, engine_name: str, performance_data: Dict[str, Any]):
+        """
+        Add performance data for a specific OCR engine.
+        
+        Args:
+            engine_name: Name of the OCR engine
+            performance_data: Performance metrics dictionary
+        """
+        with self._lock:
+            if engine_name not in self.engine_performance:
+                self.engine_performance[engine_name] = []
+            self.engine_performance[engine_name].append(performance_data)
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Generate comprehensive performance summary.
+        
         Returns:
-            Dict[str, Any]: Dictionary containing the requested metrics.
-                If operation_name is specified, returns metrics for that operation.
-                Otherwise, returns all metrics grouped by operation name.
+            Dictionary containing aggregated performance statistics
         """
         with self._lock:
-            if operation_name:
-                return {
-                    'operation': operation_name,
-                    'metrics': [m.to_dict() for m in self._metrics.get(operation_name, [])]
-                }
-            else:
-                return {
-                    op_name: [m.to_dict() for m in metrics]
-                    for op_name, metrics in self._metrics.items()
-                }
-
-    def get_statistics(self, operation_name: str) -> Dict[str, float]:
-        """
-        Get statistical summary for an operation.
-
-        Args:
-            operation_name (str): Name of the operation to get statistics for.
-
-        Returns:
-            Dict[str, float]: Dictionary containing statistical metrics including
-                count, success_count, success_rate, avg_duration, min_duration,
-                max_duration, and total_duration. Returns empty dict if no metrics exist.
-        """
-        with self._lock:
-            metrics = self._metrics.get(operation_name, [])
-            if not metrics:
-                return {}
-
-            durations = [m.duration for m in metrics if m.success]
-            if not durations:
-                return {'success_rate': 0.0}
-
+            if not self.session_metrics:
+                return {"error": "No performance data available"}
+            
+            # Aggregate session metrics
+            total_sessions = len(self.session_metrics)
+            successful_sessions = sum(1 for m in self.session_metrics if m.performance_targets_met)
+            avg_processing_time = sum(m.total_processing_time for m in self.session_metrics) / total_sessions
+            avg_extraction_rate = sum(m.character_extraction_rate for m in self.session_metrics) / total_sessions
+            
+            # Identify common bottlenecks
+            all_bottlenecks = []
+            for metrics in self.session_metrics:
+                all_bottlenecks.extend(metrics.bottlenecks_identified)
+            
+            bottleneck_counts = {}
+            for bottleneck in all_bottlenecks:
+                bottleneck_counts[bottleneck] = bottleneck_counts.get(bottleneck, 0) + 1
+            
+            # Stage performance summary
+            stage_summary = {}
+            for stage_name, stage_list in self.stage_metrics.items():
+                if stage_list:
+                    avg_duration = sum(s.duration for s in stage_list) / len(stage_list)
+                    avg_memory = sum(s.memory_peak for s in stage_list) / len(stage_list)
+                    stage_summary[stage_name] = {
+                        "avg_duration": round(avg_duration, 3),
+                        "avg_memory_mb": round(avg_memory, 1),
+                        "executions": len(stage_list)
+                    }
+            
             return {
-                'count': len(metrics),
-                'success_count': len(durations),
-                'success_rate': len(durations) / len(metrics),
-                'avg_duration': sum(durations) / len(durations),
-                'min_duration': min(durations),
-                'max_duration': max(durations),
-                'total_duration': sum(durations)
+                "total_sessions": total_sessions,
+                "success_rate": round(successful_sessions / total_sessions, 3),
+                "avg_processing_time": round(avg_processing_time, 3),
+                "avg_extraction_rate": round(avg_extraction_rate, 1),
+                "performance_targets_met": successful_sessions,
+                "common_bottlenecks": bottleneck_counts,
+                "stage_performance": stage_summary,
+                "engine_count": len(self.engine_performance)
             }
-
-    def clear_metrics(self, operation_name: Optional[str] = None):
-        """
-        Clear performance metrics.
-
-        Args:
-            operation_name (Optional[str]): Specific operation name to clear.
-                If None, clears all metrics.
-        """
+    
+    def clear_metrics(self):
+        """Clear all collected metrics data."""
         with self._lock:
-            if operation_name:
-                self._metrics.pop(operation_name, None)
-            else:
-                self._metrics.clear()
+            self.session_metrics.clear()
+            self.stage_metrics.clear()
+            self.engine_performance.clear()
 
-class OCRFormatter(logging.Formatter):
+
+class PerformanceLogger:
     """
-    Custom formatter for OCR logging with structured output.
-
-    This formatter supports both human-readable and structured JSON output,
-    including OCR-specific context and performance metrics.
-    """
-
-    def __init__(self, include_performance: bool = False):
-        """
-        Initialize the OCRFormatter.
-
-        Args:
-            include_performance (bool): Whether to include performance metrics in the output.
-        """
-        super().__init__()
-        self.include_performance = include_performance
-
-    def format(self, record: logging.LogRecord) -> str:
-        """
-        Format a log record with OCR-specific information.
-
-        Args:
-            record (logging.LogRecord): The log record to format.
-
-        Returns:
-            str: The formatted log message, either as JSON or human-readable string.
-        """
-        # Base timestamp and level
-        timestamp = datetime.fromtimestamp(record.created).isoformat()
-
-        # Build structured log entry
-        log_entry = {
-            'timestamp': timestamp,
-            'level': record.levelname,
-            'component': record.name,
-            'message': record.getMessage(),
-        }
-
-        # Add thread information for debugging
-        if hasattr(record, 'thread') and record.thread:
-            log_entry['thread_id'] = record.thread
-
-        # Add OCR-specific context if available
-        ocr_context = {}
-        if hasattr(record, 'engine_name'):
-            ocr_context['engine'] = record.engine_name
-        if hasattr(record, 'processing_time'):
-            ocr_context['processing_time_ms'] = round(record.processing_time * 1000, 2)
-        if hasattr(record, 'image_size'):
-            ocr_context['image_size'] = record.image_size
-        if hasattr(record, 'confidence'):
-            ocr_context['confidence'] = record.confidence
-        if hasattr(record, 'text_length'):
-            ocr_context['text_length'] = record.text_length
-
-        if ocr_context:
-            log_entry['ocr_context'] = ocr_context
-
-        # Add exception information if present
-        if record.exc_info:
-            log_entry['exception'] = {
-                'type': record.exc_info[0].__name__ if record.exc_info[0] else None,
-                'message': str(record.exc_info[1]) if record.exc_info[1] else None,
-                'traceback': traceback.format_exception(*record.exc_info)
-            }
-
-        # Performance metrics if enabled
-        if self.include_performance and hasattr(record, 'performance_metric'):
-            log_entry['performance'] = record.performance_metric.to_dict()
-
-        # Format as JSON for structured logging or human-readable for console
-        if getattr(record, 'structured', False):
-            return json.dumps(log_entry, indent=2)
-        else:
-            # Human-readable format
-            base_msg = f"{timestamp} | {record.levelname:8} | {record.name:20} | {record.getMessage()}"
-
-            if ocr_context:
-                context_str = " | ".join([f"{k}={v}" for k, v in ocr_context.items()])
-                base_msg += f" | {context_str}"
-
-            if record.exc_info:
-                base_msg += f"\n{self.formatException(record.exc_info)}"
-
-            return base_msg
-
-class OCRLogger:
-    """
-    Advanced OCR Logger with performance monitoring and structured output
+    Main performance logging interface for the advanced OCR system.
+    
+    Provides comprehensive logging capabilities with focus on performance tracking,
+    bottleneck identification, and optimization metrics for the critical performance
+    requirements (text detection regions, TrOCR efficiency, processing speed).
+    
+    Features:
+    - Structured JSON logging for analysis
+    - Real-time performance monitoring
+    - Processing stage timing and metrics
+    - Memory usage tracking
+    - Critical performance bottleneck detection
+    - Development debugging with image snapshots
+    
+    Example:
+        >>> logger = PerformanceLogger("ocr_pipeline")
+        >>> logger.info("Starting OCR processing", extra={"image_size": (1920, 1080)})
+        >>> 
+        >>> with logger.stage_timer("preprocessing") as timer:
+        ...     processed_image = preprocess_image(image)
+        ...     timer.log_metric("enhancement_applied", "contrast_boost")
+        >>> 
+        >>> logger.log_critical_metrics(processing_time=2.1, regions_filtered=45, chars_extracted=1200)
     """
     
-    def __init__(self, name: str):
+    def __init__(self, name: str, config: Optional[LogConfig] = None):
+        """
+        Initialize performance logger.
+        
+        Args:
+            name: Logger name identifier
+            config: Optional logging configuration (uses defaults if None)
+        """
         self.name = name
-        self.logger = logging.getLogger(name)
-        self.performance_monitor = PerformanceMonitor()
-        self._setup_complete = False
+        self.config = config or LogConfig()
+        self.metrics_collector = MetricsCollector(name)
+        self.current_session_start: Optional[float] = None
+        self.current_session_metrics = CriticalPerformanceMetrics()
+        
+        # Initialize Python logger
+        self.logger = logging.getLogger(f"advanced_ocr.{name}")
+        self.logger.setLevel(getattr(logging, self.config.log_level.value))
+        
+        # Setup handlers
+        self._setup_handlers()
+        
+        # Thread safety
+        self._lock = threading.Lock()
     
-    def setup_logging(self, 
-                     level: str = "INFO",
-                     log_file: Optional[str] = None,
-                     max_file_size_mb: int = 100,
-                     backup_count: int = 5,
-                     enable_console: bool = True,
-                     enable_performance_logging: bool = True,
-                     log_directory: Optional[str] = None):
-        """
-        Setup comprehensive logging configuration
-        
-        Args:
-            level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-            log_file: Log file name (optional)
-            max_file_size_mb: Maximum log file size in MB
-            backup_count: Number of backup log files to keep
-            enable_console: Enable console output
-            enable_performance_logging: Enable performance metric logging
-            log_directory: Directory for log files
-        """
-        
+    def _setup_handlers(self):
+        """Setup logging handlers based on configuration."""
         # Clear existing handlers
         self.logger.handlers.clear()
         
-        # Set logging level
-        numeric_level = getattr(logging, level.upper(), logging.INFO)
-        self.logger.setLevel(numeric_level)
+        # Create formatter
+        if self.config.log_format == LogFormat.JSON:
+            formatter = self._create_json_formatter()
+        else:
+            formatter = self._create_structured_formatter()
         
         # Console handler
-        if enable_console:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_formatter = OCRFormatter(include_performance=False)
-            console_handler.setFormatter(console_formatter)
-            console_handler.setLevel(numeric_level)
+        if self.config.log_to_console:
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
         
         # File handler
-        if log_file:
-            # Ensure log directory exists
-            if log_directory:
-                os.makedirs(log_directory, exist_ok=True)
-                log_path = os.path.join(log_directory, log_file)
-            else:
-                log_path = log_file
+        if self.config.log_to_file:
+            log_path = self.config.log_file_path or f"advanced_ocr_{self.name}.log"
             
-            # Rotating file handler
+            # Create log directory if needed
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            
+            # Use rotating file handler
+            from logging.handlers import RotatingFileHandler
             file_handler = RotatingFileHandler(
                 log_path,
-                maxBytes=max_file_size_mb * 1024 * 1024,
-                backupCount=backup_count,
-                encoding='utf-8'
+                maxBytes=self.config.max_log_size_mb * 1024 * 1024,
+                backupCount=5
             )
-            
-            file_formatter = OCRFormatter(include_performance=enable_performance_logging)
-            file_handler.setFormatter(file_formatter)
-            file_handler.setLevel(numeric_level)
+            file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
+    
+    def _create_json_formatter(self) -> logging.Formatter:
+        """Create JSON formatter for structured logging."""
+        class JSONFormatter(logging.Formatter):
+            def format(self, record):
+                log_entry = {
+                    "timestamp": time.time(),
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": record.getMessage(),
+                    "module": record.module,
+                    "function": record.funcName,
+                    "line": record.lineno
+                }
+                
+                # Add extra fields
+                if hasattr(record, 'extra_data'):
+                    log_entry.update(record.extra_data)
+                
+                return json.dumps(log_entry)
         
-        # Performance log handler (separate file)
-        if enable_performance_logging and log_directory:
-            perf_log_path = os.path.join(log_directory, f"{self.name}_performance.log")
-            perf_handler = TimedRotatingFileHandler(
-                perf_log_path,
-                when='midnight',
-                interval=1,
-                backupCount=7,
-                encoding='utf-8'
-            )
-            
-            perf_formatter = OCRFormatter(include_performance=True)
-            perf_handler.setFormatter(perf_formatter)
-            perf_handler.setLevel(logging.INFO)
-            
-            # Add filter to only log performance metrics
-            perf_handler.addFilter(lambda record: hasattr(record, 'performance_metric'))
-            self.logger.addHandler(perf_handler)
+        return JSONFormatter()
+    
+    def _create_structured_formatter(self) -> logging.Formatter:
+        """Create structured text formatter."""
+        return logging.Formatter(
+            fmt='%(asctime)s | %(name)s | %(levelname)-8s | %(funcName)s:%(lineno)d | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+    
+    def start_session(self):
+        """Start a new processing session for metrics tracking."""
+        with self._lock:
+            self.current_session_start = time.time()
+            self.current_session_metrics = CriticalPerformanceMetrics()
         
-        self._setup_complete = True
-        self.info("OCR Logging system initialized", extra={'component': 'logger_setup'})
+        self.info("Processing session started")
+    
+    def end_session(self):
+        """End current processing session and finalize metrics."""
+        if self.current_session_start is None:
+            self.warning("end_session called without start_session")
+            return
+        
+        with self._lock:
+            self.current_session_metrics.total_processing_time = time.time() - self.current_session_start
+            self.current_session_metrics.calculate_efficiency_metrics()
+            self.metrics_collector.add_session_metrics(self.current_session_metrics)
+        
+        self.info(
+            "Processing session completed",
+            extra={"performance_metrics": asdict(self.current_session_metrics)}
+        )
     
     @contextmanager
-    def performance_timer(self, operation_name: str, **metadata):
+    def stage_timer(self, stage_name: str):
         """
-        Context manager for timing operations with automatic logging
+        Create context manager for timing processing stages.
         
         Args:
-            operation_name: Name of the operation being timed
-            **metadata: Additional metadata to include
+            stage_name: Name of the processing stage
+            
+        Yields:
+            ProcessingStageTimer: Timer context manager
         """
-        start_time = time.time()
-        start_memory = self._get_memory_usage()
+        timer = ProcessingStageTimer(stage_name, self)
+        try:
+            yield timer
+        finally:
+            if self.config.enable_performance_logging:
+                self.metrics_collector.add_stage_metrics(timer.metrics)
+    
+    def log_critical_metrics(self, **metrics):
+        """
+        Log critical performance metrics for optimization tracking.
+        
+        Args:
+            **metrics: Critical performance metrics (processing_time, regions_filtered, etc.)
+        """
+        with self._lock:
+            for key, value in metrics.items():
+                if hasattr(self.current_session_metrics, key):
+                    setattr(self.current_session_metrics, key, value)
+        
+        self.info("Critical performance metrics logged", extra={"critical_metrics": metrics})
+    
+    def log_engine_performance(self, engine_name: str, **performance_data):
+        """
+        Log performance data for specific OCR engine.
+        
+        Args:
+            engine_name: Name of the OCR engine
+            **performance_data: Engine performance metrics
+        """
+        performance_data['timestamp'] = time.time()
+        self.metrics_collector.add_engine_performance(engine_name, performance_data)
+        
+        self.debug(
+            f"Engine performance logged: {engine_name}",
+            extra={"engine_performance": performance_data}
+        )
+    
+    def check_performance_targets(self) -> bool:
+        """
+        Check if current session meets performance targets.
+        
+        Returns:
+            bool: True if all performance targets are met
+        """
+        with self._lock:
+            targets_met = (
+                self.current_session_metrics.total_processing_time < 3.0 and
+                self.current_session_metrics.text_regions_after_filtering <= 100 and
+                self.current_session_metrics.character_extraction_rate >= 300
+            )
+        
+        if targets_met:
+            self.info("Performance targets met")
+        else:
+            self.warning(
+                "Performance targets not met",
+                extra={"current_metrics": asdict(self.current_session_metrics)}
+            )
+        
+        return targets_met
+    
+    def log_performance_summary(self) -> Dict[str, Any]:
+        """
+        Log comprehensive performance summary.
+        
+        Returns:
+            Dictionary containing performance summary statistics
+        """
+        summary = self.metrics_collector.get_performance_summary()
+        
+        self.info(
+            "Performance summary generated",
+            extra={"performance_summary": summary}
+        )
+        
+        return summary
+    
+    def debug(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Log debug message with optional extra data."""
+        self._log_with_extra(logging.DEBUG, message, extra)
+    
+    def info(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Log info message with optional extra data."""
+        self._log_with_extra(logging.INFO, message, extra)
+    
+    def warning(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Log warning message with optional extra data."""
+        self._log_with_extra(logging.WARNING, message, extra)
+    
+    def error(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Log error message with optional extra data."""
+        self._log_with_extra(logging.ERROR, message, extra)
+    
+    def critical(self, message: str, extra: Optional[Dict[str, Any]] = None):
+        """Log critical message with optional extra data."""
+        self._log_with_extra(logging.CRITICAL, message, extra)
+    
+    def _log_with_extra(self, level: int, message: str, extra: Optional[Dict[str, Any]]):
+        """Internal method to log messages with extra data."""
+        if extra:
+            # Create a LogRecord with extra data
+            record = self.logger.makeRecord(
+                self.logger.name, level, __file__, 0, message, (), None
+            )
+            record.extra_data = extra
+            self.logger.handle(record)
+        else:
+            self.logger.log(level, message)
+    
+    def _log_stage_start(self, stage_name: str):
+        """Internal method to log processing stage start."""
+        self.debug(f"Processing stage started: {stage_name}")
+    
+    def _log_stage_complete(self, stage_name: str, metrics: ProcessingStageMetrics):
+        """Internal method to log processing stage completion."""
+        self.debug(
+            f"Processing stage completed: {stage_name}",
+            extra={
+                "stage_metrics": {
+                    "duration": round(metrics.duration, 3),
+                    "memory_peak": round(metrics.memory_peak, 1),
+                    "custom_metrics": metrics.custom_metrics
+                }
+            }
+        )
+    
+    def _log_custom_metric(self, stage_name: str, metric_name: str, metric_value: Any):
+        """Internal method to log custom stage metrics."""
+        if self.config.log_level == LogLevel.DEBUG:
+            self.debug(
+                f"Stage metric: {stage_name}.{metric_name} = {metric_value}"
+            )
+
+
+class OCRDebugLogger(PerformanceLogger):
+    """
+    Extended logger with debugging capabilities for development.
+    
+    Provides additional debugging features including image snapshot saving,
+    detailed processing step logging, and enhanced error diagnostics.
+    """
+    
+    def __init__(self, name: str, config: Optional[LogConfig] = None, debug_dir: Optional[str] = None):
+        """
+        Initialize debug logger.
+        
+        Args:
+            name: Logger name identifier
+            config: Optional logging configuration
+            debug_dir: Directory for saving debug artifacts
+        """
+        super().__init__(name, config)
+        self.debug_dir = Path(debug_dir) if debug_dir else Path("debug_output")
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
+        self._image_counter = 0
+    
+    def save_debug_image(self, image_array, stage_name: str, description: str = ""):
+        """
+        Save debug image snapshot during processing.
+        
+        Args:
+            image_array: Image array to save (numpy array)
+            stage_name: Processing stage name
+            description: Optional description for the image
+        """
+        if not self.config.enable_debug_snapshots:
+            return
         
         try:
-            yield
+            import cv2
+            import numpy as np
             
-            # Success case
-            end_time = time.time()
-            end_memory = self._get_memory_usage()
-            duration = end_time - start_time
+            self._image_counter += 1
+            filename = f"{self._image_counter:03d}_{stage_name}_{description}.jpg".replace(" ", "_")
+            filepath = self.debug_dir / filename
             
-            metric = PerformanceMetric(
-                operation_name=operation_name,
-                start_time=start_time,
-                end_time=end_time,
-                duration=duration,
-                memory_usage_mb=end_memory - start_memory if start_memory and end_memory else None,
-                success=True,
-                metadata=metadata or {}
+            # Convert to uint8 if needed
+            if image_array.dtype != np.uint8:
+                if image_array.max() <= 1.0:
+                    image_array = (image_array * 255).astype(np.uint8)
+                else:
+                    image_array = image_array.astype(np.uint8)
+            
+            cv2.imwrite(str(filepath), image_array)
+            
+            self.debug(
+                f"Debug image saved: {filename}",
+                extra={"debug_image": str(filepath), "stage": stage_name}
             )
-            
-            # Record metric and log
-            self.performance_monitor.record_metric(metric)
-            self._log_performance_metric(metric)
             
         except Exception as e:
-            # Error case
-            end_time = time.time()
-            duration = end_time - start_time
-            
-            metric = PerformanceMetric(
-                operation_name=operation_name,
-                start_time=start_time,
-                end_time=end_time,
-                duration=duration,
-                success=False,
-                error_message=str(e),
-                metadata=metadata or {}
-            )
-            
-            # Record metric and log
-            self.performance_monitor.record_metric(metric)
-            self._log_performance_metric(metric)
-            
-            # Re-raise the exception
-            raise
-    
-    def _get_memory_usage(self) -> Optional[float]:
-        """Get current memory usage in MB"""
-        try:
-            import psutil
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024  # Convert to MB
-        except ImportError:
-            return None
-        except Exception:
-            return None
-    
-    def _log_performance_metric(self, metric: PerformanceMetric):
-        """Log performance metric"""
-        if metric.success:
-            self.info(
-                f"Operation '{metric.operation_name}' completed in {metric.duration:.3f}s",
-                extra={
-                    'performance_metric': metric,
-                    'processing_time': metric.duration,
-                    'operation': metric.operation_name
-                }
-            )
-        else:
-            self.error(
-                f"Operation '{metric.operation_name}' failed after {metric.duration:.3f}s: {metric.error_message}",
-                extra={
-                    'performance_metric': metric,
-                    'processing_time': metric.duration,
-                    'operation': metric.operation_name
-                }
-            )
-    
-    # Standard logging methods with OCR-specific enhancements
-    def debug(self, message: str, **kwargs):
-        """Log debug message"""
-        self.logger.debug(message, extra=kwargs)
-    
-    def info(self, message: str, **kwargs):
-        """Log info message"""
-        self.logger.info(message, extra=kwargs)
-    
-    def warning(self, message: str, **kwargs):
-        """Log warning message"""
-        self.logger.warning(message, extra=kwargs)
-    
-    def error(self, message: str, **kwargs):
-        """Log error message"""
-        self.logger.error(message, extra=kwargs)
-    
-    def critical(self, message: str, **kwargs):
-        """Log critical message"""
-        self.logger.critical(message, extra=kwargs)
-    
-    def exception(self, message: str, **kwargs):
-        """Log exception with traceback"""
-        self.logger.exception(message, extra=kwargs)
-    
-    # OCR-specific logging methods
-    def log_engine_performance(self, engine_name: str, processing_time: float, 
-                             text_length: int, confidence: float, 
-                             image_size: tuple, success: bool = True):
-        """Log OCR engine performance"""
-        self.info(
-            f"Engine {engine_name} processed image",
-            extra={
-                'engine_name': engine_name,
-                'processing_time': processing_time,
-                'text_length': text_length,
-                'confidence': confidence,
-                'image_size': f"{image_size[0]}x{image_size[1]}",
-                'success': success
-            }
-        )
-    
-    def log_preprocessing_step(self, step_name: str, processing_time: float, 
-                             input_size: tuple, output_size: tuple, 
-                             enhancement_applied: bool = False):
-        """Log preprocessing step"""
-        self.debug(
-            f"Preprocessing step '{step_name}' completed",
-            extra={
-                'step_name': step_name,
-                'processing_time': processing_time,
-                'input_size': f"{input_size[0]}x{input_size[1]}",
-                'output_size': f"{output_size[0]}x{output_size[1]}",
-                'enhancement_applied': enhancement_applied
-            }
-        )
-    
-    def log_postprocessing_step(self, step_name: str, processing_time: float,
-                              input_text_length: int, output_text_length: int,
-                              corrections_made: int = 0):
-        """Log postprocessing step"""
-        self.debug(
-            f"Postprocessing step '{step_name}' completed",
-            extra={
-                'step_name': step_name,
-                'processing_time': processing_time,
-                'input_text_length': input_text_length,
-                'output_text_length': output_text_length,
-                'corrections_made': corrections_made
-            }
-        )
-    
-    def get_performance_statistics(self) -> Dict[str, Any]:
-        """Get comprehensive performance statistics"""
-        return self.performance_monitor.get_metrics()
-    
-    def reset_performance_statistics(self):
-        """Reset performance statistics"""
-        self.performance_monitor.clear_metrics()
+            self.error(f"Failed to save debug image: {e}")
 
-# Global logger instance factory
-_loggers: Dict[str, OCRLogger] = {}
-_logger_lock = threading.Lock()
 
-def get_logger(name: str) -> OCRLogger:
+# Factory functions for common logger configurations
+def create_performance_logger(name: str, log_level: str = "INFO") -> PerformanceLogger:
     """
-    Get or create OCR logger instance (thread-safe singleton pattern)
-    
-    Args:
-        name: Logger name (usually module name)
-        
-    Returns:
-        OCRLogger instance
-    """
-    with _logger_lock:
-        if name not in _loggers:
-            _loggers[name] = OCRLogger(name)
-        return _loggers[name]
-
-def setup_logger(name: str, 
-                level: str = "INFO",
-                log_file: Optional[str] = None,
-                log_directory: Optional[str] = None,
-                enable_console: bool = True,
-                enable_performance_logging: bool = True) -> OCRLogger:
-    """
-    Setup and configure OCR logger
+    Create performance logger with standard configuration.
     
     Args:
         name: Logger name
-        level: Logging level
-        log_file: Log file name
-        log_directory: Directory for log files  
-        enable_console: Enable console logging
-        enable_performance_logging: Enable performance logging
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         
     Returns:
-        Configured OCRLogger instance
+        PerformanceLogger configured for performance tracking
     """
-    logger = get_logger(name)
-    
-    logger.setup_logging(
-        level=level,
-        log_file=log_file,
-        log_directory=log_directory,
-        enable_console=enable_console,
-        enable_performance_logging=enable_performance_logging
+    config = LogConfig(
+        log_level=LogLevel(log_level.upper()),
+        log_format=LogFormat.STRUCTURED,
+        enable_performance_logging=True,
+        enable_debug_snapshots=False
     )
-    
-    return logger
+    return PerformanceLogger(name, config)
 
-def configure_global_logging(level: str = "INFO", 
-                           log_directory: str = "logs",
-                           enable_performance_logging: bool = True):
+
+def create_debug_logger(name: str, debug_dir: str = "debug_output") -> OCRDebugLogger:
     """
-    Configure global logging for the entire OCR system
+    Create debug logger for development use.
     
     Args:
-        level: Global logging level
-        log_directory: Directory for all log files
-        enable_performance_logging: Enable performance monitoring
+        name: Logger name
+        debug_dir: Directory for debug artifacts
+        
+    Returns:
+        OCRDebugLogger configured for development debugging
     """
-    
-    # Ensure log directory exists
-    os.makedirs(log_directory, exist_ok=True)
-    
-    # Configure root OCR logger
-    root_logger = setup_logger(
-        "advanced_ocr",
-        level=level,
-        log_file="advanced_ocr.log",
-        log_directory=log_directory,
-        enable_performance_logging=enable_performance_logging
+    config = LogConfig(
+        log_level=LogLevel.DEBUG,
+        log_format=LogFormat.JSON,
+        enable_performance_logging=True,
+        enable_debug_snapshots=True
     )
-    
-    root_logger.info("Global OCR logging configured", 
-                    extra={'log_directory': log_directory, 'level': level})
+    return OCRDebugLogger(name, config, debug_dir)
 
-# Export main functionality
+
 __all__ = [
-    'OCRLogger',
-    'PerformanceMetric', 
-    'PerformanceMonitor',
-    'get_logger',
-    'setup_logger',
-    'configure_global_logging'
+    'PerformanceLogger',
+    'OCRDebugLogger',
+    'ProcessingStageTimer',
+    'MetricsCollector',
+    'LogConfig',
+    'ProcessingStageMetrics',
+    'CriticalPerformanceMetrics',
+    'LogLevel',
+    'LogFormat',
+    'create_performance_logger',
+    'create_debug_logger'
 ]

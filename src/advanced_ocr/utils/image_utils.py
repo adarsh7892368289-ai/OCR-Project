@@ -1,1260 +1,1297 @@
+# src/advanced_ocr/utils/image_utils.py
 """
-Advanced OCR System - Image Processing Utilities
-================================================
+Advanced OCR Image Utilities
 
-Production-grade image utilities for OCR preprocessing with OpenCV, Pillow,
-and NumPy integration. Handles loading, conversion, enhancement, and analysis.
+This module provides fundamental image processing operations and utilities for the
+advanced OCR system. It handles low-level image manipulations, format conversions,
+coordinate transformations, and validation operations that serve as building blocks
+for higher-level image processing components.
 
-Author: Production OCR Team
-Version: 2.0.0
+The module focuses on:
+- Efficient image loading and format handling
+- Memory-optimized image operations
+- Coordinate system transformations for bounding boxes
+- Image format validation and conversion
+- Basic geometric transformations (resize, rotate, crop)
+
+Classes:
+    ImageLoader: Memory-efficient image loading with format detection
+    ImageProcessor: Core image transformation operations  
+    ImageValidator: Format and quality validation
+    CoordinateTransformer: Bounding box coordinate conversions
+    ImageMemoryManager: Memory optimization for large images
+
+Functions:
+    load_image: Load image from file or array with format detection
+    save_image: Save image with format optimization
+    resize_image: Intelligent resizing with aspect ratio preservation
+    validate_image: Comprehensive image validation
+    normalize_coordinates: Convert coordinates between different formats
+
+Example:
+    >>> from advanced_ocr.utils.image_utils import load_image, resize_image
+    >>> image = load_image("document.jpg")
+    >>> resized = resize_image(image, max_size=1024, preserve_aspect=True)
+    >>> print(f"Original: {image.shape}, Resized: {resized.shape}")
+    
+    >>> coords = normalize_coordinates((10, 20, 100, 80), "xywh", "xyxy")
+    >>> print(f"Converted coordinates: {coords}")
 """
 
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter, ExifTags
-import io
-import base64
+from PIL import Image, ImageFile
 from pathlib import Path
-from typing import Union, Tuple, Optional, List, Dict, Any
-import logging
+import io
+from typing import Union, Tuple, List, Optional, Any, Dict
+from enum import Enum
+import warnings
 from dataclasses import dataclass
-import math
 
-# Import logger from utils
-try:
-    from .logger import get_logger
-    logger = get_logger(__name__)
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
+# Enable loading of truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+class ImageFormat(Enum):
+    """Supported image formats with their characteristics."""
+    JPEG = "jpeg"
+    PNG = "png"
+    TIFF = "tiff"
+    BMP = "bmp"
+    WEBP = "webp"
+    PDF = "pdf"
+
+
+class ColorSpace(Enum):
+    """Color space representations for image processing."""
+    RGB = "rgb"
+    BGR = "bgr"
+    GRAY = "gray"
+    HSV = "hsv"
+    LAB = "lab"
+
+
+class ResizeMethod(Enum):
+    """Image resizing interpolation methods."""
+    NEAREST = cv2.INTER_NEAREST
+    LINEAR = cv2.INTER_LINEAR
+    CUBIC = cv2.INTER_CUBIC
+    LANCZOS = cv2.INTER_LANCZOS4
+    AREA = cv2.INTER_AREA
 
 
 @dataclass
-class ImageMetadata:
-    """Container for image metadata and properties."""
+class ImageProperties:
+    """
+    Container for image properties and metadata.
     
-    # Basic properties
+    Attributes:
+        width (int): Image width in pixels
+        height (int): Image height in pixels
+        channels (int): Number of color channels
+        dtype (str): Image data type (uint8, float32, etc.)
+        format (ImageFormat): Detected image format
+        color_space (ColorSpace): Current color space
+        file_size_mb (float): File size in megabytes
+        dpi (Tuple[int, int]): DPI information if available
+        has_transparency (bool): Whether image has alpha channel
+    """
     width: int
     height: int
     channels: int
     dtype: str
-    
-    # File properties
-    format: Optional[str] = None
-    file_size: Optional[int] = None
-    
-    # EXIF data
+    format: ImageFormat
+    color_space: ColorSpace
+    file_size_mb: float = 0.0
     dpi: Optional[Tuple[int, int]] = None
-    orientation: int = 1
-    color_space: Optional[str] = None
-    
-    # Computed properties
-    aspect_ratio: float = 0.0
-    total_pixels: int = 0
-    
-    def __post_init__(self):
-        """Calculate derived properties."""
-        self.aspect_ratio = self.width / self.height if self.height > 0 else 0.0
-        self.total_pixels = self.width * self.height
+    has_transparency: bool = False
     
     @property
-    def is_grayscale(self) -> bool:
-        """Check if image is grayscale."""
-        return self.channels == 1
+    def size(self) -> Tuple[int, int]:
+        """Get image dimensions as (width, height) tuple."""
+        return (self.width, self.height)
     
     @property
-    def is_large_image(self) -> bool:
-        """Check if image is considered large (>2MP)."""
-        return self.total_pixels > 2_000_000
+    def shape(self) -> Tuple[int, int, int]:
+        """Get image shape as (height, width, channels) tuple."""
+        return (self.height, self.width, self.channels)
     
     @property
-    def estimated_memory_mb(self) -> float:
-        """Estimate memory usage in MB."""
-        bytes_per_pixel = 4 if self.channels == 4 else self.channels
-        return (self.total_pixels * bytes_per_pixel) / (1024 * 1024)
+    def aspect_ratio(self) -> float:
+        """Calculate image aspect ratio (width/height)."""
+        return self.width / self.height if self.height > 0 else 0.0
+    
+    @property
+    def total_pixels(self) -> int:
+        """Calculate total number of pixels."""
+        return self.width * self.height
 
 
-class ImageLoadError(Exception):
-    """Exception raised when image loading fails."""
-    pass
-
-
-class ImageProcessingError(Exception):
-    """Exception raised during image processing operations."""
-    pass
-
-
-def load_image(image_source: Union[str, Path, bytes, np.ndarray, Image.Image], 
-               target_format: str = 'rgb') -> Tuple[np.ndarray, ImageMetadata]:
+class ImageValidator:
     """
-    Universal image loader supporting multiple input formats.
+    Image format and quality validation utilities.
     
-    Args:
-        image_source: Image from file path, bytes, numpy array, or PIL Image
-        target_format: Output format ('rgb', 'bgr', 'gray')
-    
-    Returns:
-        Tuple of (image_array, metadata)
-    
-    Raises:
-        ImageLoadError: If image loading fails
+    Provides comprehensive validation for image inputs including format checking,
+    dimension validation, file size limits, and quality assessments.
     """
-    try:
-        image = None
-        metadata = None
+    
+    # Supported image extensions
+    SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp', '.pdf'}
+    
+    # Default validation limits
+    DEFAULT_MAX_SIZE_MB = 50
+    DEFAULT_MAX_DIMENSION = 8192
+    DEFAULT_MIN_DIMENSION = 32
+    
+    @staticmethod
+    def validate_file_path(file_path: Union[str, Path]) -> bool:
+        """
+        Validate image file path and extension.
         
-        # Handle different input types
-        if isinstance(image_source, (str, Path)):
-            # Load from file path
-            image, metadata = _load_from_path(image_source)
+        Args:
+            file_path: Path to image file
             
-        elif isinstance(image_source, bytes):
-            # Load from bytes
-            image, metadata = _load_from_bytes(image_source)
+        Returns:
+            bool: True if path is valid and supported
             
-        elif isinstance(image_source, np.ndarray):
-            # Already a numpy array
-            image = image_source.copy()
-            metadata = _extract_metadata_from_array(image)
+        Raises:
+            ValueError: If file path is invalid or unsupported
+        """
+        file_path = Path(file_path)
+        
+        if not file_path.exists():
+            raise ValueError(f"Image file does not exist: {file_path}")
+        
+        if not file_path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+        
+        if file_path.suffix.lower() not in ImageValidator.SUPPORTED_EXTENSIONS:
+            raise ValueError(f"Unsupported image format: {file_path.suffix}")
+        
+        return True
+    
+    @staticmethod
+    def validate_image_array(image: np.ndarray) -> bool:
+        """
+        Validate numpy image array format and properties.
+        
+        Args:
+            image: Numpy array representing image
             
-        elif isinstance(image_source, Image.Image):
-            # PIL Image
-            image = np.array(image_source)
-            metadata = _extract_metadata_from_pil(image_source)
+        Returns:
+            bool: True if array is valid image
             
-        else:
-            raise ImageLoadError(f"Unsupported image source type: {type(image_source)}")
+        Raises:
+            ValueError: If array format is invalid
+        """
+        if not isinstance(image, np.ndarray):
+            raise ValueError("Image must be numpy array")
         
-        # Convert to target format
-        if target_format.lower() != 'original':
-            image = convert_color_format(image, target_format)
+        if image.ndim not in [2, 3]:
+            raise ValueError(f"Image must be 2D or 3D array, got {image.ndim}D")
         
-        logger.debug(f"Image loaded successfully: {metadata.width}x{metadata.height}, "
-                    f"format: {target_format}, size: {metadata.estimated_memory_mb:.1f}MB")
+        if image.ndim == 3 and image.shape[2] not in [1, 3, 4]:
+            raise ValueError(f"3D image must have 1, 3, or 4 channels, got {image.shape[2]}")
         
-        return image, metadata
-    
-    except Exception as e:
-        raise ImageLoadError(f"Failed to load image: {str(e)}") from e
-
-
-def _load_from_path(file_path: Union[str, Path]) -> Tuple[np.ndarray, ImageMetadata]:
-    """Load image from file path."""
-    file_path = Path(file_path)
-    
-    if not file_path.exists():
-        raise ImageLoadError(f"Image file not found: {file_path}")
-    
-    try:
-        # Try OpenCV first (handles most formats efficiently)
-        image = cv2.imread(str(file_path), cv2.IMREAD_COLOR)
+        if image.size == 0:
+            raise ValueError("Image array is empty")
         
-        if image is not None:
-            # OpenCV loads as BGR, convert to RGB
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            metadata = _extract_metadata_from_file(file_path, image)
-            return image, metadata
+        return True
+    
+    @staticmethod
+    def validate_dimensions(
+        width: int, 
+        height: int, 
+        max_dimension: int = DEFAULT_MAX_DIMENSION,
+        min_dimension: int = DEFAULT_MIN_DIMENSION
+    ) -> bool:
+        """
+        Validate image dimensions against size limits.
         
-        # Fallback to PIL for other formats
-        with Image.open(file_path) as pil_image:
-            # Handle EXIF orientation
-            pil_image = _apply_exif_orientation(pil_image)
-            image = np.array(pil_image.convert('RGB'))
-            metadata = _extract_metadata_from_pil(pil_image, file_path)
-            return image, metadata
-    
-    except Exception as e:
-        raise ImageLoadError(f"Failed to load image from {file_path}: {str(e)}")
-
-
-def _load_from_bytes(image_bytes: bytes) -> Tuple[np.ndarray, ImageMetadata]:
-    """Load image from bytes."""
-    try:
-        # Try OpenCV first
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        Args:
+            width: Image width in pixels
+            height: Image height in pixels
+            max_dimension: Maximum allowed dimension
+            min_dimension: Minimum allowed dimension
+            
+        Returns:
+            bool: True if dimensions are valid
+            
+        Raises:
+            ValueError: If dimensions are outside valid range
+        """
+        if width < min_dimension or height < min_dimension:
+            raise ValueError(f"Image dimensions too small: {width}x{height} < {min_dimension}")
         
-        if image is not None:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            metadata = _extract_metadata_from_array(image)
-            metadata.file_size = len(image_bytes)
-            return image, metadata
+        if width > max_dimension or height > max_dimension:
+            raise ValueError(f"Image dimensions too large: {width}x{height} > {max_dimension}")
         
-        # Fallback to PIL
-        with Image.open(io.BytesIO(image_bytes)) as pil_image:
-            pil_image = _apply_exif_orientation(pil_image)
-            image = np.array(pil_image.convert('RGB'))
-            metadata = _extract_metadata_from_pil(pil_image)
-            metadata.file_size = len(image_bytes)
-            return image, metadata
+        return True
     
-    except Exception as e:
-        raise ImageLoadError(f"Failed to load image from bytes: {str(e)}")
+    @staticmethod
+    def validate_file_size(file_path: Union[str, Path], max_size_mb: float = DEFAULT_MAX_SIZE_MB) -> bool:
+        """
+        Validate image file size against limit.
+        
+        Args:
+            file_path: Path to image file
+            max_size_mb: Maximum file size in megabytes
+            
+        Returns:
+            bool: True if file size is within limit
+            
+        Raises:
+            ValueError: If file size exceeds limit
+        """
+        file_path = Path(file_path)
+        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        
+        if file_size_mb > max_size_mb:
+            raise ValueError(f"Image file too large: {file_size_mb:.1f}MB > {max_size_mb}MB")
+        
+        return True
 
 
-def _extract_metadata_from_file(file_path: Path, image: np.ndarray) -> ImageMetadata:
-    """Extract metadata from file and image array."""
-    height, width = image.shape[:2]
-    channels = 1 if len(image.shape) == 2 else image.shape[2]
+class ImageLoader:
+    """
+    Memory-efficient image loading with comprehensive format support.
     
-    metadata = ImageMetadata(
-        width=width,
-        height=height,
-        channels=channels,
-        dtype=str(image.dtype),
-        format=file_path.suffix.upper().lstrip('.'),
-        file_size=file_path.stat().st_size if file_path.exists() else None
-    )
+    Provides optimized image loading from various sources (files, bytes, arrays)
+    with automatic format detection, error handling, and memory management.
+    """
     
-    # Try to get DPI from EXIF
-    try:
-        with Image.open(file_path) as pil_image:
-            dpi = pil_image.info.get('dpi')
-            if dpi:
-                metadata.dpi = dpi
-    except:
-        pass
+    def __init__(self, max_size_mb: float = 50, auto_convert_grayscale: bool = False):
+        """
+        Initialize image loader.
+        
+        Args:
+            max_size_mb: Maximum file size to load (MB)
+            auto_convert_grayscale: Automatically convert single-channel images to RGB
+        """
+        self.max_size_mb = max_size_mb
+        self.auto_convert_grayscale = auto_convert_grayscale
+        self.validator = ImageValidator()
     
-    return metadata
-
-
-def _extract_metadata_from_pil(pil_image: Image.Image, file_path: Optional[Path] = None) -> ImageMetadata:
-    """Extract metadata from PIL image."""
-    width, height = pil_image.size
-    channels = len(pil_image.getbands())
-    
-    metadata = ImageMetadata(
-        width=width,
-        height=height,
-        channels=channels,
-        dtype='uint8',  # PIL default
-        format=pil_image.format,
-        dpi=pil_image.info.get('dpi'),
-        color_space=pil_image.mode
-    )
-    
-    if file_path and file_path.exists():
-        metadata.file_size = file_path.stat().st_size
-    
-    return metadata
-
-
-def _extract_metadata_from_array(image: np.ndarray) -> ImageMetadata:
-    """Extract metadata from numpy array."""
-    height, width = image.shape[:2]
-    channels = 1 if len(image.shape) == 2 else image.shape[2]
-    
-    return ImageMetadata(
-        width=width,
-        height=height,
-        channels=channels,
-        dtype=str(image.dtype)
-    )
-
-
-def _apply_exif_orientation(pil_image: Image.Image) -> Image.Image:
-    """Apply EXIF orientation correction to PIL image."""
-    try:
-        exif = pil_image._getexif()
-        if exif is not None:
-            orientation_key = next((k for k, v in ExifTags.TAGS.items() if v == 'Orientation'), None)
-            if orientation_key and orientation_key in exif:
-                orientation = exif[orientation_key]
+    def load_from_file(self, file_path: Union[str, Path], color_mode: str = "rgb") -> np.ndarray:
+        """
+        Load image from file with format auto-detection.
+        
+        Args:
+            file_path: Path to image file
+            color_mode: Color mode ('rgb', 'bgr', 'gray')
+            
+        Returns:
+            np.ndarray: Loaded image array
+            
+        Raises:
+            ValueError: If file is invalid or unsupported
+            IOError: If file cannot be loaded
+        """
+        file_path = Path(file_path)
+        
+        # Validate file
+        self.validator.validate_file_path(file_path)
+        self.validator.validate_file_size(file_path, self.max_size_mb)
+        
+        try:
+            # Handle PDF files separately
+            if file_path.suffix.lower() == '.pdf':
+                return self._load_pdf(file_path, color_mode)
+            
+            # Load with PIL for better format support
+            with Image.open(file_path) as pil_image:
+                # Convert to RGB if needed
+                if pil_image.mode not in ['RGB', 'RGBA', 'L']:
+                    pil_image = pil_image.convert('RGB')
                 
-                # Apply rotation based on EXIF orientation
-                if orientation == 2:
-                    pil_image = pil_image.transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 3:
-                    pil_image = pil_image.rotate(180, expand=True)
-                elif orientation == 4:
-                    pil_image = pil_image.rotate(180, expand=True).transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 5:
-                    pil_image = pil_image.rotate(-90, expand=True).transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 6:
-                    pil_image = pil_image.rotate(-90, expand=True)
-                elif orientation == 7:
-                    pil_image = pil_image.rotate(90, expand=True).transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 8:
-                    pil_image = pil_image.rotate(90, expand=True)
-    except:
-        # If EXIF processing fails, continue without rotation
-        pass
+                # Convert PIL to numpy
+                image_array = np.array(pil_image)
+                
+                # Handle color mode conversion
+                return self._convert_color_mode(image_array, pil_image.mode, color_mode)
+                
+        except Exception as e:
+            # Fallback to OpenCV
+            return self._load_with_opencv(file_path, color_mode)
     
-    return pil_image
+    def load_from_bytes(self, image_bytes: bytes, color_mode: str = "rgb") -> np.ndarray:
+        """
+        Load image from bytes data.
+        
+        Args:
+            image_bytes: Image data as bytes
+            color_mode: Color mode ('rgb', 'bgr', 'gray')
+            
+        Returns:
+            np.ndarray: Loaded image array
+            
+        Raises:
+            ValueError: If bytes data is invalid
+        """
+        if not image_bytes:
+            raise ValueError("Empty image bytes data")
+        
+        try:
+            # Try PIL first
+            with Image.open(io.BytesIO(image_bytes)) as pil_image:
+                if pil_image.mode not in ['RGB', 'RGBA', 'L']:
+                    pil_image = pil_image.convert('RGB')
+                
+                image_array = np.array(pil_image)
+                return self._convert_color_mode(image_array, pil_image.mode, color_mode)
+                
+        except Exception:
+            # Fallback to OpenCV
+            try:
+                image_array = cv2.imdecode(
+                    np.frombuffer(image_bytes, np.uint8), 
+                    cv2.IMREAD_COLOR if color_mode != 'gray' else cv2.IMREAD_GRAYSCALE
+                )
+                
+                if image_array is None:
+                    raise ValueError("Failed to decode image bytes")
+                
+                if color_mode == 'rgb' and len(image_array.shape) == 3:
+                    image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+                
+                return image_array
+                
+            except Exception as e:
+                raise ValueError(f"Failed to load image from bytes: {e}")
+    
+    def load_from_array(self, image_array: np.ndarray, validate: bool = True) -> np.ndarray:
+        """
+        Load and validate image from numpy array.
+        
+        Args:
+            image_array: Numpy array representing image
+            validate: Whether to validate array format
+            
+        Returns:
+            np.ndarray: Validated image array
+            
+        Raises:
+            ValueError: If array format is invalid
+        """
+        if validate:
+            self.validator.validate_image_array(image_array)
+        
+        # Ensure proper data type
+        if image_array.dtype != np.uint8:
+            if image_array.max() <= 1.0:
+                image_array = (image_array * 255).astype(np.uint8)
+            else:
+                image_array = np.clip(image_array, 0, 255).astype(np.uint8)
+        
+        return image_array.copy()
+    
+    def _load_pdf(self, file_path: Path, color_mode: str) -> np.ndarray:
+        """Load first page of PDF as image."""
+        try:
+            import fitz  # PyMuPDF
+            
+            with fitz.open(file_path) as pdf:
+                if len(pdf) == 0:
+                    raise ValueError("PDF file has no pages")
+                
+                # Get first page
+                page = pdf[0]
+                
+                # Render at high DPI
+                mat = fitz.Matrix(2.0, 2.0)  # 2x zoom = ~144 DPI
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Convert to numpy array
+                image_data = pix.tobytes("ppm")
+                image_array = np.frombuffer(image_data, dtype=np.uint8)
+                
+                # Reshape to image dimensions
+                image_array = image_array.reshape(pix.height, pix.width, 3)
+                
+                return self._convert_color_mode(image_array, 'RGB', color_mode)
+                
+        except ImportError:
+            raise ValueError("PyMuPDF required for PDF loading: pip install PyMuPDF")
+        except Exception as e:
+            raise IOError(f"Failed to load PDF: {e}")
+    
+    def _load_with_opencv(self, file_path: Path, color_mode: str) -> np.ndarray:
+        """Fallback image loading with OpenCV."""
+        try:
+            if color_mode == 'gray':
+                image_array = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
+            else:
+                image_array = cv2.imread(str(file_path), cv2.IMREAD_COLOR)
+                
+                if color_mode == 'rgb':
+                    image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+            
+            if image_array is None:
+                raise IOError(f"OpenCV failed to load image: {file_path}")
+            
+            return image_array
+            
+        except Exception as e:
+            raise IOError(f"Failed to load image with OpenCV: {e}")
+    
+    def _convert_color_mode(self, image_array: np.ndarray, source_mode: str, target_mode: str) -> np.ndarray:
+        """Convert image between color modes."""
+        if target_mode == 'gray':
+            if len(image_array.shape) == 3:
+                if source_mode == 'RGBA':
+                    # Convert RGBA to RGB first
+                    rgb_array = image_array[:, :, :3]
+                    return cv2.cvtColor(rgb_array, cv2.COLOR_RGB2GRAY)
+                else:
+                    return cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+            else:
+                return image_array
+        
+        elif target_mode == 'rgb':
+            if source_mode == 'RGBA':
+                # Remove alpha channel
+                return image_array[:, :, :3]
+            elif len(image_array.shape) == 2:
+                # Convert grayscale to RGB
+                return cv2.cvtColor(image_array, cv2.COLOR_GRAY2RGB)
+            else:
+                return image_array
+        
+        elif target_mode == 'bgr':
+            if source_mode in ['RGB', 'RGBA']:
+                rgb_array = image_array[:, :, :3] if source_mode == 'RGBA' else image_array
+                return cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+            elif len(image_array.shape) == 2:
+                return cv2.cvtColor(image_array, cv2.COLOR_GRAY2BGR)
+            else:
+                return image_array
+        
+        return image_array
 
 
-def convert_color_format(image: np.ndarray, target_format: str) -> np.ndarray:
+class ImageProcessor:
     """
-    Convert image between color formats.
+    Core image transformation operations for OCR preprocessing.
     
-    Args:
-        image: Input image array
-        target_format: Target format ('rgb', 'bgr', 'gray', 'hsv', 'lab')
-    
-    Returns:
-        Converted image array
-    
-    Raises:
-        ImageProcessingError: If conversion fails
+    Provides essential image processing operations including resizing, rotation,
+    cropping, and format conversions optimized for OCR workflows.
     """
-    try:
-        current_channels = 1 if len(image.shape) == 2 else image.shape[2]
-        target_format = target_format.lower()
-        
-        # Handle grayscale input
-        if current_channels == 1:
-            if target_format == 'gray':
-                return image
-            elif target_format in ['rgb', 'bgr']:
-                return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB if target_format == 'rgb' else cv2.COLOR_GRAY2BGR)
-            elif target_format == 'hsv':
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-                return cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
-            elif target_format == 'lab':
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-                return cv2.cvtColor(rgb_image, cv2.COLOR_RGB2LAB)
-        
-        # Handle color input (assume RGB)
-        elif current_channels == 3:
-            if target_format == 'rgb':
-                return image
-            elif target_format == 'bgr':
-                return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            elif target_format == 'gray':
-                return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            elif target_format == 'hsv':
-                return cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-            elif target_format == 'lab':
-                return cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-        
-        # Handle RGBA input
-        elif current_channels == 4:
-            if target_format == 'rgb':
-                return cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-            elif target_format == 'bgr':
-                return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-            elif target_format == 'gray':
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-                return cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
-        
-        raise ImageProcessingError(f"Unsupported color format conversion: {current_channels} channels to {target_format}")
     
-    except cv2.error as e:
-        raise ImageProcessingError(f"OpenCV color conversion failed: {str(e)}")
-    except Exception as e:
-        raise ImageProcessingError(f"Color format conversion failed: {str(e)}")
-
-
-def resize_image(image: np.ndarray, 
-                target_size: Optional[Tuple[int, int]] = None,
-                max_dimension: Optional[int] = None,
-                min_dimension: Optional[int] = None,
-                maintain_aspect_ratio: bool = True,
-                interpolation: str = 'lanczos') -> Tuple[np.ndarray, float]:
-    """
-    Resize image with various sizing strategies.
+    def __init__(self):
+        """Initialize image processor."""
+        self.validator = ImageValidator()
     
-    Args:
-        image: Input image array
-        target_size: Exact target size (width, height)
-        max_dimension: Maximum dimension (longest side)
-        min_dimension: Minimum dimension (shortest side)
-        maintain_aspect_ratio: Whether to preserve aspect ratio
-        interpolation: Interpolation method ('lanczos', 'cubic', 'linear', 'nearest')
-    
-    Returns:
-        Tuple of (resized_image, scale_factor)
-    
-    Raises:
-        ImageProcessingError: If resizing fails
-    """
-    try:
+    def resize_image(
+        self,
+        image: np.ndarray,
+        target_size: Optional[Tuple[int, int]] = None,
+        max_size: Optional[int] = None,
+        scale_factor: Optional[float] = None,
+        preserve_aspect: bool = True,
+        method: ResizeMethod = ResizeMethod.LINEAR
+    ) -> np.ndarray:
+        """
+        Resize image with multiple sizing options.
+        
+        Args:
+            image: Input image array
+            target_size: Exact target size as (width, height)
+            max_size: Maximum dimension size (preserves aspect ratio)
+            scale_factor: Scaling factor (e.g., 0.5 for half size)
+            preserve_aspect: Whether to preserve aspect ratio
+            method: Interpolation method for resizing
+            
+        Returns:
+            np.ndarray: Resized image
+            
+        Raises:
+            ValueError: If sizing parameters are invalid
+        """
+        self.validator.validate_image_array(image)
+        
         height, width = image.shape[:2]
-        original_size = (width, height)
         
         # Determine target dimensions
-        if target_size:
+        if target_size is not None:
             target_width, target_height = target_size
-            if not maintain_aspect_ratio:
-                new_size = target_size
+        elif max_size is not None:
+            # Resize to fit within max_size while preserving aspect ratio
+            if width > height:
+                target_width = max_size
+                target_height = int(height * max_size / width)
             else:
-                # Maintain aspect ratio, fit within target size
-                scale = min(target_width / width, target_height / height)
-                new_size = (int(width * scale), int(height * scale))
-        
-        elif max_dimension:
-            current_max = max(width, height)
-            if current_max <= max_dimension:
-                return image.copy(), 1.0
-            
-            scale = max_dimension / current_max
-            new_size = (int(width * scale), int(height * scale))
-        
-        elif min_dimension:
-            current_min = min(width, height)
-            if current_min >= min_dimension:
-                return image.copy(), 1.0
-            
-            scale = min_dimension / current_min
-            new_size = (int(width * scale), int(height * scale))
-        
+                target_height = max_size
+                target_width = int(width * max_size / height)
+        elif scale_factor is not None:
+            target_width = int(width * scale_factor)
+            target_height = int(height * scale_factor)
         else:
-            raise ImageProcessingError("Must specify target_size, max_dimension, or min_dimension")
+            raise ValueError("Must specify target_size, max_size, or scale_factor")
         
-        # Ensure minimum size
-        new_width, new_height = new_size
-        new_width = max(1, new_width)
-        new_height = max(1, new_height)
+        # Ensure minimum dimensions
+        target_width = max(1, target_width)
+        target_height = max(1, target_height)
         
-        # Select interpolation method
-        interpolation_map = {
-            'lanczos': cv2.INTER_LANCZOS4,
-            'cubic': cv2.INTER_CUBIC,
-            'linear': cv2.INTER_LINEAR,
-            'nearest': cv2.INTER_NEAREST,
-            'area': cv2.INTER_AREA
-        }
-        
-        interp_method = interpolation_map.get(interpolation.lower(), cv2.INTER_LANCZOS4)
+        # Skip resizing if dimensions are the same
+        if target_width == width and target_height == height:
+            return image.copy()
         
         # Perform resize
-        resized_image = cv2.resize(image, (new_width, new_height), interpolation=interp_method)
-        
-        # Calculate scale factor
-        scale_factor = new_width / width
-        
-        logger.debug(f"Image resized from {original_size} to ({new_width}, {new_height}), "
-                    f"scale: {scale_factor:.3f}, method: {interpolation}")
-        
-        return resized_image, scale_factor
+        try:
+            resized = cv2.resize(image, (target_width, target_height), interpolation=method.value)
+            return resized
+        except Exception as e:
+            raise ValueError(f"Failed to resize image: {e}")
     
+    def rotate_image(
+        self,
+        image: np.ndarray,
+        angle: float,
+        center: Optional[Tuple[int, int]] = None,
+        scale: float = 1.0,
+        fill_color: Union[int, Tuple[int, int, int]] = 0
+    ) -> np.ndarray:
+        """
+        Rotate image by specified angle.
+        
+        Args:
+            image: Input image array
+            angle: Rotation angle in degrees (positive = counterclockwise)
+            center: Rotation center point (default: image center)
+            scale: Scaling factor to apply during rotation
+            fill_color: Fill color for empty areas
+            
+        Returns:
+            np.ndarray: Rotated image
+        """
+        self.validator.validate_image_array(image)
+        
+        height, width = image.shape[:2]
+        
+        # Use image center if not specified
+        if center is None:
+            center = (width // 2, height // 2)
+        
+        # Get rotation matrix
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, scale)
+        
+        # Perform rotation
+        try:
+            rotated = cv2.warpAffine(
+                image, 
+                rotation_matrix, 
+                (width, height),
+                borderValue=fill_color
+            )
+            return rotated
+        except Exception as e:
+            raise ValueError(f"Failed to rotate image: {e}")
+    
+    def crop_image(
+        self,
+        image: np.ndarray,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        validate_bounds: bool = True
+    ) -> np.ndarray:
+        """
+        Crop image to specified rectangular region.
+        
+        Args:
+            image: Input image array
+            x: Top-left x coordinate
+            y: Top-left y coordinate
+            width: Crop width
+            height: Crop height
+            validate_bounds: Whether to validate crop bounds
+            
+        Returns:
+            np.ndarray: Cropped image
+            
+        Raises:
+            ValueError: If crop bounds are invalid
+        """
+        self.validator.validate_image_array(image)
+        
+        img_height, img_width = image.shape[:2]
+        
+        if validate_bounds:
+            # Validate crop bounds
+            if x < 0 or y < 0:
+                raise ValueError(f"Crop coordinates must be non-negative: ({x}, {y})")
+            
+            if x + width > img_width or y + height > img_height:
+                raise ValueError(f"Crop region exceeds image bounds: ({x}, {y}, {width}, {height})")
+            
+            if width <= 0 or height <= 0:
+                raise ValueError(f"Crop dimensions must be positive: ({width}, {height})")
+        else:
+            # Clamp to image bounds
+            x = max(0, min(x, img_width - 1))
+            y = max(0, min(y, img_height - 1))
+            width = min(width, img_width - x)
+            height = min(height, img_height - y)
+        
+        # Perform crop
+        try:
+            cropped = image[y:y+height, x:x+width].copy()
+            return cropped
+        except Exception as e:
+            raise ValueError(f"Failed to crop image: {e}")
+    
+    def flip_image(self, image: np.ndarray, horizontal: bool = False, vertical: bool = False) -> np.ndarray:
+        """
+        Flip image horizontally and/or vertically.
+        
+        Args:
+            image: Input image array
+            horizontal: Whether to flip horizontally
+            vertical: Whether to flip vertically
+            
+        Returns:
+            np.ndarray: Flipped image
+        """
+        self.validator.validate_image_array(image)
+        
+        result = image.copy()
+        
+        if horizontal:
+            result = cv2.flip(result, 1)
+        
+        if vertical:
+            result = cv2.flip(result, 0)
+        
+        return result
+    
+    def pad_image(
+        self,
+        image: np.ndarray,
+        padding: Union[int, Tuple[int, int], Tuple[int, int, int, int]],
+        fill_color: Union[int, Tuple[int, int, int]] = 0
+    ) -> np.ndarray:
+        """
+        Add padding around image.
+        
+        Args:
+            image: Input image array
+            padding: Padding specification:
+                - int: same padding on all sides
+                - (horizontal, vertical): symmetric padding
+                - (top, right, bottom, left): specific padding per side
+            fill_color: Fill color for padding areas
+            
+        Returns:
+            np.ndarray: Padded image
+        """
+        self.validator.validate_image_array(image)
+        
+        # Parse padding specification
+        if isinstance(padding, int):
+            top = right = bottom = left = padding
+        elif len(padding) == 2:
+            top = bottom = padding[1]
+            left = right = padding[0]
+        elif len(padding) == 4:
+            top, right, bottom, left = padding
+        else:
+            raise ValueError("Padding must be int, (h,v), or (top,right,bottom,left)")
+        
+        # Apply padding
+        try:
+            padded = cv2.copyMakeBorder(
+                image,
+                top, bottom, left, right,
+                cv2.BORDER_CONSTANT,
+                value=fill_color
+            )
+            return padded
+        except Exception as e:
+            raise ValueError(f"Failed to pad image: {e}")
+
+
+class CoordinateTransformer:
+    """
+    Coordinate system transformations for bounding box operations.
+    
+    Provides utilities for converting coordinates between different formats
+    and transforming coordinates through image operations.
+    """
+    
+    @staticmethod
+    def normalize_coordinates(
+        coords: Tuple[float, float, float, float],
+        source_format: str,
+        target_format: str
+    ) -> Tuple[float, float, float, float]:
+        """
+        Convert coordinates between different formats.
+        
+        Args:
+            coords: Coordinate tuple
+            source_format: Source format ('xyxy', 'xywh', 'center_wh')
+            target_format: Target format ('xyxy', 'xywh', 'center_wh')
+            
+        Returns:
+            Tuple[float, float, float, float]: Converted coordinates
+            
+        Raises:
+            ValueError: If format is unsupported
+        """
+        # First convert to xyxy format
+        if source_format == 'xyxy':
+            x1, y1, x2, y2 = coords
+        elif source_format == 'xywh':
+            x, y, w, h = coords
+            x1, y1, x2, y2 = x, y, x + w, y + h
+        elif source_format == 'center_wh':
+            cx, cy, w, h = coords
+            x1, y1, x2, y2 = cx - w/2, cy - h/2, cx + w/2, cy + h/2
+        else:
+            raise ValueError(f"Unsupported source format: {source_format}")
+        
+        # Then convert from xyxy to target format
+        if target_format == 'xyxy':
+            return (x1, y1, x2, y2)
+        elif target_format == 'xywh':
+            return (x1, y1, x2 - x1, y2 - y1)
+        elif target_format == 'center_wh':
+            w, h = x2 - x1, y2 - y1
+            return (x1 + w/2, y1 + h/2, w, h)
+        else:
+            raise ValueError(f"Unsupported target format: {target_format}")
+    
+    @staticmethod
+    def transform_coordinates(
+        coords: Tuple[float, float, float, float],
+        transform_matrix: np.ndarray
+    ) -> Tuple[float, float, float, float]:
+        """
+        Apply transformation matrix to coordinates.
+        
+        Args:
+            coords: Coordinate tuple in xyxy format
+            transform_matrix: 2x3 transformation matrix
+            
+        Returns:
+            Tuple[float, float, float, float]: Transformed coordinates
+        """
+        x1, y1, x2, y2 = coords
+        
+        # Convert corners to homogeneous coordinates
+        corners = np.array([
+            [x1, y1, 1],
+            [x2, y2, 1]
+        ]).T
+        
+        # Apply transformation
+        transformed = transform_matrix @ corners
+        
+        # Extract transformed coordinates
+        tx1, ty1 = transformed[:, 0]
+        tx2, ty2 = transformed[:, 1]
+        
+        # Ensure proper ordering
+        min_x, max_x = min(tx1, tx2), max(tx1, tx2)
+        min_y, max_y = min(ty1, ty2), max(ty1, ty2)
+        
+        return (min_x, min_y, max_x, max_y)
+    
+    @staticmethod
+    def scale_coordinates(
+        coords: Tuple[float, float, float, float],
+        scale_x: float,
+        scale_y: float
+    ) -> Tuple[float, float, float, float]:
+        """
+        Scale coordinates by given factors.
+        
+        Args:
+            coords: Coordinate tuple in xyxy format
+            scale_x: Horizontal scaling factor
+            scale_y: Vertical scaling factor
+            
+        Returns:
+            Tuple[float, float, float, float]: Scaled coordinates
+        """
+        x1, y1, x2, y2 = coords
+        return (x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y)
+
+
+class ImageMemoryManager:
+    """
+    Memory optimization utilities for large image processing.
+    
+    Provides memory-efficient operations for handling large images and
+    batch processing scenarios.
+    """
+    
+    @staticmethod
+    def estimate_memory_usage(width: int, height: int, channels: int = 3, dtype: str = "uint8") -> float:
+        """
+        Estimate memory usage for image array.
+        
+        Args:
+            width: Image width
+            height: Image height
+            channels: Number of channels
+            dtype: Data type
+            
+        Returns:
+            float: Estimated memory usage in MB
+        """
+        dtype_sizes = {
+            'uint8': 1,
+            'uint16': 2,
+            'float32': 4,
+            'float64': 8
+        }
+        
+        bytes_per_pixel = dtype_sizes.get(dtype, 1) * channels
+        total_bytes = width * height * bytes_per_pixel
+        return total_bytes / (1024 * 1024)  # Convert to MB
+    
+    @staticmethod
+    def optimize_for_memory(image: np.ndarray, max_dimension: int = 2048) -> np.ndarray:
+        """
+        Optimize image for memory usage by resizing if necessary.
+        
+        Args:
+            image: Input image array
+            max_dimension: Maximum allowed dimension
+            
+        Returns:
+            np.ndarray: Memory-optimized image
+        """
+        height, width = image.shape[:2]
+        
+        if max(width, height) <= max_dimension:
+            return image
+        
+        # Calculate scaling factor
+        scale = max_dimension / max(width, height)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        
+        # Resize image
+        processor = ImageProcessor()
+        return processor.resize_image(image, target_size=(new_width, new_height))
+
+
+# Convenience functions for common operations
+def load_image(
+    source: Union[str, Path, bytes, np.ndarray],
+    color_mode: str = "rgb",
+    max_size_mb: float = 50
+) -> np.ndarray:
+    """
+    Load image from various sources with automatic format detection.
+    
+    Args:
+        source: Image source (file path, bytes, or array)
+        color_mode: Target color mode ('rgb', 'bgr', 'gray')
+        max_size_mb: Maximum file size limit in MB
+        
+    Returns:
+        np.ndarray: Loaded image array
+        
+    Example:
+        >>> image = load_image("document.jpg", color_mode="rgb")
+        >>> image = load_image(image_bytes, color_mode="gray")
+    """
+    loader = ImageLoader(max_size_mb=max_size_mb)
+    
+    if isinstance(source, (str, Path)):
+        return loader.load_from_file(source, color_mode)
+    elif isinstance(source, bytes):
+        return loader.load_from_bytes(source, color_mode)
+    elif isinstance(source, np.ndarray):
+        return loader.load_from_array(source)
+    else:
+        raise ValueError(f"Unsupported image source type: {type(source)}")
+
+
+def save_image(
+    image: np.ndarray,
+    file_path: Union[str, Path],
+    quality: int = 95,
+    optimize: bool = True
+) -> bool:
+    """
+    Save image array to file with format optimization.
+    
+    Args:
+        image: Image array to save
+        file_path: Output file path
+        quality: JPEG quality (1-100)
+        optimize: Enable format-specific optimizations
+        
+    Returns:
+        bool: True if save successful
+        
+    Raises:
+        ValueError: If image or path is invalid
+        IOError: If file cannot be written
+    """
+    ImageValidator.validate_image_array(image)
+    
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Determine format from extension
+        ext = file_path.suffix.lower()
+        
+        if ext in ['.jpg', '.jpeg']:
+            # JPEG format
+            if len(image.shape) == 3:
+                # Convert RGB to BGR for OpenCV
+                save_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            else:
+                save_image = image
+            
+            cv2.imwrite(str(file_path), save_image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            
+        elif ext == '.png':
+            # PNG format
+            if len(image.shape) == 3:
+                save_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            else:
+                save_image = image
+            
+            compression_level = 6 if optimize else 1
+            cv2.imwrite(str(file_path), save_image, [cv2.IMWRITE_PNG_COMPRESSION, compression_level])
+            
+        elif ext in ['.tiff', '.tif']:
+            # TIFF format - use PIL for better support
+            if len(image.shape) == 2:
+                mode = 'L'
+            else:
+                mode = 'RGB'
+            
+            pil_image = Image.fromarray(image, mode=mode)
+            pil_image.save(file_path, optimize=optimize)
+            
+        else:
+            # Generic format - use OpenCV
+            if len(image.shape) == 3:
+                save_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            else:
+                save_image = image
+            
+            cv2.imwrite(str(file_path), save_image)
+        
+        return True
+        
     except Exception as e:
-        raise ImageProcessingError(f"Image resizing failed: {str(e)}")
+        raise IOError(f"Failed to save image: {e}")
 
 
-def rotate_image(image: np.ndarray, 
-                angle: float, 
-                background_color: Tuple[int, int, int] = (255, 255, 255),
-                crop_to_original: bool = False) -> np.ndarray:
+def resize_image(
+    image: np.ndarray,
+    target_size: Optional[Tuple[int, int]] = None,
+    max_size: Optional[int] = None,
+    scale_factor: Optional[float] = None,
+    preserve_aspect: bool = True,
+    method: str = "linear"
+) -> np.ndarray:
+    """
+    Resize image with intelligent dimension handling.
+    
+    Args:
+        image: Input image array
+        target_size: Exact target size as (width, height)
+        max_size: Maximum dimension (preserves aspect ratio)
+        scale_factor: Scaling factor (e.g., 0.5 for half size)
+        preserve_aspect: Whether to preserve aspect ratio
+        method: Interpolation method ('nearest', 'linear', 'cubic', 'lanczos', 'area')
+        
+    Returns:
+        np.ndarray: Resized image
+        
+    Example:
+        >>> resized = resize_image(image, max_size=1024)
+        >>> scaled = resize_image(image, scale_factor=0.5)
+    """
+    # Convert method string to enum
+    method_map = {
+        'nearest': ResizeMethod.NEAREST,
+        'linear': ResizeMethod.LINEAR,
+        'cubic': ResizeMethod.CUBIC,
+        'lanczos': ResizeMethod.LANCZOS,
+        'area': ResizeMethod.AREA
+    }
+    
+    resize_method = method_map.get(method.lower(), ResizeMethod.LINEAR)
+    
+    processor = ImageProcessor()
+    return processor.resize_image(
+        image=image,
+        target_size=target_size,
+        max_size=max_size,
+        scale_factor=scale_factor,
+        preserve_aspect=preserve_aspect,
+        method=resize_method
+    )
+
+
+def crop_image(
+    image: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    format: str = "xyxy"
+) -> np.ndarray:
+    """
+    Crop image using bounding box coordinates.
+    
+    Args:
+        image: Input image array
+        bbox: Bounding box coordinates
+        format: Coordinate format ('xyxy', 'xywh')
+        
+    Returns:
+        np.ndarray: Cropped image
+        
+    Example:
+        >>> cropped = crop_image(image, (10, 20, 100, 80), format="xyxy")
+    """
+    processor = ImageProcessor()
+    
+    if format == "xyxy":
+        x1, y1, x2, y2 = bbox
+        x, y, width, height = x1, y1, x2 - x1, y2 - y1
+    elif format == "xywh":
+        x, y, width, height = bbox
+    else:
+        raise ValueError(f"Unsupported coordinate format: {format}")
+    
+    return processor.crop_image(image, x, y, width, height)
+
+
+def rotate_image(
+    image: np.ndarray,
+    angle: float,
+    center: Optional[Tuple[int, int]] = None,
+    fill_color: Union[int, Tuple[int, int, int]] = 0
+) -> np.ndarray:
     """
     Rotate image by specified angle.
     
     Args:
         image: Input image array
-        angle: Rotation angle in degrees (positive = clockwise)
-        background_color: Fill color for areas outside original image
-        crop_to_original: Whether to crop result to original size
-    
+        angle: Rotation angle in degrees (positive = counterclockwise)
+        center: Rotation center (default: image center)
+        fill_color: Fill color for empty areas
+        
     Returns:
-        Rotated image array
-    
-    Raises:
-        ImageProcessingError: If rotation fails
+        np.ndarray: Rotated image
+        
+    Example:
+        >>> rotated = rotate_image(image, 90)  # 90 degrees counterclockwise
     """
-    try:
-        height, width = image.shape[:2]
-        center = (width // 2, height // 2)
-        
-        # Calculate rotation matrix
-        rotation_matrix = cv2.getRotationMatrix2D(center, -angle, 1.0)
-        
-        if crop_to_original:
-            # Rotate and crop to original size
-            rotated = cv2.warpAffine(image, rotation_matrix, (width, height), 
-                                   borderValue=background_color)
-        else:
-            # Calculate new image dimensions to fit entire rotated image
-            cos_angle = abs(rotation_matrix[0, 0])
-            sin_angle = abs(rotation_matrix[0, 1])
-            
-            new_width = int((height * sin_angle) + (width * cos_angle))
-            new_height = int((height * cos_angle) + (width * sin_angle))
-            
-            # Adjust rotation matrix for new center
-            rotation_matrix[0, 2] += (new_width / 2) - center[0]
-            rotation_matrix[1, 2] += (new_height / 2) - center[1]
-            
-            rotated = cv2.warpAffine(image, rotation_matrix, (new_width, new_height),
-                                   borderValue=background_color)
-        
-        logger.debug(f"Image rotated by {angle} degrees")
-        return rotated
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Image rotation failed: {str(e)}")
+    processor = ImageProcessor()
+    return processor.rotate_image(image, angle, center, fill_color=fill_color)
 
 
-def detect_skew_angle(image: np.ndarray, accuracy: str = 'medium') -> float:
+def validate_image(
+    image_source: Union[str, Path, np.ndarray],
+    max_size_mb: float = 50,
+    max_dimension: int = 8192,
+    min_dimension: int = 32
+) -> bool:
     """
-    Detect document skew angle using Hough line detection.
+    Validate image source and properties.
     
     Args:
-        image: Input image (preferably grayscale)
-        accuracy: Detection accuracy ('low', 'medium', 'high')
-    
-    Returns:
-        Skew angle in degrees (-45 to 45)
-    
-    Raises:
-        ImageProcessingError: If skew detection fails
-    """
-    try:
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Apply edge detection
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        
-        # Set parameters based on accuracy
-        if accuracy == 'low':
-            rho, theta, threshold = 1, np.pi/180, max(100, min(gray.shape)//10)
-        elif accuracy == 'medium':
-            rho, theta, threshold = 1, np.pi/360, max(150, min(gray.shape)//8)
-        else:  # high
-            rho, theta, threshold = 1, np.pi/720, max(200, min(gray.shape)//6)
-        
-        # Detect lines using Hough transform
-        lines = cv2.HoughLines(edges, rho, theta, threshold)
-        
-        if lines is None or len(lines) == 0:
-            logger.debug("No lines detected for skew analysis")
-            return 0.0
-        
-        # Calculate angles of detected lines
-        angles = []
-        for line in lines:
-            rho, theta = line[0]
-            angle = theta * 180 / np.pi
-            
-            # Convert to angle range -45 to 45
-            if angle > 90:
-                angle = angle - 180
-            elif angle > 45:
-                angle = angle - 90
-            elif angle < -45:
-                angle = angle + 90
-            
-            # Filter out near-vertical and near-horizontal lines
-            if abs(angle) > 2 and abs(angle) < 88:
-                angles.append(angle)
-        
-        if not angles:
-            logger.debug("No valid angles found for skew detection")
-            return 0.0
-        
-        # Calculate median angle (more robust than mean)
-        skew_angle = float(np.median(angles))
-        
-        logger.debug(f"Detected skew angle: {skew_angle:.2f} degrees")
-        return skew_angle
-    
-    except Exception as e:
-        logger.warning(f"Skew detection failed: {str(e)}")
-        return 0.0
-
-
-def deskew_image(image: np.ndarray, 
-                angle: Optional[float] = None,
-                background_color: Tuple[int, int, int] = (255, 255, 255)) -> Tuple[np.ndarray, float]:
-    """
-    Automatically detect and correct document skew.
-    
-    Args:
-        image: Input image array
-        angle: Specific angle to correct (if None, auto-detect)
-        background_color: Fill color for rotation
-    
-    Returns:
-        Tuple of (deskewed_image, correction_angle)
-    
-    Raises:
-        ImageProcessingError: If deskewing fails
-    """
-    try:
-        if angle is None:
-            angle = detect_skew_angle(image, accuracy='medium')
-        
-        # Only correct if angle is significant
-        if abs(angle) < 0.5:
-            logger.debug("Skew angle too small, no correction needed")
-            return image.copy(), 0.0
-        
-        # Rotate to correct skew
-        deskewed = rotate_image(image, angle, background_color, crop_to_original=True)
-        
-        logger.debug(f"Image deskewed by {angle:.2f} degrees")
-        return deskewed, angle
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Deskewing failed: {str(e)}")
-
-
-def crop_image(image: np.ndarray, 
-              bbox: Tuple[int, int, int, int],
-              padding: int = 0) -> np.ndarray:
-    """
-    Crop image to specified bounding box with optional padding.
-    
-    Args:
-        image: Input image array
-        bbox: Bounding box (x, y, width, height)
-        padding: Padding around crop area
-    
-    Returns:
-        Cropped image array
-    
-    Raises:
-        ImageProcessingError: If cropping fails
-    """
-    try:
-        height, width = image.shape[:2]
-        x, y, w, h = bbox
-        
-        # Add padding and ensure bounds
-        x1 = max(0, x - padding)
-        y1 = max(0, y - padding)
-        x2 = min(width, x + w + padding)
-        y2 = min(height, y + h + padding)
-        
-        if x1 >= x2 or y1 >= y2:
-            raise ImageProcessingError("Invalid crop coordinates")
-        
-        cropped = image[y1:y2, x1:x2]
-        
-        logger.debug(f"Image cropped to {cropped.shape[:2]} from bbox {bbox}")
-        return cropped
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Image cropping failed: {str(e)}")
-
-
-def enhance_contrast(image: np.ndarray, 
-                    method: str = 'clahe',
-                    strength: float = 1.0) -> np.ndarray:
-    """
-    Enhance image contrast using various methods.
-    
-    Args:
-        image: Input image array
-        method: Enhancement method ('clahe', 'histogram_eq', 'gamma', 'adaptive')
-        strength: Enhancement strength (0.5 to 2.0)
-    
-    Returns:
-        Enhanced image array
-    
-    Raises:
-        ImageProcessingError: If enhancement fails
-    """
-    try:
-        strength = max(0.5, min(2.0, strength))
-        
-        # Convert to grayscale for processing if needed
-        is_color = len(image.shape) == 3 and image.shape[2] > 1
-        
-        if method == 'clahe':
-            # Contrast Limited Adaptive Histogram Equalization
-            clip_limit = 2.0 * strength
-            tile_size = (8, 8)
-            
-            if is_color:
-                # Apply CLAHE to L channel in LAB color space
-                lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_size)
-                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-                enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-            else:
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_size)
-                enhanced = clahe.apply(image)
-        
-        elif method == 'histogram_eq':
-            # Global histogram equalization
-            if is_color:
-                lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-                lab[:, :, 0] = cv2.equalizeHist(lab[:, :, 0])
-                enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-            else:
-                enhanced = cv2.equalizeHist(image)
-        
-        elif method == 'gamma':
-            # Gamma correction
-            gamma = 1.0 / strength
-            enhanced = np.power(image / 255.0, gamma) * 255.0
-            enhanced = enhanced.astype(np.uint8)
-        
-        elif method == 'adaptive':
-            # Adaptive contrast enhancement
-            if is_color:
-                enhanced = image.copy()
-                for i in range(3):
-                    channel = enhanced[:, :, i]
-                    # Apply adaptive histogram equalization per channel
-                    clahe = cv2.createCLAHE(clipLimit=2.0 * strength, tileGridSize=(8, 8))
-                    enhanced[:, :, i] = clahe.apply(channel)
-            else:
-                clahe = cv2.createCLAHE(clipLimit=2.0 * strength, tileGridSize=(8, 8))
-                enhanced = clahe.apply(image)
-        
-        else:
-            raise ImageProcessingError(f"Unknown contrast enhancement method: {method}")
-        
-        logger.debug(f"Contrast enhanced using {method} method, strength: {strength}")
-        return enhanced
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Contrast enhancement failed: {str(e)}")
-
-
-def save_image(image: np.ndarray, 
-              output_path: Union[str, Path],
-              quality: int = 95,
-              format: Optional[str] = None) -> Path:
-    """
-    Save image to file with specified quality and format.
-    
-    Args:
-        image: Image array to save
-        output_path: Output file path
-        quality: JPEG quality (1-100)
-        format: Output format (auto-detected from extension if None)
-    
-    Returns:
-        Path object of saved file
-    
-    Raises:
-        ImageProcessingError: If saving fails
-    """
-    try:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Determine format
-        if format is None:
-            format = output_path.suffix.lower().lstrip('.')
-        
-        format = format.lower()
-        
-        # Ensure image is in correct format for saving
-        if len(image.shape) == 3:
-            # Convert RGB to BGR for OpenCV
-            save_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        else:
-            save_image = image
-        
-        # Set compression parameters
-        if format in ['jpg', 'jpeg']:
-            params = [cv2.IMWRITE_JPEG_QUALITY, quality]
-        elif format == 'png':
-            compression = max(0, min(9, int((100 - quality) / 10)))
-            params = [cv2.IMWRITE_PNG_COMPRESSION, compression]
-        elif format in ['tif', 'tiff']:
-            params = [cv2.IMWRITE_TIFF_COMPRESSION, 1]  # LZW compression
-        else:
-            params = []
-        
-        # Save image
-        success = cv2.imwrite(str(output_path), save_image, params)
-        
-        if not success:
-            raise ImageProcessingError(f"Failed to save image to {output_path}")
-        
-        logger.debug(f"Image saved to {output_path}, format: {format}, quality: {quality}")
-        return output_path
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Image saving failed: {str(e)}")
-
-
-def image_to_base64(image: np.ndarray, format: str = 'png') -> str:
-    """
-    Convert image array to base64 string.
-    
-    Args:
-        image: Image array
-        format: Output format ('png', 'jpg')
-    
-    Returns:
-        Base64 encoded string
-    
-    Raises:
-        ImageProcessingError: If conversion fails
-    """
-    try:
-        # Convert to PIL Image
-        if len(image.shape) == 3:
-            pil_image = Image.fromarray(image, 'RGB')
-        else:
-            pil_image = Image.fromarray(image, 'L')
-        
-        # Convert to bytes
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format=format.upper())
-        image_bytes = buffer.getvalue()
-        
-        # Encode to base64
-        base64_string = base64.b64encode(image_bytes).decode('utf-8')
-        
-        return base64_string
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Base64 conversion failed: {str(e)}")
-
-
-def base64_to_image(base64_string: str) -> np.ndarray:
-    """
-    Convert base64 string to image array.
-    
-    Args:
-        base64_string: Base64 encoded image string
-    
-    Returns:
-        Image array
-    
-    Raises:
-        ImageLoadError: If conversion fails
-    """
-    try:
-        # Decode base64 to bytes
-        image_bytes = base64.b64decode(base64_string)
-        
-        # Load image from bytes
-        image, _ = _load_from_bytes(image_bytes)
-        
-        return image
-    
-    except Exception as e:
-        raise ImageLoadError(f"Base64 to image conversion failed: {str(e)}")
-
-
-def calculate_image_quality_metrics(image: np.ndarray) -> Dict[str, float]:
-    """
-    Calculate comprehensive image quality metrics for OCR preprocessing decisions.
-    
-    Args:
-        image: Input image array
-    
-    Returns:
-        Dictionary of quality metrics (0.0 to 1.0 scale)
-    
-    Raises:
-        ImageProcessingError: If analysis fails
-    """
-    try:
-        # Convert to grayscale for analysis
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
-        
-        metrics = {}
-        
-        # 1. Sharpness (Laplacian variance)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        metrics['sharpness'] = min(1.0, laplacian_var / 1000.0)  # Normalize
-        
-        # 2. Contrast (RMS contrast)
-        contrast = gray.std()
-        metrics['contrast'] = min(1.0, contrast / 128.0)  # Normalize to 0-1
-        
-        # 3. Brightness (mean intensity)
-        brightness = gray.mean() / 255.0
-        # Optimal brightness is around 0.4-0.6, penalize extremes
-        if brightness < 0.2 or brightness > 0.8:
-            metrics['brightness'] = 0.3
-        elif 0.4 <= brightness <= 0.6:
-            metrics['brightness'] = 1.0
-        else:
-            metrics['brightness'] = 0.7
-        
-        # 4. Noise level (using standard deviation of smoothed vs original)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        noise_level = np.std(gray.astype(float) - blurred.astype(float))
-        metrics['noise'] = max(0.0, 1.0 - (noise_level / 50.0))  # Lower noise = higher score
-        
-        # 5. Dynamic range
-        dynamic_range = (gray.max() - gray.min()) / 255.0
-        metrics['dynamic_range'] = dynamic_range
-        
-        # 6. Edge density (indicator of text content)
-        edges = cv2.Canny(gray, 50, 150)
-        edge_density = np.sum(edges > 0) / edges.size
-        metrics['edge_density'] = min(1.0, edge_density * 10.0)  # Normalize
-        
-        # 7. Overall quality score (weighted combination)
-        weights = {
-            'sharpness': 0.25,
-            'contrast': 0.25, 
-            'brightness': 0.15,
-            'noise': 0.15,
-            'dynamic_range': 0.10,
-            'edge_density': 0.10
-        }
-        
-        overall_score = sum(metrics[key] * weights[key] for key in weights)
-        metrics['overall'] = overall_score
-        
-        logger.debug(f"Image quality metrics calculated: overall={overall_score:.3f}")
-        return metrics
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Quality metrics calculation failed: {str(e)}")
-
-
-def detect_text_regions_simple(image: np.ndarray, 
-                              min_area: int = 100,
-                              aspect_ratio_range: Tuple[float, float] = (0.1, 10.0)) -> List[Tuple[int, int, int, int]]:
-    """
-    Simple text region detection using morphological operations.
-    
-    Args:
-        image: Input image array
-        min_area: Minimum area for text regions
-        aspect_ratio_range: Valid aspect ratio range (min, max)
-    
-    Returns:
-        List of bounding boxes (x, y, width, height)
-    
-    Raises:
-        ImageProcessingError: If detection fails
-    """
-    try:
-        # Convert to grayscale
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Apply morphological operations to connect text components
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        
-        # Binary threshold
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # Morphological operations
-        morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-        morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel, iterations=1)
-        
-        # Find contours
-        contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Filter contours based on area and aspect ratio
-        text_regions = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            area = w * h
-            aspect_ratio = w / h if h > 0 else 0
-            
-            if (area >= min_area and 
-                aspect_ratio_range[0] <= aspect_ratio <= aspect_ratio_range[1]):
-                text_regions.append((x, y, w, h))
-        
-        logger.debug(f"Detected {len(text_regions)} potential text regions")
-        return text_regions
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Text region detection failed: {str(e)}")
-
-
-def normalize_image_for_ocr(image: np.ndarray) -> np.ndarray:
-    """
-    Normalize image for optimal OCR performance.
-    
-    Args:
-        image: Input image array
-    
-    Returns:
-        Normalized image optimized for OCR
-    
-    Raises:
-        ImageProcessingError: If normalization fails
-    """
-    try:
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Apply Gaussian blur to reduce noise
-        denoised = cv2.GaussianBlur(gray, (3, 3), 0)
-        
-        # Apply adaptive thresholding for better text separation
-        normalized = cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 11, 2
-        )
-        
-        # Apply morphological operations to clean up
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        normalized = cv2.morphologyEx(normalized, cv2.MORPH_CLOSE, kernel, iterations=1)
-        
-        logger.debug("Image normalized for OCR processing")
-        return normalized
-    
-    except Exception as e:
-        raise ImageProcessingError(f"OCR normalization failed: {str(e)}")
-
-
-def create_image_thumbnail(image: np.ndarray, 
-                         max_size: int = 256,
-                         quality: int = 85) -> bytes:
-    """
-    Create compressed thumbnail for image preview.
-    
-    Args:
-        image: Input image array
-        max_size: Maximum dimension for thumbnail
-        quality: JPEG compression quality
-    
-    Returns:
-        Thumbnail as JPEG bytes
-    
-    Raises:
-        ImageProcessingError: If thumbnail creation fails
-    """
-    try:
-        # Resize image maintaining aspect ratio
-        thumbnail, _ = resize_image(image, max_dimension=max_size)
-        
-        # Convert to PIL for JPEG compression
-        if len(thumbnail.shape) == 3:
-            pil_image = Image.fromarray(thumbnail, 'RGB')
-        else:
-            pil_image = Image.fromarray(thumbnail, 'L')
-        
-        # Save to bytes with JPEG compression
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format='JPEG', quality=quality, optimize=True)
-        thumbnail_bytes = buffer.getvalue()
-        
-        logger.debug(f"Thumbnail created: {len(thumbnail_bytes)} bytes")
-        return thumbnail_bytes
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Thumbnail creation failed: {str(e)}")
-
-
-def batch_process_images(image_paths: List[Union[str, Path]], 
-                        processing_function,
-                        output_dir: Optional[Union[str, Path]] = None,
-                        max_workers: int = 4,
-                        **kwargs) -> List[Dict[str, Any]]:
-    """
-    Process multiple images in parallel with progress tracking.
-    
-    Args:
-        image_paths: List of image file paths
-        processing_function: Function to apply to each image
-        output_dir: Directory for processed images (optional)
-        max_workers: Number of parallel workers
-        **kwargs: Arguments to pass to processing function
-    
-    Returns:
-        List of processing results with metadata
-    
-    Raises:
-        ImageProcessingError: If batch processing fails
-    """
-    try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import time
-        
-        results = []
-        
-        def process_single_image(image_path):
-            start_time = time.time()
-            try:
-                # Load image
-                image, metadata = load_image(image_path)
-                
-                # Apply processing function
-                processed_result = processing_function(image, **kwargs)
-                
-                # Save if output directory specified
-                if output_dir:
-                    output_path = Path(output_dir) / Path(image_path).name
-                    if isinstance(processed_result, np.ndarray):
-                        save_image(processed_result, output_path)
-                
-                processing_time = time.time() - start_time
-                
-                return {
-                    'path': str(image_path),
-                    'status': 'success',
-                    'processing_time': processing_time,
-                    'metadata': metadata,
-                    'result': processed_result
-                }
-                
-            except Exception as e:
-                processing_time = time.time() - start_time
-                return {
-                    'path': str(image_path),
-                    'status': 'error',
-                    'processing_time': processing_time,
-                    'error': str(e)
-                }
-        
-        # Process images in parallel
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_path = {
-                executor.submit(process_single_image, path): path 
-                for path in image_paths
-            }
-            
-            for future in as_completed(future_to_path):
-                result = future.result()
-                results.append(result)
-                
-                # Log progress
-                completed = len(results)
-                total = len(image_paths)
-                if result['status'] == 'success':
-                    logger.info(f"Processed {completed}/{total}: {result['path']}")
-                else:
-                    logger.error(f"Failed {completed}/{total}: {result['path']} - {result['error']}")
-        
-        successful = len([r for r in results if r['status'] == 'success'])
-        logger.info(f"Batch processing completed: {successful}/{len(image_paths)} successful")
-        
-        return results
-    
-    except Exception as e:
-        raise ImageProcessingError(f"Batch processing failed: {str(e)}")
-
-
-def validate_image_for_ocr(image: np.ndarray, metadata: ImageMetadata) -> Tuple[bool, List[str]]:
-    """
-    Validate if image is suitable for OCR processing.
-    
-    Args:
-        image: Image array to validate
-        metadata: Image metadata
-    
-    Returns:
-        Tuple of (is_valid, list_of_issues)
-    """
-    issues = []
-    
-    # Check minimum dimensions
-    if metadata.width < 64 or metadata.height < 64:
-        issues.append(f"Image too small: {metadata.width}x{metadata.height} (minimum 64x64)")
-    
-    # Check maximum dimensions
-    if metadata.total_pixels > 50_000_000:  # ~50MP
-        issues.append(f"Image too large: {metadata.total_pixels} pixels (maximum 50MP)")
-    
-    # Check aspect ratio
-    if metadata.aspect_ratio > 20 or metadata.aspect_ratio < 0.05:
-        issues.append(f"Extreme aspect ratio: {metadata.aspect_ratio:.2f}")
-    
-    # Check if image is completely black or white
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    else:
-        gray = image
-    
-    mean_intensity = gray.mean()
-    if mean_intensity < 10:
-        issues.append("Image appears to be mostly black")
-    elif mean_intensity > 245:
-        issues.append("Image appears to be mostly white")
-    
-    # Check dynamic range
-    intensity_range = gray.max() - gray.min()
-    if intensity_range < 50:
-        issues.append(f"Low dynamic range: {intensity_range} (may need contrast enhancement)")
-    
-    is_valid = len(issues) == 0
-    
-    if not is_valid:
-        logger.warning(f"Image validation issues: {', '.join(issues)}")
-    
-    return is_valid, issues
-
-
-# Convenience functions and constants
-SUPPORTED_IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp']
-
-def is_supported_format(file_path: Union[str, Path]) -> bool:
-    """Check if file format is supported for image processing."""
-    return Path(file_path).suffix.lower() in SUPPORTED_IMAGE_FORMATS
-
-
-def get_optimal_resize_dimensions(current_width: int, 
-                                current_height: int,
-                                target_dpi: int = 300,
-                                max_dimension: int = 2048) -> Tuple[int, int]:
-    """
-    Calculate optimal resize dimensions for OCR processing.
-    
-    Args:
-        current_width: Current image width
-        current_height: Current image height
-        target_dpi: Target DPI for OCR
+        image_source: Image file path or array
+        max_size_mb: Maximum file size in MB
         max_dimension: Maximum allowed dimension
-    
+        min_dimension: Minimum allowed dimension
+        
     Returns:
-        Tuple of (optimal_width, optimal_height)
+        bool: True if image is valid
+        
+    Raises:
+        ValueError: If image is invalid
+        
+    Example:
+        >>> is_valid = validate_image("document.jpg", max_size_mb=10)
     """
-    # Calculate scale factor based on target DPI
-    # Assume current image is 150 DPI if unknown
-    current_dpi = 150
-    scale_factor = target_dpi / current_dpi
+    validator = ImageValidator()
     
-    new_width = int(current_width * scale_factor)
-    new_height = int(current_height * scale_factor)
+    if isinstance(image_source, (str, Path)):
+        # Validate file
+        validator.validate_file_path(image_source)
+        validator.validate_file_size(image_source, max_size_mb)
+        
+        # Load and validate dimensions
+        with Image.open(image_source) as img:
+            validator.validate_dimensions(img.width, img.height, max_dimension, min_dimension)
     
-    # Constrain to maximum dimension
-    max_current = max(new_width, new_height)
-    if max_current > max_dimension:
-        constraint_scale = max_dimension / max_current
-        new_width = int(new_width * constraint_scale)
-        new_height = int(new_height * constraint_scale)
+    elif isinstance(image_source, np.ndarray):
+        # Validate array
+        validator.validate_image_array(image_source)
+        
+        height, width = image_source.shape[:2]
+        validator.validate_dimensions(width, height, max_dimension, min_dimension)
     
-    return new_width, new_height
+    else:
+        raise ValueError(f"Unsupported image source type: {type(image_source)}")
+    
+    return True
 
 
-# Export all public functions and classes
+def get_image_properties(image_source: Union[str, Path, np.ndarray]) -> ImageProperties:
+    """
+    Extract comprehensive image properties and metadata.
+    
+    Args:
+        image_source: Image file path or array
+        
+    Returns:
+        ImageProperties: Complete image property information
+        
+    Example:
+        >>> props = get_image_properties("document.jpg")
+        >>> print(f"Size: {props.width}x{props.height}, Format: {props.format}")
+    """
+    if isinstance(image_source, (str, Path)):
+        file_path = Path(image_source)
+        
+        # Get file size
+        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        
+        # Open with PIL to get metadata
+        with Image.open(file_path) as img:
+            width, height = img.size
+            
+            # Determine format
+            format_map = {
+                'JPEG': ImageFormat.JPEG,
+                'PNG': ImageFormat.PNG,
+                'TIFF': ImageFormat.TIFF,
+                'BMP': ImageFormat.BMP,
+                'WEBP': ImageFormat.WEBP
+            }
+            img_format = format_map.get(img.format, ImageFormat.JPEG)
+            
+            # Determine channels and color space
+            if img.mode == 'L':
+                channels = 1
+                color_space = ColorSpace.GRAY
+            elif img.mode == 'RGB':
+                channels = 3
+                color_space = ColorSpace.RGB
+            elif img.mode == 'RGBA':
+                channels = 4
+                color_space = ColorSpace.RGB
+            else:
+                channels = 3
+                color_space = ColorSpace.RGB
+            
+            # Get DPI if available
+            dpi = img.info.get('dpi', None)
+            
+            return ImageProperties(
+                width=width,
+                height=height,
+                channels=channels,
+                dtype='uint8',
+                format=img_format,
+                color_space=color_space,
+                file_size_mb=file_size_mb,
+                dpi=dpi,
+                has_transparency=(img.mode == 'RGBA')
+            )
+    
+    elif isinstance(image_source, np.ndarray):
+        height, width = image_source.shape[:2]
+        channels = image_source.shape[2] if len(image_source.shape) == 3 else 1
+        
+        # Determine color space
+        if channels == 1:
+            color_space = ColorSpace.GRAY
+        else:
+            color_space = ColorSpace.RGB  # Assume RGB for multi-channel
+        
+        return ImageProperties(
+            width=width,
+            height=height,
+            channels=channels,
+            dtype=str(image_source.dtype),
+            format=ImageFormat.JPEG,  # Unknown format for arrays
+            color_space=color_space,
+            has_transparency=(channels == 4)
+        )
+    
+    else:
+        raise ValueError(f"Unsupported image source type: {type(image_source)}")
+
+
+def normalize_coordinates(
+    coords: Tuple[float, float, float, float],
+    source_format: str,
+    target_format: str
+) -> Tuple[float, float, float, float]:
+    """
+    Convert coordinates between different formats.
+    
+    Args:
+        coords: Coordinate tuple
+        source_format: Source format ('xyxy', 'xywh', 'center_wh')
+        target_format: Target format ('xyxy', 'xywh', 'center_wh')
+        
+    Returns:
+        Tuple[float, float, float, float]: Converted coordinates
+        
+    Example:
+        >>> xyxy_coords = normalize_coordinates((10, 20, 50, 30), "xywh", "xyxy")
+        >>> # Converts (x, y, width, height) to (x1, y1, x2, y2)
+    """
+    return CoordinateTransformer.normalize_coordinates(coords, source_format, target_format)
+
+
+def estimate_processing_memory(width: int, height: int, channels: int = 3) -> float:
+    """
+    Estimate memory usage for image processing operations.
+    
+    Args:
+        width: Image width
+        height: Image height
+        channels: Number of channels
+        
+    Returns:
+        float: Estimated memory usage in MB
+        
+    Example:
+        >>> memory_mb = estimate_processing_memory(1920, 1080, 3)
+        >>> print(f"Estimated memory usage: {memory_mb:.1f} MB")
+    """
+    return ImageMemoryManager.estimate_memory_usage(width, height, channels)
+
+
 __all__ = [
-    # Core classes
-    'ImageMetadata',
-    'ImageLoadError', 
-    'ImageProcessingError',
+    # Classes
+    'ImageLoader',
+    'ImageProcessor',
+    'ImageValidator',
+    'CoordinateTransformer',
+    'ImageMemoryManager',
+    'ImageProperties',
     
-    # Loading and conversion
+    # Enums
+    'ImageFormat',
+    'ColorSpace',
+    'ResizeMethod',
+    
+    # Convenience functions
     'load_image',
-    'convert_color_format',
-    'image_to_base64',
-    'base64_to_image',
-    
-    # Geometric operations
-    'resize_image',
-    'rotate_image',
-    'crop_image',
-    'deskew_image',
-    'detect_skew_angle',
-    
-    # Enhancement operations
-    'enhance_contrast',
-    'normalize_image_for_ocr',
-    
-    # Analysis and detection
-    'calculate_image_quality_metrics',
-    'detect_text_regions_simple',
-    'validate_image_for_ocr',
-    
-    # I/O operations
     'save_image',
-    'create_image_thumbnail',
-    
-    # Batch processing
-    'batch_process_images',
-    
-    # Utility functions
-    'is_supported_format',
-    'get_optimal_resize_dimensions',
-    'SUPPORTED_IMAGE_FORMATS'
+    'resize_image',
+    'crop_image',
+    'rotate_image',
+    'validate_image',
+    'get_image_properties',
+    'normalize_coordinates',
+    'estimate_processing_memory'
 ]

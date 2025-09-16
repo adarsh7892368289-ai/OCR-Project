@@ -1,487 +1,529 @@
-# src/advanced_ocr/engines/base_engine.py - Production Base OCR Engine
-
 """
-Production-Grade Base OCR Engine
-Provides abstract interface and common functionality for all OCR engines
-Integrates with advanced_ocr project structure and result classes
+Abstract Base OCR Engine for Advanced OCR System
+
+Defines the standard interface and common functionality for all OCR engines.
+Provides consistent API, error handling, performance tracking, and validation
+for all engine implementations.
+
+Architecture:
+- Abstract base class defining engine contract
+- Standard performance monitoring and metrics
+- Consistent error handling and logging patterns
+- Resource management and cleanup
+- Validation and quality assurance framework
+
+Modern Design Patterns:
+- Template Method Pattern: Standard extraction workflow
+- Strategy Pattern: Different engines implement same interface
+- Observer Pattern: Performance and error monitoring
+- Resource Management: Automatic cleanup and optimization
+
+Author: Advanced OCR System
 """
 
-from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple, Optional, Union
-import cv2
-import numpy as np
 import time
-import logging
-from pathlib import Path
-import json
+import traceback
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
 from enum import Enum
+import numpy as np
 
-# Import from project structure
 from ..results import OCRResult, TextRegion, BoundingBox
-from ..utils.logger import get_logger
-from ..utils.image_utils import validate_image, normalize_image
+from ..config import OCRConfig
+from ..utils.logger import Logger
 
-class OCREngineType(Enum):
-    """Supported OCR engine types"""
-    TESSERACT = "tesseract"
-    EASYOCR = "easyocr" 
-    PADDLEOCR = "paddleocr"
-    TROCR = "trocr"
-    CRAFT = "craft"
-    PPOCR = "ppocr"
 
-class TextType(Enum):
-    """Text content classification"""
-    PRINTED = "printed"
-    HANDWRITTEN = "handwritten"
-    MIXED = "mixed"
-    UNKNOWN = "unknown"
+class EngineStatus(Enum):
+    """Engine operational status"""
+    UNINITIALIZED = "uninitialized"
+    INITIALIZING = "initializing"
+    READY = "ready"
+    PROCESSING = "processing"
+    ERROR = "error"
+    DISABLED = "disabled"
+
+
+@dataclass
+class EngineMetrics:
+    """Comprehensive engine performance metrics"""
+    total_extractions: int = 0
+    successful_extractions: int = 0
+    failed_extractions: int = 0
+    avg_processing_time: float = 0.0
+    avg_confidence: float = 0.0
+    avg_text_length: float = 0.0
+    total_processing_time: float = 0.0
+    peak_memory_usage: float = 0.0
+    last_error: Optional[str] = None
+    initialization_time: float = 0.0
     
-    # Structural types for compatibility
-    PARAGRAPH = "paragraph"
-    LINE = "line"
-    WORD = "word"
-    BLOCK = "block"
-    TITLE = "title"
-    HEADER = "header"
+    @property
+    def success_rate(self) -> float:
+        """Calculate extraction success rate"""
+        if self.total_extractions == 0:
+            return 0.0
+        return self.successful_extractions / self.total_extractions
+    
+    @property  
+    def error_rate(self) -> float:
+        """Calculate extraction error rate"""
+        if self.total_extractions == 0:
+            return 0.0
+        return self.failed_extractions / self.total_extractions
 
-class QualityLevel(Enum):
-    """Image quality assessment levels"""
-    EXCELLENT = "excellent"
-    GOOD = "good"
-    FAIR = "fair"
-    POOR = "poor"
-    UNUSABLE = "unusable"
 
 class BaseOCREngine(ABC):
     """
-    Abstract base class for all OCR engines in the advanced_ocr system
+    Abstract base class for all OCR engines
     
-    This class provides:
-    - Common interface for all OCR engines
-    - Error handling and logging
-    - Performance monitoring
-    - Image validation and preprocessing
-    - Result standardization
+    Responsibilities:
+    - Define standard OCR engine interface
+    - Provide common functionality (logging, metrics, validation)
+    - Handle resource management and cleanup
+    - Implement template method pattern for extraction workflow
+    - Ensure consistent error handling across all engines
+    
+    Template Method Pattern:
+    extract() -> _validate_inputs() -> _extract_implementation() -> _post_process_result()
     """
     
-    def __init__(self, name: str = "", config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: OCRConfig):
         """
-        Initialize base OCR engine
+        Initialize base OCR engine with configuration
         
         Args:
-            name: Engine identifier name
-            config: Engine configuration dictionary
+            config: OCR system configuration object
         """
-        self.name = name or self.__class__.__name__.replace('Engine', '').lower()
-        self.config = config or {}
-        self.is_initialized = False
-        self.model_loaded = False
+        self.config = config
+        self.logger = Logger(self.__class__.__name__)
         
-        # Setup logging
-        self.logger = get_logger(f"engines.{self.name}")
+        # Engine identification
+        self.engine_name = self.__class__.__name__.lower().replace('engine', '')
+        self.version = getattr(config.engines, self.engine_name, {}).get('version', '1.0.0')
         
-        # Engine capabilities - to be overridden by subclasses
-        self.supports_handwriting = False
-        self.supports_multiple_languages = False
-        self.supports_orientation_detection = False
-        self.supports_structure_analysis = False
-        self.supports_table_detection = False
-        self.supported_languages = ['en']
+        # Engine state management
+        self._status = EngineStatus.UNINITIALIZED
+        self._initialization_start_time = None
+        self._last_processing_time = 0.0
         
-        # Image processing limits
-        self.max_image_size = self.config.get('max_image_size', (4096, 4096))
-        self.min_image_size = self.config.get('min_image_size', (32, 32))
+        # Performance metrics
+        self._metrics = EngineMetrics()
+        self._performance_history: List[Dict[str, Any]] = []
         
-        # Performance settings
-        self.batch_size = self.config.get('batch_size', 1)
-        self.use_gpu = self.config.get('use_gpu', False)
-        self.num_threads = self.config.get('num_threads', 1)
-        self.timeout = self.config.get('timeout', 30.0)  # seconds
+        # Configuration
+        self.engine_config = getattr(config.engines, self.engine_name, {})
+        self.timeout = self.engine_config.get('timeout', 30.0)
+        self.min_confidence = self.engine_config.get('min_confidence', 0.1)
+        self.max_retries = self.engine_config.get('max_retries', 2)
         
-        # Processing statistics
-        self.stats = {
-            'total_processed': 0,
-            'total_time': 0.0,
-            'avg_confidence': 0.0,
-            'errors': 0,
-            'successful_extractions': 0,
-            'avg_processing_time': 0.0,
-            'success_rate': 0.0
-        }
+        # Resource management
+        self._resource_cleanup_callbacks = []
         
-        self.logger.info(f"Initialized {self.name} engine")
+        self.logger.info(f"Initialized {self.engine_name} engine v{self.version}")
     
-    @abstractmethod
-    def initialize(self) -> bool:
+    def extract(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
         """
-        Initialize the OCR engine (load models, setup dependencies)
+        Main extraction method using Template Method Pattern
         
-        Returns:
-            bool: True if initialization successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def process_image(self, image: np.ndarray, **kwargs) -> OCRResult:
-        """
-        Process an image and extract text
+        Standard workflow:
+        1. Validate inputs
+        2. Update status and start timing
+        3. Call engine-specific implementation
+        4. Post-process and validate results
+        5. Update metrics and log performance
         
         Args:
-            image: Input image as numpy array
-            **kwargs: Additional processing parameters
+            image: Preprocessed image from image_processor.py
+            text_regions: Detected text regions from text_detector.py
             
         Returns:
-            OCRResult: Structured OCR results
+            OCRResult with extracted text and metadata
         """
-        pass
-    
-    @abstractmethod
-    def get_supported_languages(self) -> List[str]:
-        """
-        Get list of languages supported by this engine
-        
-        Returns:
-            List[str]: Language codes (e.g., ['en', 'es', 'fr'])
-        """
-        pass
-    
-    def is_available(self) -> bool:
-        """
-        Check if engine is available and ready for use
-        
-        Returns:
-            bool: True if engine is available, False otherwise
-        """
-        try:
-            return self.initialize() if not self.is_initialized else True
-        except Exception as e:
-            self.logger.error(f"Engine availability check failed: {e}")
-            return False
-    
-    def extract_text(self, image: np.ndarray, **kwargs) -> OCRResult:
-        """
-        Main public interface for text extraction
-        
-        Args:
-            image: Input image as numpy array
-            **kwargs: Additional processing parameters
-            
-        Returns:
-            OCRResult: Complete OCR results with metadata
-        """
-        start_time = time.time()
+        extraction_start = time.time()
+        self._update_status(EngineStatus.PROCESSING)
         
         try:
-            # Validate inputs
-            if not self._validate_inputs(image):
-                raise ValueError("Invalid image input")
+            # Step 1: Input validation
+            self._validate_extraction_inputs(image, text_regions)
             
-            # Ensure engine is initialized
-            if not self.is_initialized and not self.initialize():
-                raise RuntimeError(f"Failed to initialize {self.name} engine")
+            # Step 2: Pre-processing hooks
+            image, text_regions = self._pre_process_inputs(image, text_regions)
             
-            # Validate image format and dimensions
-            if not self._validate_image(image):
-                raise ValueError("Invalid image format or dimensions")
+            # Step 3: Engine-specific extraction (implemented by subclasses)
+            result = self._extract_implementation(image, text_regions)
             
-            # Preprocess image if needed
-            processed_image = self._preprocess_image(image, **kwargs)
+            # Step 4: Post-processing and validation
+            result = self._post_process_result(result, extraction_start)
             
-            # Extract text using engine-specific implementation
-            result = self.process_image(processed_image, **kwargs)
+            # Step 5: Update success metrics
+            self._update_success_metrics(result, extraction_start)
             
-            # Post-process results
-            result = self._postprocess_result(result, start_time)
-            
-            # Update statistics
-            self._update_statistics(result, time.time() - start_time, success=True)
+            self.logger.debug(
+                f"{self.engine_name} extraction completed: "
+                f"{len(result.text)} chars, {result.confidence:.3f} confidence, "
+                f"{result.processing_time:.3f}s"
+            )
             
             return result
             
         except Exception as e:
-            processing_time = time.time() - start_time
-            self.logger.error(f"Text extraction failed in {self.name}: {e}")
+            # Handle extraction failure
+            error_result = self._handle_extraction_error(e, extraction_start)
+            self._update_error_metrics(e)
+            return error_result
             
-            # Update error statistics
-            self._update_statistics(None, processing_time, success=False)
-            
-            # Return empty result with error information
-            return self._create_error_result(str(e), processing_time)
+        finally:
+            self._update_status(EngineStatus.READY)
     
-    def extract_text_batch(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
+    @abstractmethod
+    def _extract_implementation(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
         """
-        Process multiple images in batch
+        Engine-specific extraction implementation
+        
+        This method must be implemented by each concrete engine.
+        It should contain the core OCR logic specific to that engine.
         
         Args:
-            images: List of input images
-            **kwargs: Processing parameters
+            image: Validated and preprocessed image
+            text_regions: Validated text regions
             
         Returns:
-            List[OCRResult]: Results for each image
+            OCRResult with raw extraction results
         """
-        results = []
-        
-        for i, image in enumerate(images):
-            try:
-                result = self.extract_text(image, **kwargs)
-                results.append(result)
-            except Exception as e:
-                self.logger.error(f"Failed to process image {i}: {e}")
-                results.append(self._create_error_result(str(e), 0.0))
-        
-        return results
+        pass
     
-    def _validate_inputs(self, image: np.ndarray) -> bool:
-        """Validate input parameters"""
-        if image is None:
-            self.logger.error("Input image is None")
-            return False
+    def _validate_extraction_inputs(self, image: np.ndarray, text_regions: List[TextRegion]) -> None:
+        """Validate extraction inputs"""
         
-        if not isinstance(image, np.ndarray):
-            self.logger.error("Input must be numpy array")
-            return False
+        # Image validation
+        if image is None or image.size == 0:
+            raise ValueError(f"{self.engine_name}: Invalid or empty image provided")
+        
+        if len(image.shape) not in [2, 3]:
+            raise ValueError(f"{self.engine_name}: Image must be 2D (grayscale) or 3D (color)")
+        
+        # Minimum image size check
+        min_size = self.engine_config.get('min_image_size', (32, 32))
+        if image.shape[0] < min_size[0] or image.shape[1] < min_size[1]:
+            raise ValueError(f"{self.engine_name}: Image too small: {image.shape} < {min_size}")
+        
+        # Text regions validation
+        if text_regions is None:
+            text_regions = []
+        
+        # Validate individual regions
+        for i, region in enumerate(text_regions):
+            if not isinstance(region, TextRegion):
+                raise TypeError(f"{self.engine_name}: Region {i} is not a TextRegion object")
             
-        return True
+            if region.width <= 0 or region.height <= 0:
+                raise ValueError(f"{self.engine_name}: Region {i} has invalid dimensions")
+            
+            # Check region bounds
+            if (region.x < 0 or region.y < 0 or 
+                region.x + region.width > image.shape[1] or 
+                region.y + region.height > image.shape[0]):
+                raise ValueError(f"{self.engine_name}: Region {i} is outside image bounds")
     
-    def _validate_image(self, image: np.ndarray) -> bool:
+    def _pre_process_inputs(self, image: np.ndarray, text_regions: List[TextRegion]) -> Tuple[np.ndarray, List[TextRegion]]:
         """
-        Validate image format and dimensions
+        Pre-process inputs before extraction
         
-        Args:
-            image: Input image array
-            
-        Returns:
-            bool: True if valid, False otherwise
+        Base implementation performs common preprocessing.
+        Can be overridden by engines for specific needs.
         """
-        try:
-            return validate_image(image, self.min_image_size, self.max_image_size)
-        except Exception as e:
-            self.logger.error(f"Image validation failed: {e}")
-            return False
+        
+        # Filter low-confidence regions if specified
+        if hasattr(self.engine_config, 'filter_low_confidence_regions') and self.engine_config.filter_low_confidence_regions:
+            min_region_confidence = self.engine_config.get('min_region_confidence', 0.5)
+            text_regions = [r for r in text_regions if r.confidence >= min_region_confidence]
+            
+            self.logger.debug(f"Filtered to {len(text_regions)} high-confidence regions")
+        
+        # Sort regions for consistent processing order
+        text_regions.sort(key=lambda r: (r.y, r.x))  # Top-to-bottom, left-to-right
+        
+        return image, text_regions
     
-    def _preprocess_image(self, image: np.ndarray, **kwargs) -> np.ndarray:
+    def _post_process_result(self, result: OCRResult, start_time: float) -> OCRResult:
         """
-        Apply common preprocessing steps
+        Post-process extraction result
         
-        Args:
-            image: Input image
-            **kwargs: Processing parameters
-            
-        Returns:
-            np.ndarray: Preprocessed image
+        Applies common post-processing like timing, validation, and cleanup.
+        Can be overridden by engines for specific post-processing needs.
         """
-        try:
-            # Normalize image format and color space
-            processed_image = normalize_image(image)
-            
-            # Apply engine-specific preprocessing
-            processed_image = self.preprocess_image(processed_image, **kwargs)
-            
-            return processed_image
-            
-        except Exception as e:
-            self.logger.warning(f"Preprocessing failed, using original image: {e}")
-            return image
-    
-    def preprocess_image(self, image: np.ndarray, **kwargs) -> np.ndarray:
-        """
-        Engine-specific preprocessing - override in subclasses
         
-        Args:
-            image: Input image
-            **kwargs: Processing parameters
-            
-        Returns:
-            np.ndarray: Preprocessed image
-        """
-        return image
-    
-    def _postprocess_result(self, result: OCRResult, start_time: float) -> OCRResult:
-        """
-        Apply common post-processing to results
+        # Calculate processing time
+        processing_time = time.time() - start_time
         
-        Args:
-            result: Raw OCR result
-            start_time: Processing start time
-            
-        Returns:
-            OCRResult: Enhanced result with metadata
-        """
-        # Set engine metadata
-        result.engine_name = self.name
-        result.processing_time = time.time() - start_time
+        # Update result with timing and engine info
+        result.processing_time = processing_time
+        result.engine_name = self.engine_name
         
-        # Add engine capabilities to metadata
-        if not result.metadata:
-            result.metadata = {}
-            
+        # Validate result quality
+        if not self._validate_result_quality(result):
+            self.logger.warning(f"{self.engine_name} produced low-quality result")
+            result.metadata['quality_warning'] = True
+        
+        # Add engine-specific metadata
         result.metadata.update({
-            'engine_type': self.name,
-            'supports_handwriting': self.supports_handwriting,
-            'supports_multiple_languages': self.supports_multiple_languages,
-            'processing_timestamp': time.time()
+            'engine_version': self.version,
+            'processing_timestamp': time.time(),
+            'engine_config': {
+                'timeout': self.timeout,
+                'min_confidence': self.min_confidence
+            }
         })
         
         return result
     
-    def _create_error_result(self, error_message: str, processing_time: float) -> OCRResult:
+    def _validate_result_quality(self, result: OCRResult) -> bool:
         """
-        Create OCR result for error cases
+        Validate extraction result quality
         
-        Args:
-            error_message: Error description
-            processing_time: Time spent processing
-            
-        Returns:
-            OCRResult: Error result
+        Basic quality checks that apply to all engines.
+        Can be extended by specific engines.
         """
+        
+        # Check for empty results
+        if not result.text or len(result.text.strip()) == 0:
+            return False
+        
+        # Check confidence threshold
+        if result.confidence < self.min_confidence:
+            return False
+        
+        # Check for reasonable text characteristics
+        text = result.text.strip()
+        
+        # Very short text might be noise
+        if len(text) == 1 and not text.isalnum():
+            return False
+        
+        # Check for excessive special characters (possible noise)
+        special_char_ratio = sum(not c.isalnum() and not c.isspace() for c in text) / len(text)
+        if special_char_ratio > 0.8:  # More than 80% special chars
+            return False
+        
+        return True
+    
+    def _handle_extraction_error(self, error: Exception, start_time: float) -> OCRResult:
+        """Handle extraction errors gracefully"""
+        
+        processing_time = time.time() - start_time
+        error_msg = str(error)
+        
+        self.logger.error(f"{self.engine_name} extraction failed: {error_msg}")
+        self.logger.debug(f"Error traceback: {traceback.format_exc()}")
+        
+        # Create error result
         return OCRResult(
             text="",
             confidence=0.0,
+            bounding_boxes=[],
+            engine_name=self.engine_name,
             processing_time=processing_time,
-            engine_name=self.name,
             metadata={
-                'error': error_message,
-                'success': False,
-                'error_timestamp': time.time()
+                'error': error_msg,
+                'error_type': type(error).__name__,
+                'extraction_failed': True
             }
         )
     
-    def _update_statistics(self, result: Optional[OCRResult], processing_time: float, success: bool):
-        """
-        Update engine performance statistics
+    def _update_success_metrics(self, result: OCRResult, start_time: float):
+        """Update metrics for successful extraction"""
         
-        Args:
-            result: OCR result (None if failed)
-            processing_time: Time taken for processing
-            success: Whether processing succeeded
-        """
-        self.stats['total_processed'] += 1
-        self.stats['total_time'] += processing_time
+        processing_time = time.time() - start_time
+        text_length = len(result.text)
         
-        if success and result:
-            self.stats['successful_extractions'] += 1
-            # Update running average confidence
-            total_confidence = (self.stats['avg_confidence'] * 
-                              (self.stats['successful_extractions'] - 1) + 
-                              result.confidence)
-            self.stats['avg_confidence'] = total_confidence / self.stats['successful_extractions']
+        # Update counters
+        self._metrics.total_extractions += 1
+        self._metrics.successful_extractions += 1
+        self._metrics.total_processing_time += processing_time
+        
+        # Update averages using exponential moving average
+        alpha = 0.1  # Learning rate
+        if self._metrics.total_extractions == 1:
+            self._metrics.avg_processing_time = processing_time
+            self._metrics.avg_confidence = result.confidence
+            self._metrics.avg_text_length = text_length
         else:
-            self.stats['errors'] += 1
-        
-        # Update derived statistics
-        if self.stats['total_processed'] > 0:
-            self.stats['avg_processing_time'] = (
-                self.stats['total_time'] / self.stats['total_processed']
+            self._metrics.avg_processing_time = (
+                alpha * processing_time + (1 - alpha) * self._metrics.avg_processing_time
             )
-            self.stats['success_rate'] = (
-                self.stats['successful_extractions'] / self.stats['total_processed']
+            self._metrics.avg_confidence = (
+                alpha * result.confidence + (1 - alpha) * self._metrics.avg_confidence
             )
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """
-        Get comprehensive engine performance statistics
+            self._metrics.avg_text_length = (
+                alpha * text_length + (1 - alpha) * self._metrics.avg_text_length
+            )
         
-        Returns:
-            Dict[str, Any]: Performance statistics
-        """
-        stats = self.stats.copy()
-        stats.update({
-            'engine_name': self.name,
-            'is_initialized': self.is_initialized,
-            'supported_languages': self.supported_languages,
-            'capabilities': {
-                'handwriting': self.supports_handwriting,
-                'multilingual': self.supports_multiple_languages,
-                'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis,
-                'table_detection': self.supports_table_detection
-            }
+        # Store performance history (keep last 100 entries)
+        self._performance_history.append({
+            'timestamp': time.time(),
+            'processing_time': processing_time,
+            'confidence': result.confidence,
+            'text_length': text_length,
+            'success': True
         })
-        return stats
+        
+        if len(self._performance_history) > 100:
+            self._performance_history.pop(0)
     
-    def reset_statistics(self):
-        """Reset performance statistics"""
-        self.stats = {
-            'total_processed': 0,
-            'total_time': 0.0,
-            'avg_confidence': 0.0,
-            'errors': 0,
-            'successful_extractions': 0,
-            'avg_processing_time': 0.0,
-            'success_rate': 0.0
-        }
-        self.logger.info(f"Reset statistics for {self.name} engine")
+    def _update_error_metrics(self, error: Exception):
+        """Update metrics for failed extraction"""
+        
+        self._metrics.total_extractions += 1
+        self._metrics.failed_extractions += 1
+        self._metrics.last_error = str(error)
+        
+        # Store error in performance history
+        self._performance_history.append({
+            'timestamp': time.time(),
+            'error': str(error),
+            'error_type': type(error).__name__,
+            'success': False
+        })
+        
+        if len(self._performance_history) > 100:
+            self._performance_history.pop(0)
+    
+    def _update_status(self, status: EngineStatus):
+        """Update engine operational status"""
+        prev_status = self._status
+        self._status = status
+        
+        if status != prev_status:
+            self.logger.debug(f"{self.engine_name} status: {prev_status.value} → {status.value}")
+    
+    def initialize_engine(self):
+        """
+        Initialize engine resources
+        
+        Should be called before first extraction.
+        Can be overridden by engines for specific initialization.
+        """
+        
+        if self._status != EngineStatus.UNINITIALIZED:
+            self.logger.warning(f"{self.engine_name} already initialized")
+            return
+        
+        self._initialization_start_time = time.time()
+        self._update_status(EngineStatus.INITIALIZING)
+        
+        try:
+            # Engine-specific initialization
+            self._initialize_implementation()
+            
+            # Record initialization time
+            init_time = time.time() - self._initialization_start_time
+            self._metrics.initialization_time = init_time
+            
+            self._update_status(EngineStatus.READY)
+            self.logger.info(f"{self.engine_name} initialized successfully ({init_time:.3f}s)")
+            
+        except Exception as e:
+            self._update_status(EngineStatus.ERROR)
+            self.logger.error(f"{self.engine_name} initialization failed: {e}")
+            raise
+    
+    def _initialize_implementation(self):
+        """
+        Engine-specific initialization implementation
+        
+        Override this method in concrete engines for specific initialization logic.
+        Base implementation does nothing.
+        """
+        pass
     
     def cleanup(self):
-        """
-        Cleanup engine resources
-        Override in subclasses for engine-specific cleanup
-        """
-        try:
-            self.logger.info(f"Cleaning up {self.name} engine")
-            self.is_initialized = False
-            self.model_loaded = False
-        except Exception as e:
-            self.logger.error(f"Cleanup failed for {self.name}: {e}")
-    
-    def get_engine_info(self) -> Dict[str, Any]:
-        """
-        Get comprehensive engine information
+        """Cleanup engine resources"""
         
-        Returns:
-            Dict[str, Any]: Engine information and capabilities
+        try:
+            # Call engine-specific cleanup
+            self._cleanup_implementation()
+            
+            # Execute registered cleanup callbacks
+            for callback in self._resource_cleanup_callbacks:
+                try:
+                    callback()
+                except Exception as e:
+                    self.logger.warning(f"Cleanup callback failed: {e}")
+            
+            self._resource_cleanup_callbacks.clear()
+            self._update_status(EngineStatus.DISABLED)
+            
+            self.logger.info(f"{self.engine_name} cleaned up successfully")
+            
+        except Exception as e:
+            self.logger.error(f"{self.engine_name} cleanup failed: {e}")
+    
+    def _cleanup_implementation(self):
         """
-        return {
-            'name': self.name,
-            'type': self.__class__.__name__,
-            'is_initialized': self.is_initialized,
-            'model_loaded': self.model_loaded,
-            'supported_languages': self.supported_languages,
-            'capabilities': {
-                'handwriting': self.supports_handwriting,
-                'multilingual': self.supports_multiple_languages,
-                'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis,
-                'table_detection': self.supports_table_detection
-            },
-            'configuration': {
-                'max_image_size': self.max_image_size,
-                'min_image_size': self.min_image_size,
-                'batch_size': self.batch_size,
-                'use_gpu': self.use_gpu,
-                'timeout': self.timeout
-            },
-            'statistics': self.get_statistics()
-        }
+        Engine-specific cleanup implementation
+        
+        Override this method in concrete engines for specific cleanup logic.
+        Base implementation does nothing.
+        """
+        pass
     
-    def __enter__(self):
-        """Context manager entry"""
-        if not self.initialize():
-            raise RuntimeError(f"Failed to initialize {self.name} engine")
-        return self
+    def register_cleanup_callback(self, callback):
+        """Register a cleanup callback for resource management"""
+        self._resource_cleanup_callbacks.append(callback)
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit"""
-        self.cleanup()
+    # Public API for monitoring and management
+    
+    def get_metrics(self) -> EngineMetrics:
+        """Get current engine performance metrics"""
+        return self._metrics
+    
+    def get_status(self) -> EngineStatus:
+        """Get current engine status"""
+        return self._status
+    
+    def get_performance_history(self) -> List[Dict[str, Any]]:
+        """Get recent performance history"""
+        return self._performance_history.copy()
+    
+    def reset_metrics(self):
+        """Reset performance metrics (useful for testing)"""
+        self._metrics = EngineMetrics()
+        self._performance_history.clear()
+        self.logger.info(f"{self.engine_name} metrics reset")
+    
+    def is_healthy(self) -> bool:
+        """Check if engine is healthy and ready for processing"""
+        
+        if self._status not in [EngineStatus.READY, EngineStatus.PROCESSING]:
+            return False
+        
+        # Check error rate
+        if self._metrics.total_extractions > 10 and self._metrics.error_rate > 0.5:
+            return False
+        
+        # Check recent performance
+        recent_failures = sum(
+            1 for entry in self._performance_history[-10:]
+            if not entry.get('success', True)
+        )
+        
+        if len(self._performance_history) >= 10 and recent_failures >= 8:
+            return False
+        
+        return True
     
     def __str__(self) -> str:
-        return f"{self.name}Engine(initialized={self.is_initialized})"
+        """String representation of engine"""
+        return f"{self.engine_name.title()}Engine(status={self._status.value}, extractions={self._metrics.total_extractions})"
     
     def __repr__(self) -> str:
-        return (f"{self.__class__.__name__}(name='{self.name}', "
-                f"initialized={self.is_initialized}, "
-                f"languages={self.supported_languages})")
-
-# Backward compatibility alias
-OCREngine = BaseOCREngine
-
-# Export classes
-__all__ = [
-    'BaseOCREngine',
-    'OCREngine',
-    'OCREngineType', 
-    'TextType',
-    'QualityLevel'
-]
+        """Detailed string representation"""
+        return (
+            f"{self.__class__.__name__}("
+            f"name='{self.engine_name}', "
+            f"version='{self.version}', "
+            f"status={self._status.value}, "
+            f"success_rate={self._metrics.success_rate:.2f}"
+            f")"
+        )
