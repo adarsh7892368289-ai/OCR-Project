@@ -111,15 +111,15 @@ class BlurAnalyzer:
     def __init__(self, config: OCRConfig):
         """
         Initialize blur analyzer.
-        
+
         Args:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("blur_analyzer")
         
         # Blur detection thresholds from config
-        self.laplacian_threshold_excellent = config.get("quality.blur.laplacian_excellent", 1000)
+        self.laplacian_threshold_excellent = getattr(config.preprocessing, 'laplacian_threshold_excellent', 1000)
         self.laplacian_threshold_good = config.get("quality.blur.laplacian_good", 500)
         self.laplacian_threshold_fair = config.get("quality.blur.laplacian_fair", 100)
         self.laplacian_threshold_poor = config.get("quality.blur.laplacian_poor", 50)
@@ -210,8 +210,8 @@ class NoiseAnalyzer:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
-        
+        self.logger = OCRLogger("noise_analyzer")
+
         # Noise detection parameters
         self.noise_kernel_size = config.get("quality.noise.kernel_size", 5)
         self.noise_threshold_excellent = config.get("quality.noise.threshold_excellent", 5)
@@ -279,7 +279,7 @@ class ContrastAnalyzer:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("contrast_analyzer")
         
         # Contrast analysis parameters
         self.rms_excellent = config.get("quality.contrast.rms_excellent", 80)
@@ -351,7 +351,7 @@ class ResolutionAnalyzer:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("resolution_analyzer")
         
         # Resolution thresholds (pixels)
         self.min_width_excellent = config.get("quality.resolution.min_width_excellent", 1200)
@@ -425,7 +425,7 @@ class BrightnessAnalyzer:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("brightness_analyzer")
         
         # Optimal brightness range
         self.optimal_brightness_min = config.get("quality.brightness.optimal_min", 100)
@@ -499,7 +499,7 @@ class QualityAnalyzer:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("quality_analyzer")
         
         # Initialize component analyzers
         self.blur_analyzer = BlurAnalyzer(config)
@@ -662,7 +662,7 @@ def create_quality_analyzer(config: Optional[OCRConfig] = None) -> QualityAnalyz
         QualityAnalyzer: Configured quality analyzer
     """
     if config is None:
-        from advanced_ocr.config import OCRConfig
+        from ..config import OCRConfig
         config = OCRConfig()
     
     return QualityAnalyzer(config)

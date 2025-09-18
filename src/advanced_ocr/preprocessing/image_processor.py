@@ -47,7 +47,6 @@ from enum import Enum
 # Import from parent modules (correct relative imports)
 from ..config import OCRConfig
 from ..utils.logger import OCRLogger
-from ..utils.image_utils import ImageProcessor
 from ..utils.model_utils import ModelLoader
 from ..results import TextRegion, BoundingBox
 from .quality_analyzer import QualityAnalyzer, QualityMetrics, QualityLevel
@@ -104,7 +103,7 @@ class ImageEnhancer:
             config (OCRConfig): OCR configuration
         """
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("image_enhancer")
 
         # Enhancement parameters from config
         self.enable_denoising = config.get("preprocessing.enhancement.enable_denoising", True)
@@ -117,6 +116,39 @@ class ImageEnhancer:
         self.noise_threshold_for_denoising = config.get("preprocessing.thresholds.noise_for_denoising", 0.6)
         self.contrast_threshold_for_enhancement = config.get("preprocessing.thresholds.contrast_for_enhancement", 0.6)
         self.brightness_threshold_for_correction = config.get("preprocessing.thresholds.brightness_for_correction", 0.6)
+    def _ensure_opencv_compatible(self, image: np.ndarray) -> np.ndarray:
+        """
+        Ensure image has compatible channels for OpenCV operations.
+        
+        OpenCV functions like bilateralFilter only accept:
+        - Grayscale (1 channel)  
+        - RGB/BGR (3 channels)
+        
+        Args:
+            image (np.ndarray): Input image
+            
+        Returns:
+            np.ndarray: OpenCV-compatible image
+        """
+        if len(image.shape) == 2:
+            # Already grayscale - compatible
+            return image
+        elif len(image.shape) == 3:
+            channels = image.shape[2]
+            if channels == 4:
+                # RGBA -> RGB: Remove alpha channel
+                return cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+            elif channels == 3:
+                # RGB/BGR - already compatible
+                return image
+            elif channels == 1:
+                # Single channel - squeeze to 2D
+                return image.squeeze()
+            else:
+                # Unknown format - convert to RGB as fallback
+                return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            raise ValueError(f"Invalid image shape for OpenCV operations: {image.shape}")
 
     def determine_enhancement_strategy(self, quality_metrics: QualityMetrics) -> EnhancementStrategy:
         """
@@ -253,17 +285,20 @@ class ImageEnhancer:
 
     def _apply_denoising(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
         """Apply noise reduction based on noise level."""
+        # FIX: Ensure OpenCV compatibility
+        enhanced = self._ensure_opencv_compatible(image)
+        
         if quality_metrics.noise_level == QualityLevel.VERY_POOR:
             # Aggressive denoising
-            enhanced = cv2.bilateralFilter(image, 9, 75, 75)
+            enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
             enhanced = cv2.medianBlur(enhanced, 5)
         elif quality_metrics.noise_level == QualityLevel.POOR:
             # Moderate denoising
-            enhanced = cv2.bilateralFilter(image, 7, 50, 50)
+            enhanced = cv2.bilateralFilter(enhanced, 7, 50, 50)
             enhanced = cv2.medianBlur(enhanced, 3)
         else:
             # Light denoising
-            enhanced = cv2.bilateralFilter(image, 5, 30, 30)
+            enhanced = cv2.bilateralFilter(enhanced, 5, 30, 30)
 
         return enhanced
 
@@ -355,12 +390,14 @@ class ImageEnhancer:
 
     def _apply_standard_enhancements(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
         """Apply standard enhancement pipeline."""
-        enhanced = image.copy()
+        # FIX: Ensure OpenCV compatibility
+        enhanced = self._ensure_opencv_compatible(image.copy())
 
         # Light denoising
         if self.enable_denoising and quality_metrics.noise_score < 0.8:
             enhanced = cv2.bilateralFilter(enhanced, 5, 30, 30)
 
+        # Rest of the method stays the same...
         # Contrast enhancement
         if self.enable_contrast and quality_metrics.contrast_score < 0.8:
             enhanced = self._apply_contrast_enhancement(enhanced, quality_metrics)
@@ -368,17 +405,18 @@ class ImageEnhancer:
         # Light sharpening
         if self.enable_sharpening and quality_metrics.blur_score < 0.8:
             kernel = np.array([[0, -0.25, 0],
-                              [-0.25, 2, -0.25],
-                              [0, -0.25, 0]])
+                            [-0.25, 2, -0.25],
+                            [0, -0.25, 0]])
             enhanced = cv2.filter2D(enhanced, -1, kernel)
 
         return enhanced
 
     def _apply_comprehensive_enhancement(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
         """Apply comprehensive enhancements for very poor quality images."""
-        enhanced = image.copy()
+        # CRITICAL FIX: Ensure OpenCV compatibility before any OpenCV operations
+        enhanced = self._ensure_opencv_compatible(image.copy())
 
-        # Step 1: Noise reduction
+        # Step 1: Noise reduction (now safe with compatible channels)
         enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
         enhanced = cv2.medianBlur(enhanced, 3)
 
@@ -399,14 +437,13 @@ class ImageEnhancer:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
 
-        # Convert back to color if needed
-        if len(image.shape) == 3 and len(enhanced.shape) == 1:
+        # Convert back to color if original was color
+        if len(image.shape) == 3:
             enhanced = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         else:
             enhanced = gray
 
         return enhanced
-
 
 class ImageProcessor:
     """
@@ -424,13 +461,14 @@ class ImageProcessor:
         """
         self.model_loader = model_loader
         self.config = config
-        self.logger = OCRLogger()
+        self.logger = OCRLogger("image_processor")
 
         # Initialize components
         self.quality_analyzer = QualityAnalyzer(config)
         self.text_detector = TextDetector(model_loader, config)
         self.image_enhancer = ImageEnhancer(config)
-        self.image_utils = ImageProcessor()
+        from ..utils.image_utils import ImageProcessor as ImageUtils
+        self.image_utils = ImageUtils()
 
         # Processing configuration
         self.enable_quality_analysis = config.get("preprocessing.enable_quality_analysis", True)
@@ -491,7 +529,12 @@ class ImageProcessor:
         text_regions = []
         if self.enable_text_detection:
             self.logger.debug("Detecting text regions")
-            text_regions = self.text_detector.detect_text_regions(enhanced_image)
+            try:
+                text_regions = self.text_detector.detect_text_regions(enhanced_image)
+                self.logger.debug(f"Detected {len(text_regions)} text regions")
+            except Exception as e:
+                self.logger.warning(f"Text detection failed: {e}")
+                text_regions = []  # Fallback to empty list
 
         # Calculate final dimensions
         final_height, final_width = enhanced_image.shape[:2]
@@ -630,7 +673,7 @@ def create_image_processor(model_loader: ModelLoader,
         ImageProcessor: Configured image processor
     """
     if config is None:
-        from advanced_ocr.config import OCRConfig
+        from ..config import OCRConfig
         config = OCRConfig()
 
     return ImageProcessor(model_loader, config)

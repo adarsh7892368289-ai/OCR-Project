@@ -1,478 +1,87 @@
-# Advanced OCR System - Unified Configuration
-# This configuration drives the entire pipeline orchestration
-
-# =============================================================================
-# GLOBAL SETTINGS - System-wide behavior
-# =============================================================================
-global:
-  # Performance and resource management
-  max_workers: 4                    # Parallel processing threads
-  gpu_enabled: true                 # Enable GPU acceleration where available
-  memory_limit_mb: 2048            # Maximum memory usage per process
-  cache_models: true               # Cache loaded models in memory
-  
-  # Pipeline behavior
-  pipeline_mode: "intelligent"     # Options: "fast", "accurate", "intelligent"
-  fallback_enabled: true           # Enable fallback engines on failure
-  
-  # Output preferences
-  preserve_formatting: true        # Maintain original document structure
-  include_confidence: true         # Include confidence scores in results
-  include_metadata: true           # Include processing metadata
-  
-  # Debugging and logging
-  debug_mode: false               # Enable debug logging and image snapshots
-  log_level: "INFO"               # Options: "DEBUG", "INFO", "WARNING", "ERROR"
-  save_intermediate_images: false  # Save processed images for debugging
-
-# =============================================================================
-# PREPROCESSING CONFIGURATION - Image preparation pipeline
-# =============================================================================
-preprocessing:
-  # Image loading and validation
-  image_loading:
-    max_image_size: [4096, 4096]   # Maximum image dimensions [width, height]
-    min_image_size: [100, 100]     # Minimum image dimensions
-    supported_formats: ["jpg", "jpeg", "png", "bmp", "tiff", "webp"]
-    color_mode: "auto"             # Options: "auto", "rgb", "grayscale"
-    dpi_target: 300                # Target DPI for processing
-  
-  # Quality analysis thresholds
-  quality_analysis:
-    enabled: true
-    blur_threshold: 100.0          # Laplacian variance threshold (lower = more blurry)
-    noise_threshold: 25.0          # Noise level threshold
-    contrast_threshold: 50.0       # Minimum contrast requirement
-    brightness_range: [50, 200]    # Acceptable brightness range [min, max]
-    resolution_dpi_min: 150        # Minimum DPI for quality processing
-    
-    # Quality-based enhancement triggers
-    enhancement_triggers:
-      low_contrast: 40.0           # Trigger contrast enhancement below this
-      high_noise: 30.0             # Trigger denoising above this
-      low_resolution: 200          # Trigger upscaling below this DPI
-  
-  # Image enhancement settings
-  enhancement:
-    enabled: true
-    adaptive_enhancement: true      # Adjust enhancement based on quality analysis
-    
-    # Contrast and brightness
-    contrast_enhancement: true
-    brightness_adjustment: true
-    gamma_correction: true
-    histogram_equalization: false   # More aggressive contrast enhancement
-    
-    # Noise reduction
-    denoising_enabled: true
-    denoising_strength: "medium"    # Options: "light", "medium", "strong"
-    bilateral_filter: true          # Edge-preserving smoothing
-    
-    # Sharpening
-    sharpening_enabled: true
-    sharpening_strength: 0.5        # 0.0 to 2.0
-    unsharp_mask: true             # Advanced sharpening
-    
-    # Morphological operations
-    morphology_enabled: true
-    opening_kernel_size: 2          # Remove small noise
-    closing_kernel_size: 3          # Fill small holes
-  
-  # Text detection settings (CRITICAL for performance)
-  text_detection:
-    enabled: true
-    model: "craft"                  # Options: "craft", "east", "morphological"
-    
-    # CRAFT model settings (FIXED thresholds)
-    craft_settings:
-      text_threshold: 0.7           # CRITICAL: 0.7 not 0.1 (prevents region explosion)
-      link_threshold: 0.4           # Character linking threshold
-      low_text: 0.4                 # Low confidence text threshold
-      cuda: true                    # Use GPU if available
-      canvas_size: 1280             # Model input size
-      mag_ratio: 1.5                # Magnification ratio
-      slope_ths: 0.1                # Slope threshold for text regions
-      ycenter_ths: 0.5              # Y-center threshold
-      height_ths: 0.7               # Height threshold
-      width_ths: 0.9                # Width threshold
-      add_margin: 0.1               # Margin around detected regions (10%)
-    
-    # Non-Maximum Suppression (CRITICAL for reducing overlapping regions)
-    nms_settings:
-      enabled: true                 # MUST be enabled
-      iou_threshold: 0.3            # Overlap threshold for merging regions
-      score_threshold: 0.5          # Minimum confidence for keeping regions
-      max_regions: 80               # Maximum regions to keep (prevents explosion)
-    
-    # Fallback morphological detection
-    morphological_fallback:
-      enabled: true
-      kernel_sizes: [3, 5, 7]       # Different kernel sizes to try
-      iterations: 2                 # Morphological operations iterations
-    
-    # Region filtering (CRITICAL for performance)
-    region_filtering:
-      min_area: 100                 # Minimum region area in pixels
-      max_area: 50000               # Maximum region area in pixels
-      min_aspect_ratio: 0.1         # Minimum width/height ratio
-      max_aspect_ratio: 10.0        # Maximum width/height ratio
-      min_width: 10                 # Minimum region width
-      min_height: 8                 # Minimum region height
-
-# =============================================================================
-# ENGINE COORDINATION - Smart engine selection and management
-# =============================================================================
-engine_coordination:
-  # Content classification for engine selection
-  content_classification:
-    enabled: true
-    model: "hybrid"                 # Options: "ml_model", "heuristic", "hybrid"
-    confidence_threshold: 0.7       # Minimum confidence for classification
-    
-    # ML model settings
-    ml_model:
-      model_path: "models/classification/content_classifier.pkl"
-      features: ["texture", "stroke_width", "regularity", "spacing"]
-    
-    # Heuristic classification
-    heuristic:
-      stroke_width_variance: 0.3    # Higher = more likely handwritten
-      character_spacing_variance: 0.4
-      line_straightness: 0.8        # Lower = more likely handwritten
-  
-  # Engine selection strategy
-  selection_strategy:
-    mode: "content_based"           # Options: "content_based", "parallel", "sequential"
-    
-    # Content-based routing (SMART SELECTION)
-    content_routing:
-      handwritten:
-        primary: ["trocr", "easyocr"]
-        fallback: ["paddleocr"]
-      printed:
-        primary: ["paddleocr", "tesseract"]
-        fallback: ["easyocr"]
-      mixed:
-        primary: ["paddleocr", "trocr"]
-        fallback: ["tesseract", "easyocr"]
-    
-    # Parallel execution settings
-    parallel_execution:
-      enabled: false                # Run multiple engines simultaneously
-      max_parallel: 2               # Maximum engines to run in parallel
-      timeout_seconds: 30           # Timeout for each engine
-    
-    # Engine priorities (1 = highest priority)
-    priorities:
-      trocr: 1                      # Best for handwriting
-      paddleocr: 2                  # Best overall performance
-      tesseract: 3                  # Best for printed text
-      easyocr: 4                    # Good fallback
-
-# =============================================================================
-# ENGINE CONFIGURATIONS - Individual engine settings
-# =============================================================================
+profile: balanced
 engines:
-  # TrOCR Engine (Transformer-based OCR for handwriting)
-  trocr:
-    enabled: true
-    model_name: "microsoft/trocr-base-handwritten"
-    device: "auto"                  # Options: "auto", "cpu", "cuda"
-    batch_size: 4                   # Batch processing size
-    max_length: 256                 # Maximum sequence length
-    beam_search: true              # Use beam search decoding
-    num_beams: 4                   # Number of beams for search
-    confidence_method: "softmax"    # Confidence calculation method
-    
-    # Performance settings
-    use_half_precision: false       # FP16 for speed (may reduce accuracy)
-    compile_model: false           # PyTorch compilation (experimental)
-  
-  # PaddleOCR Engine (Production-ready OCR system)
-  paddleocr:
-    enabled: true
-    lang: "en"                     # Language code
-    use_angle_cls: true            # Enable angle classification
-    use_gpu: true                  # Use GPU acceleration
-    
-    # Detection settings
-    det_model_dir: null            # Use default detection model
-    det_limit_side_len: 960        # Detection limit side length
-    det_limit_type: "max"          # Limit type: "max" or "min"
-    
-    # Recognition settings
-    rec_model_dir: null            # Use default recognition model
-    rec_batch_num: 6               # Recognition batch size
-    rec_char_dict_path: null       # Custom character dictionary
-    
-    # Classification settings
-    cls_model_dir: null            # Use default classification model
-    cls_batch_num: 6               # Classification batch size
-    cls_thresh: 0.9                # Classification threshold
-    
-    # Performance
-    enable_mkldnn: false           # Intel optimization
-    cpu_threads: 4                 # CPU threads for inference
-    precision: "fp32"              # Options: "fp32", "fp16", "int8"
-  
-  # Tesseract Engine (Traditional OCR with modern optimizations)  
   tesseract:
     enabled: true
-    lang: "eng"                    # Language code
-    oem: 3                         # OCR Engine Mode (3 = default LSTM)
-    psm: 6                         # Page Segmentation Mode (6 = uniform text block)
-    
-    # Configuration parameters
-    config_params:
-      tessedit_char_whitelist: ""  # Character whitelist (empty = all)
-      tessedit_char_blacklist: ""  # Character blacklist
-      preserve_interword_spaces: 1  # Preserve spaces between words
-      user_defined_dpi: 300        # DPI for processing
-    
-    # Performance settings
-    timeout: 30                    # Timeout in seconds
-    nice: 0                        # Process priority
-  
-  # EasyOCR Engine (Deep learning OCR with good multilingual support)
+    priority: 3
+    confidence_threshold: 0.6
+    timeout: 15.0
+    custom_params:
+      psm: 6
+      oem: 3
+  paddleocr:
+    enabled: true
+    priority: 2
+    confidence_threshold: 0.7
+    timeout: 20.0
+    gpu_enabled: true
+    custom_params:
+      use_angle_cls: true
+      use_space_char: true
   easyocr:
     enabled: true
-    languages: ["en"]              # Language codes
-    gpu: true                      # Use GPU if available
-    
-    # Detection settings
-    width_ths: 0.7                 # Width threshold
-    height_ths: 0.7                # Height threshold
-    
-    # Recognition settings
-    decoder: "beamsearch"          # Options: "greedy", "beamsearch", "wordbeamsearch"
-    beamWidth: 5                   # Beam width for beam search
-    batch_size: 1                  # Batch size for processing
-    workers: 0                     # Number of workers (0 = auto)
-    allowlist: null                # Character allowlist
-    blocklist: null                # Character blocklist
-    
-    # Performance
-    detail: 1                      # Detail level (0, 1, 2)
-    paragraph: false               # Group text into paragraphs
-
-# =============================================================================
-# POSTPROCESSING CONFIGURATION - Result enhancement and fusion
-# =============================================================================
+    priority: 4
+    confidence_threshold: 0.6
+    timeout: 25.0
+    gpu_enabled: true
+    custom_params:
+      width_ths: 0.7
+      height_ths: 0.7
+  trocr:
+    enabled: true
+    priority: 1
+    confidence_threshold: 0.5
+    timeout: 30.0
+    gpu_enabled: true
+    batch_size: 4
+    custom_params:
+      max_image_size: 800
+      use_cache: true
+preprocessing:
+  text_detection_enabled: true
+  text_detection_threshold: 0.7
+  max_regions: 80
+  image_enhancement_enabled: true
+  max_image_size: 2048
+  quality_analysis_enabled: true
+  content_classification_enabled: true
+  preprocessing_timeout: 10.0
+  blur_correction_enabled: true
+  noise_reduction_enabled: true
+  contrast_enhancement_enabled: true
+  rotation_correction_enabled: true
+  nms_threshold: 0.3
+  min_region_area: 100
+  merge_nearby_regions: true
+  region_padding: 5
 postprocessing:
-  # Result fusion settings (combining multiple engine results)
-  result_fusion:
-    enabled: true
-    strategy: "confidence_weighted"  # Options: "voting", "confidence_weighted", "best_result"
-    
-    # Confidence weighting
-    confidence_weighting:
-      min_confidence: 0.3          # Ignore results below this confidence
-      engine_weights:              # Engine-specific weights
-        trocr: 1.0                 # Base weight
-        paddleocr: 0.9
-        tesseract: 0.8
-        easyocr: 0.7
-      consensus_bonus: 0.2         # Bonus for results agreed upon by multiple engines
-    
-    # Voting strategy
-    voting:
-      min_voters: 2                # Minimum engines for voting
-      tie_breaker: "highest_confidence"  # How to break ties
-    
-    # Character-level fusion
-    character_fusion:
-      enabled: true
-      similarity_threshold: 0.8    # Character similarity threshold
-      edit_distance_weight: 0.3    # Weight for edit distance in fusion
-  
-  # Text processing and cleaning
-  text_processing:
-    enabled: true
-    
-    # Basic cleaning
-    cleaning:
-      remove_extra_whitespace: true
-      normalize_unicode: true
-      fix_common_ocr_errors: true
-      remove_artifacts: true       # Remove common OCR artifacts like "|", "~"
-    
-    # Language processing
-    language_processing:
-      detect_language: true
-      spell_check: false           # Disabled by default (can be slow)
-      grammar_check: false         # Disabled by default
-    
-    # Text enhancement
-    enhancement:
-      smart_capitalization: true   # Fix obvious capitalization errors
-      punctuation_correction: true # Fix basic punctuation issues
-      number_validation: true      # Validate and correct numbers
-  
-  # Layout reconstruction
-  layout_reconstruction:
-    enabled: true
-    
-    # Hierarchy building
-    hierarchy:
-      detect_paragraphs: true      # Group lines into paragraphs
-      detect_columns: true         # Handle multi-column layouts
-      detect_tables: false         # Table detection (experimental)
-      preserve_spacing: true       # Maintain original spacing
-    
-    # Reading order
-    reading_order:
-      enabled: true
-      algorithm: "top_to_bottom"   # Options: "top_to_bottom", "left_to_right", "smart"
-      column_detection: true       # Detect multi-column layouts
-    
-    # Formatting preservation
-    formatting:
-      preserve_line_breaks: true
-      preserve_indentation: true
-      merge_broken_words: true     # Fix words split across lines
-  
-  # Advanced confidence analysis
-  confidence_analysis:
-    enabled: true
-    
-    # Multi-dimensional scoring
-    scoring:
-      character_level: true        # Per-character confidence
-      word_level: true            # Per-word confidence
-      line_level: true            # Per-line confidence
-      document_level: true        # Overall document confidence
-    
-    # Confidence factors
-    factors:
-      engine_confidence: 0.4      # Weight of raw engine confidence
-      consensus_factor: 0.3       # Weight of multi-engine consensus
-      text_quality: 0.2           # Weight of text quality metrics
-      layout_consistency: 0.1     # Weight of layout consistency
-    
-    # Quality metrics
-    quality_metrics:
-      character_recognition_rate: true
-      word_recognition_rate: true
-      edit_distance_from_consensus: true
-      layout_preservation_score: true
-
-# =============================================================================
-# PERFORMANCE OPTIMIZATION - Speed and resource management
-# =============================================================================
+  text_cleaning_enabled: true
+  spell_correction_enabled: false
+  result_fusion_enabled: true
+  layout_reconstruction_enabled: true
+  confidence_analysis_enabled: true
+  min_word_confidence: 0.3
+  fusion_strategy: confidence_weighted
+  remove_extra_whitespace: true
+  normalize_unicode: true
+  remove_ocr_artifacts: true
+  preserve_formatting: true
+  preserve_line_breaks: true
+  preserve_paragraphs: true
+  reading_order_analysis: true
 performance:
-  # Model caching and memory management
-  caching:
-    model_cache_size: 3            # Number of models to keep in memory
-    result_cache_enabled: true     # Cache results for identical inputs
-    result_cache_size: 100         # Number of results to cache
-    cache_cleanup_interval: 300    # Cleanup interval in seconds
-  
-  # Batch processing
-  batch_processing:
-    enabled: true
-    batch_size: 4                  # Images per batch
-    prefetch_size: 2               # Images to prefetch
-    parallel_batches: false        # Process batches in parallel
-  
-  # GPU optimization
-  gpu:
-    memory_fraction: 0.8           # Fraction of GPU memory to use
-    allow_growth: true             # Allow GPU memory growth
-    mixed_precision: false         # Use mixed precision (experimental)
-  
-  # CPU optimization
-  cpu:
-    num_threads: 4                 # Number of CPU threads
-    use_optimized_kernels: true    # Use optimized CPU kernels
-    prefer_parallel: true          # Prefer parallel processing
-
-# =============================================================================
-# DEBUGGING AND MONITORING - Development and production insights
-# =============================================================================
-debugging:
-  # Image snapshots for debugging
-  save_snapshots: false           # Save processed images
-  snapshot_stages:               # Which stages to save
-    - "original"
-    - "enhanced"
-    - "text_regions"
-  snapshot_format: "png"         # Image format for snapshots
-  snapshot_directory: "debug/snapshots"
-  
-  # Performance monitoring
-  monitoring:
-    track_processing_time: true   # Track time per stage
-    track_memory_usage: true      # Track memory consumption
-    track_gpu_usage: true         # Track GPU utilization
-    export_metrics: false         # Export metrics to file
-    metrics_file: "debug/metrics.json"
-  
-  # Error handling
-  error_handling:
-    continue_on_engine_failure: true  # Continue with other engines on failure
-    max_retries: 2                    # Maximum retries per engine
-    fallback_to_basic_ocr: true       # Use basic OCR as last resort
-    save_failed_images: false         # Save images that failed processing
-
-# =============================================================================
-# MODEL PATHS AND RESOURCES - File locations and downloads
-# =============================================================================
-models:
-  # Base directory for all models
-  base_directory: "models/"
-  
-  # Automatic model downloading
-  auto_download: true
-  download_timeout: 300            # Timeout for downloads in seconds
-  verify_checksums: true           # Verify downloaded model integrity
-  
-  # Text detection models
-  text_detection:
-    craft_model: "models/text_detection/craft_mlt_25k.pth"
-    craft_refiner: "models/text_detection/craft_refiner_CTW1500.pth"
-  
-  # Image enhancement models
-  enhancement:
-    super_resolution: "models/enhancement/enhancement_model.pth"
-    denoising: "models/enhancement/denoising_model.pth"
-  
-  # Content classification
-  classification:
-    content_classifier: "models/classification/content_classifier.pkl"
-    features_extractor: "models/classification/features_extractor.joblib"
-  
-  # Engine-specific models (paths will be auto-configured by engines)
-  engines:
-    trocr: "auto"                  # Auto-download from HuggingFace
-    paddleocr: "auto"              # Auto-download from PaddleOCR
-    tesseract: "system"            # Use system Tesseract installation
-    easyocr: "auto"                # Auto-download from EasyOCR
-
-# =============================================================================
-# OUTPUT CONFIGURATION - Result formatting and export
-# =============================================================================
-output:
-  # Default output format
-  default_format: "detailed"      # Options: "simple", "detailed", "full"
-  
-  # Output components
-  include_components:
-    text: true                     # Extracted text
-    confidence: true               # Confidence scores
-    bounding_boxes: true           # Text region coordinates
-    metadata: true                 # Processing metadata
-    timing: false                  # Processing timing information
-  
-  # Coordinate system
-  coordinates:
-    format: "absolute"             # Options: "absolute", "relative", "normalized"
-    include_rotation: true         # Include text rotation angles
-    polygon_format: "bbox"         # Options: "bbox", "polygon", "both"
-  
-  # Export formats
-  export_formats:
-    json: true                     # JSON export support
-    xml: false                     # XML export support
-    csv: false                     # CSV export support
-    txt: true                      # Plain text export
-    pdf: false                     # Searchable PDF creation
+  max_processing_time: 3.0
+  memory_limit_mb: 2048
+  cpu_threads: 4
+  gpu_memory_limit_mb: 1024
+  enable_model_caching: true
+  enable_parallel_engines: true
+  processing_priority: normal
+  engine_selection_timeout: 0.1
+  engine_initialization_timeout: 2.0
+  result_fusion_timeout: 0.5
+  cleanup_after_processing: true
+  force_garbage_collection: false
+metadata:
+  version: "1.0.0"
+  created: "2024-01-01"
+  description: "Balanced OCR configuration for general use"

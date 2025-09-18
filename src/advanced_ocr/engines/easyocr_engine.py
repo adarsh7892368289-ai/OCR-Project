@@ -104,7 +104,7 @@ class EasyOCREngine(BaseOCREngine):
         
         # Model components
         self._easyocr_reader: Optional[easyocr.Reader] = None
-        self._model_loader = ModelLoader()
+        self._model_loader = ModelLoader(config)
         self._image_processor = ImageProcessor()
         self._text_cleaner = TextCleaner()
         

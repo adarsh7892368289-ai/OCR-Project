@@ -19,6 +19,7 @@ Classes:
     PreprocessingConfig: Image preprocessing settings
     PostprocessingConfig: Text processing and fusion parameters
     PerformanceConfig: Speed and resource optimization settings
+    CoordinationConfig: Engine coordination and selection parameters
     
 Example:
     >>> config = OCRConfig.load_from_file("config.yaml")
@@ -62,6 +63,74 @@ class ContentTypePreset(Enum):
     TABLE_EXTRACTION = "table_extraction"
 
 
+class EngineSelectionStrategy(Enum):
+    """Engine selection strategies."""
+    CONTENT_BASED = "content_based"
+    PRIORITY_BASED = "priority_based"
+    MULTI_ENGINE = "multi_engine"
+    BEST_CONFIDENCE = "best_confidence"
+
+
+@dataclass
+class CoordinationConfig:
+    """
+    Engine coordination and selection configuration.
+    
+    Controls how the system selects and coordinates multiple OCR engines
+    based on content analysis, performance requirements, and accuracy needs.
+    
+    Attributes:
+        engine_selection_strategy (str): Strategy for selecting OCR engines
+        multi_engine_mode (bool): Enable multiple engines for same content
+        fallback_engines (List[str]): Engines to use if primary engines fail
+        content_based_routing (Dict): Engine routing based on content type
+        parallel_execution (bool): Execute multiple engines in parallel
+        consensus_threshold (float): Threshold for result consensus
+        max_engines_per_task (int): Maximum engines to use per processing task
+    """
+    engine_selection_strategy: str = "content_based"
+    multi_engine_mode: bool = True
+    fallback_engines: List[str] = field(default_factory=lambda: ["tesseract", "paddleocr"])
+    parallel_execution: bool = True
+    consensus_threshold: float = 0.7
+    max_engines_per_task: int = 3
+    
+    # Content-based engine routing
+    content_based_routing: Dict[str, List[str]] = field(default_factory=lambda: {
+        "handwritten": ["trocr", "easyocr"],
+        "printed": ["paddleocr", "tesseract"],
+        "mixed": ["paddleocr", "trocr", "tesseract"]
+    })
+    
+    # Engine combination settings
+    enable_engine_fusion: bool = True
+    fusion_weight_by_confidence: bool = True
+    minimum_engines_for_fusion: int = 2
+    
+    # Performance settings
+    coordination_timeout: float = 1.0
+    engine_selection_timeout: float = 0.1
+    early_termination_enabled: bool = True
+    early_termination_confidence: float = 0.95
+    
+    def validate(self) -> bool:
+        """Validate coordination configuration."""
+        valid_strategies = ["content_based", "priority_based", "multi_engine", "best_confidence"]
+        if self.engine_selection_strategy not in valid_strategies:
+            raise ValueError(f"engine_selection_strategy must be one of {valid_strategies}")
+        
+        if not 0.0 <= self.consensus_threshold <= 1.0:
+            raise ValueError("consensus_threshold must be between 0.0 and 1.0")
+        
+        if self.max_engines_per_task < 1:
+            raise ValueError("max_engines_per_task must be >= 1")
+        
+        if self.coordination_timeout <= 0:
+            raise ValueError("coordination_timeout must be positive")
+        
+        return True
+
+
 @dataclass
 class EngineConfig:
     """
@@ -89,7 +158,7 @@ class EngineConfig:
     gpu_enabled: bool = False
     batch_size: int = 1
     custom_params: Dict[str, Any] = field(default_factory=dict)
-    
+   
     def validate(self) -> bool:
         """
         Validate configuration parameters.
@@ -154,6 +223,8 @@ class PreprocessingConfig:
     min_region_area: int = 100  # Minimum pixel area for text regions
     merge_nearby_regions: bool = True  # Merge overlapping/nearby regions
     region_padding: int = 5  # Padding around detected text regions
+    classification_confidence_threshold: float = 0.7
+    classification_mixed_threshold: float = 0.2
     
     def validate(self) -> bool:
         """Validate preprocessing configuration."""
@@ -288,6 +359,7 @@ class OCRConfig:
         preprocessing (PreprocessingConfig): Image preprocessing settings
         postprocessing (PostprocessingConfig): Text postprocessing settings
         performance (PerformanceConfig): Performance optimization settings
+        coordination (CoordinationConfig): Engine coordination settings
         metadata (Dict[str, Any]): Additional configuration metadata
     
     Example:
@@ -301,6 +373,7 @@ class OCRConfig:
     preprocessing: PreprocessingConfig = field(default_factory=PreprocessingConfig)
     postprocessing: PostprocessingConfig = field(default_factory=PostprocessingConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    coordination: CoordinationConfig = field(default_factory=CoordinationConfig)
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
@@ -402,6 +475,11 @@ class OCRConfig:
         self.performance.max_processing_time = 1.5
         self.performance.enable_parallel_engines = False
         
+        # Coordination for fast profile
+        self.coordination.engine_selection_strategy = "priority_based"
+        self.coordination.multi_engine_mode = False
+        self.coordination.max_engines_per_task = 1
+        
         # Use only fastest engines
         for engine_name in self.engines:
             if engine_name not in ["tesseract", "paddleocr"]:
@@ -422,6 +500,11 @@ class OCRConfig:
         self.performance.max_processing_time = 3.0
         self.performance.enable_parallel_engines = True
         
+        # Coordination for balanced profile
+        self.coordination.engine_selection_strategy = "content_based"
+        self.coordination.multi_engine_mode = True
+        self.coordination.max_engines_per_task = 2
+        
         # Enable primary engines
         for engine_name in ["tesseract", "paddleocr", "trocr"]:
             if engine_name in self.engines:
@@ -441,6 +524,11 @@ class OCRConfig:
         
         self.performance.max_processing_time = 5.0
         self.performance.enable_parallel_engines = True
+        
+        # Coordination for accurate profile
+        self.coordination.engine_selection_strategy = "multi_engine"
+        self.coordination.multi_engine_mode = True
+        self.coordination.max_engines_per_task = 3
         
         # Enable all engines
         for engine_name in self.engines:
@@ -497,6 +585,7 @@ class OCRConfig:
         self.preprocessing.validate()
         self.postprocessing.validate()
         self.performance.validate()
+        self.coordination.validate()
         
         return True
     
@@ -513,6 +602,7 @@ class OCRConfig:
             "preprocessing": asdict(self.preprocessing),
             "postprocessing": asdict(self.postprocessing),
             "performance": asdict(self.performance),
+            "coordination": asdict(self.coordination),
             "metadata": self.metadata
         }
     
@@ -595,6 +685,9 @@ class OCRConfig:
         
         if "performance" in data:
             config.performance = PerformanceConfig(**data["performance"])
+            
+        if "coordination" in data:
+            config.coordination = CoordinationConfig(**data["coordination"])
         
         if "metadata" in data:
             config.metadata = data["metadata"]
@@ -615,6 +708,34 @@ class OCRConfig:
         config = cls()
         config.set_profile(profile)
         return config
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """ 
+        Get configuration value using dot notation path.
+        
+        Args:
+            key (str): Configuration key in dot notation (e.g., "coordination.engine_selection_strategy")
+            default: Default value if key not found
+            
+        Returns:
+            Configuration value or default
+        """
+        try:
+            # Split key by dots and traverse the configuration
+            keys = key.split('.')
+            current = self
+            
+            for k in keys:
+                if hasattr(current, k):
+                    current = getattr(current, k)
+                elif isinstance(current, dict) and k in current:
+                    current = current[k]
+                else:
+                    return default
+            
+            return current
+        except Exception:
+            return default
 
 
 # Default configuration factory functions
@@ -672,9 +793,11 @@ __all__ = [
     'PreprocessingConfig',
     'PostprocessingConfig',
     'PerformanceConfig',
+    'CoordinationConfig',
     'ProcessingProfile',
     'EngineType',
     'ContentTypePreset',
+    'EngineSelectionStrategy',
     'create_fast_config',
     'create_balanced_config', 
     'create_accurate_config',

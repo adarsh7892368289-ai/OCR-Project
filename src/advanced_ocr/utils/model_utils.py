@@ -29,7 +29,7 @@ import json
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, Tuple, List
+from typing import Dict, Any, Optional, Union, Tuple, List, Callable
 import threading
 import time
 import gc
@@ -56,9 +56,29 @@ except ImportError:
     TF_AVAILABLE = False
     tf = None
 
-from ..config import OCRConfig
+try:
+    import sklearn
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    sklearn = None
+    
+try:
+    import gdown
+    GDOWN_AVAILABLE = True
+except ImportError:
+    GDOWN_AVAILABLE = False
 
+try:
+    from craft_text_detector import CRAFT
+    CRAFT_AVAILABLE = True
+except ImportError:
+    CRAFT_AVAILABLE = False    
+
+
+from ..config import OCRConfig
 from ..utils.logger import OCRLogger
+
 
 class ModelCache:
     """
@@ -389,35 +409,48 @@ class ModelVersionManager:
         Check if ML framework is available and compatible.
         
         Args:
-            framework (str): Framework name ('torch', 'tensorflow', 'transformers')
+            framework (str): Framework name ('pytorch', 'tensorflow', 'transformers', 'sklearn')
             min_version (Optional[str]): Minimum required version
             
         Returns:
             Tuple[bool, str]: (is_compatible, reason)
         """
-        if framework == "torch":
+        # Handle framework name variations
+        framework_lower = framework.lower()
+        
+        if framework_lower in ["torch", "pytorch"]:
             if not TORCH_AVAILABLE:
                 return False, "PyTorch not available"
             if min_version and hasattr(torch, '__version__'):
                 return True, f"PyTorch {torch.__version__} available"
             return True, "PyTorch available"
         
-        elif framework == "tensorflow":
+        elif framework_lower in ["tensorflow", "tf"]:
             if not TF_AVAILABLE:
                 return False, "TensorFlow not available"
             if min_version and hasattr(tf, '__version__'):
                 return True, f"TensorFlow {tf.__version__} available"
             return True, "TensorFlow available"
         
-        elif framework == "transformers":
+        elif framework_lower == "transformers":
             if not TRANSFORMERS_AVAILABLE:
                 return False, "Transformers library not available"
             if min_version and hasattr(transformers, '__version__'):
                 return True, f"Transformers {transformers.__version__} available"
             return True, "Transformers library available"
         
+        elif framework_lower == "sklearn":
+            if not SKLEARN_AVAILABLE:
+                return False, "Scikit-learn not available"
+            if min_version and SKLEARN_AVAILABLE:
+                try:
+                    import sklearn
+                    return True, f"Scikit-learn {sklearn.__version__} available"
+                except AttributeError:
+                    return True, "Scikit-learn available"
+            return True, "Scikit-learn available"
+        
         return False, f"Unknown framework: {framework}"
-
 
 class ModelLoader:
     """
@@ -434,37 +467,59 @@ class ModelLoader:
         """
         self.config = config
         self.models_dir = Path(models_dir)
-        self.cache = ModelCache(
-            max_memory_mb=config.performance.memory_limit_mb,
-            max_models=5
-        )
+        
+        # Get memory limit from config with fallback
+        memory_limit = getattr(config, 'performance', None)
+        if memory_limit and hasattr(memory_limit, 'memory_limit_mb'):
+            max_memory = memory_limit.memory_limit_mb
+        else:
+            max_memory = config.get("performance.memory_limit_mb", 2048)
+        
+        self.cache = ModelCache(max_memory_mb=max_memory, max_models=5)
         self.downloader = ModelDownloader(models_dir)
         self.version_manager = ModelVersionManager(config)
         self.logger = OCRLogger("ModelLoader")
         
         # Model loading functions registry
-        self._loaders: Dict[str, callable] = {}
+        self._loaders: Dict[str, Callable] = {}
         self._register_default_loaders()
     
-    def register_loader(self, model_type: str, loader_func: callable) -> None:
+    def _download_craft_model(self, model_path: Path) -> None:
+        """Download CRAFT model using gdown."""
+        if not GDOWN_AVAILABLE:
+            raise ImportError("gdown not available. Install with: pip install gdown")
+        
+        import gdown
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        self.logger.info("Downloading CRAFT model (17MB)...")
+        
+        # Official CRAFT model from Google Drive
+        file_id = "1Jk4eGD7crsqCCg9C9VjCLkMN3ze8kutZ"
+        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(model_path), quiet=False)
+        
+        self.logger.info(f"CRAFT model downloaded: {model_path}")
+
+    def register_loader(self, model_type: str, loader_func: Callable) -> None:
         """
         Register custom model loader function.
         
         Args:
             model_type (str): Model type identifier
-            loader_func (callable): Function to load model
+            loader_func (Callable): Function to load model
         """
         self._loaders[model_type] = loader_func
         self.logger.debug(f"Registered loader for model type: {model_type}")
     
-    def load_model(self, model_name: str, model_type: str, 
-                   force_reload: bool = False, **kwargs) -> Any:
+    def load_model(self, model_name: str, model_type: str = None, 
+                   framework: str = None, force_reload: bool = False, **kwargs) -> Any:
         """
         Load model with caching and validation.
         
         Args:
             model_name (str): Name of the model
             model_type (str): Type of model (e.g., 'pytorch', 'tensorflow', 'pickle')
+            framework (str): Framework name (alternative to model_type for compatibility)
             force_reload (bool): Force reload even if cached
             **kwargs: Additional arguments for model loading
             
@@ -475,6 +530,12 @@ class ModelLoader:
             ValueError: If model type not supported or loading fails
             FileNotFoundError: If model file not found
         """
+        # Handle framework parameter for text_detector.py compatibility
+        if framework and not model_type:
+            model_type = framework
+        elif not model_type and not framework:
+            raise ValueError("Either model_type or framework parameter must be provided")
+        
         cache_key = f"{model_name}_{model_type}"
         
         # Check cache first
@@ -492,9 +553,9 @@ class ModelLoader:
         model_config = self.config.get(f"models.{model_name}", {})
         
         # Check framework compatibility
-        framework = model_config.get("framework")
-        if framework:
-            is_compatible, reason = self.version_manager.check_framework_compatibility(framework)
+        framework_name = model_config.get("framework", model_type)
+        if framework_name:
+            is_compatible, reason = self.version_manager.check_framework_compatibility(framework_name)
             if not is_compatible:
                 raise ValueError(f"Framework compatibility issue: {reason}")
         
@@ -539,15 +600,27 @@ class ModelLoader:
         """Clear all cached models."""
         self.cache.clear()
     
+    # COMPLETE FIX: Replace the _register_default_loaders method in your model_utils.py
+
     def _register_default_loaders(self) -> None:
         """Register default model loaders."""
         
         def load_pytorch_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load PyTorch model."""
+            """Load PyTorch model with CRAFT auto-download."""
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch not available")
             
             model_path = self.models_dir / f"{model_name}.pth"
+            
+            # Special handling for CRAFT model
+            if model_name == "craft_mlt_25k" and not model_path.exists():
+                self.logger.info("CRAFT model not found locally. Downloading...")
+                try:
+                    self._download_craft_model(model_path)
+                except Exception as e:
+                    self.logger.error(f"Failed to download CRAFT model: {e}")
+                    raise FileNotFoundError(f"CRAFT model download failed: {e}")
+            
             if not model_path.exists():
                 raise FileNotFoundError(f"Model file not found: {model_path}")
             
@@ -566,20 +639,36 @@ class ModelLoader:
             return tf.keras.models.load_model(str(model_path))
         
         def load_transformers_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load Transformers model."""
+            """Load Transformers model with proper TrOCR support."""
             if not TRANSFORMERS_AVAILABLE:
                 raise ImportError("Transformers library not available")
             
-            model_class = model_config.get("model_class", "AutoModel")
+            if "trocr" in model_name.lower():
+                model_class = "VisionEncoderDecoderModel"
+            else:
+                model_class = model_config.get("model_class", "AutoModel")
+            
+            # FIX: Map generic model names to actual HuggingFace model identifiers
+            model_name_mapping = {
+                "trocr": "microsoft/trocr-base-printed",  # Default TrOCR model
+                "trocr_handwritten": "microsoft/trocr-base-handwritten", 
+                "trocr_printed": "microsoft/trocr-base-printed",
+                "trocr_large": "microsoft/trocr-large-printed",
+            }
+            
+            # Use mapped name if available
+            actual_model_name = model_name_mapping.get(model_name, model_name)
+            
             model_class_obj = getattr(transformers, model_class)
             
-            # Check if local model exists
+            # Check if local model exists first
             local_path = self.models_dir / model_name
             if local_path.exists():
                 return model_class_obj.from_pretrained(str(local_path))
             else:
-                # Download from HuggingFace Hub
-                return model_class_obj.from_pretrained(model_name)
+                # Download from HuggingFace Hub using the correct identifier
+                self.logger.info(f"Loading model from HuggingFace: {actual_model_name}")
+                return model_class_obj.from_pretrained(actual_model_name)
         
         def load_pickle_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
             """Load pickled model."""
@@ -590,15 +679,29 @@ class ModelLoader:
             with open(model_path, 'rb') as f:
                 return pickle.load(f)
         
+        def load_sklearn_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
+            """Load scikit-learn model."""
+            if not SKLEARN_AVAILABLE:
+                raise ImportError("Scikit-learn not available")
+            
+            model_path = self.models_dir / f"{model_name}.pkl"
+            if not model_path.exists():
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+            
+            with open(model_path, 'rb') as f:
+                return pickle.load(f)
+        
         # Register default loaders
         self._loaders.update({
             'pytorch': load_pytorch_model,
+            'torch': load_pytorch_model,  # Alias
             'tensorflow': load_tensorflow_model,
+            'tf': load_tensorflow_model,  # Alias
             'transformers': load_transformers_model,
             'pickle': load_pickle_model,
+            'sklearn': load_sklearn_model,
         })
-
-
+        
 # Decorator for automatic model caching
 def cached_model_load(model_name: str, model_type: str):
     """
@@ -660,6 +763,7 @@ def get_available_frameworks() -> Dict[str, bool]:
         'pytorch': TORCH_AVAILABLE,
         'tensorflow': TF_AVAILABLE,
         'transformers': TRANSFORMERS_AVAILABLE,
+        'sklearn': SKLEARN_AVAILABLE,
     }
 
 

@@ -424,7 +424,7 @@ class OCRLogger:
         >>> logger.log_critical_metrics(processing_time=2.1, regions_filtered=45, chars_extracted=1200)
     """
     
-    def __init__(self, name: str, config: Optional[LogConfig] = None):
+    def __init__(self, name: str = None, config: Optional[LogConfig] = None):
         """
         Initialize performance logger.
         
@@ -432,6 +432,7 @@ class OCRLogger:
             name: Logger name identifier
             config: Optional logging configuration (uses defaults if None)
         """
+                
         self.name = name
         self.config = config or LogConfig()
         self.metrics_collector = MetricsCollector(name)
@@ -447,7 +448,8 @@ class OCRLogger:
         
         # Thread safety
         self._lock = threading.Lock()
-    
+        self._setup_console_encoding()
+        
     def _setup_handlers(self):
         """Setup logging handlers based on configuration."""
         # Clear existing handlers
@@ -645,16 +647,108 @@ class OCRLogger:
     
     def _log_with_extra(self, level: int, message: str, extra: Optional[Dict[str, Any]]):
         """Internal method to log messages with extra data."""
-        if extra:
-            # Create a LogRecord with extra data
-            record = self.logger.makeRecord(
-                self.logger.name, level, __file__, 0, message, (), None
+        try:
+            # Sanitize message to replace problematic Unicode characters
+            safe_message = self._sanitize_unicode_message(str(message))
+            
+            if extra:
+                # Create a LogRecord with extra data
+                record = self.logger.makeRecord(
+                    self.logger.name, level, __file__, 0, safe_message, (), None
+                )
+                record.extra_data = extra
+                self.logger.handle(record)
+            else:
+                self.logger.log(level, safe_message)
+                
+        except UnicodeEncodeError as e:
+            # Fallback: encode as ASCII with error replacement
+            fallback_message = str(message).encode('ascii', errors='replace').decode('ascii')
+            
+            # Log the original error for debugging
+            fallback_record = self.logger.makeRecord(
+                self.logger.name, logging.WARNING, __file__, 0, 
+                f"Unicode encoding error in log message, using fallback: {fallback_message}", 
+                (), None
             )
-            record.extra_data = extra
-            self.logger.handle(record)
-        else:
-            self.logger.log(level, message)
-    
+            self.logger.handle(fallback_record)
+            
+            # Log the sanitized version
+            if extra:
+                record = self.logger.makeRecord(
+                    self.logger.name, level, __file__, 0, fallback_message, (), None
+                )
+                record.extra_data = extra
+                self.logger.handle(record)
+            else:
+                self.logger.log(level, fallback_message)
+    def _sanitize_unicode_message(self, message: str) -> str:
+        """
+        Sanitize Unicode characters that cause encoding issues on Windows console.
+        
+        Args:
+            message: Original message that may contain problematic Unicode
+            
+        Returns:
+            str: Sanitized message with ASCII-safe replacements
+        """
+        # Dictionary of problematic Unicode characters and their ASCII replacements
+        unicode_replacements = {
+            '\u2192': '->',   # → (rightwards arrow)
+            '\u2190': '<-',   # ← (leftwards arrow) 
+            '\u2194': '<->', # ↔ (left right arrow)
+            '\u2193': 'v',    # ↓ (downwards arrow)
+            '\u2191': '^',    # ↑ (upwards arrow)
+            '\u2026': '...',  # … (horizontal ellipsis)
+            '\u2013': '-',    # – (en dash)
+            '\u2014': '--',   # — (em dash)
+            '\u201c': '"',    # " (left double quotation mark)
+            '\u201d': '"',    # " (right double quotation mark)
+            '\u2018': "'",    # ' (left single quotation mark)
+            '\u2019': "'",    # ' (right single quotation mark)
+        }
+        
+        # Replace known problematic characters
+        sanitized = message
+        for unicode_char, replacement in unicode_replacements.items():
+            sanitized = sanitized.replace(unicode_char, replacement)
+        
+        # Additional safety: replace any remaining non-ASCII characters
+        try:
+            # Test if the message can be encoded with the system's default encoding
+            sanitized.encode('cp1252')
+            return sanitized
+        except UnicodeEncodeError:
+            # If it still can't be encoded, use aggressive ASCII conversion
+            return sanitized.encode('ascii', errors='replace').decode('ascii')
+
+    # Add this method to your OCRLogger class as well
+    def _setup_console_encoding(self):
+        """
+        Attempt to configure console for UTF-8 output on Windows.
+        This is called during logger initialization.
+        """
+        try:
+            import sys
+            
+            # Try to reconfigure stdout/stderr for UTF-8 if supported
+            if hasattr(sys.stdout, 'reconfigure'):
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            if hasattr(sys.stderr, 'reconfigure'):
+                sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+                
+            # On Windows, try to set console code page to UTF-8
+            import os
+            if os.name == 'nt':
+                try:
+                    import subprocess
+                    subprocess.run(['chcp', '65001'], shell=True, capture_output=True)
+                except:
+                    pass  # Ignore if we can't change code page
+                    
+        except Exception:
+            # If anything fails, just continue - the sanitization will handle it
+            pass
     def _log_stage_start(self, stage_name: str):
         """Internal method to log processing stage start."""
         self.debug(f"Processing stage started: {stage_name}")
@@ -678,6 +772,45 @@ class OCRLogger:
             self.debug(
                 f"Stage metric: {stage_name}.{metric_name} = {metric_value}"
             )
+            
+            
+    def _log_custom_metric(self, stage_name: str, metric_name: str, metric_value: Any):
+        """Internal method to log custom stage metrics."""
+        if self.config.log_level == LogLevel.DEBUG:
+            self.debug(
+                f"Stage metric: {stage_name}.{metric_name} = {metric_value}"
+            )
+    
+    def start_timer(self) -> float:
+        """
+        Start a timer and return the start timestamp.
+        
+        Returns:
+            float: Start timestamp for timing operations
+            
+        Example:
+            >>> start_time = logger.start_timer()
+            >>> # ... processing ...
+            >>> duration = logger.end_timer(start_time)
+        """
+        return time.time()
+    
+    def end_timer(self, start_time: float) -> float:
+        """
+        End a timer and return the duration.
+        
+        Args:
+            start_time: Start timestamp from start_timer()
+            
+        Returns:
+            float: Duration in seconds
+            
+        Example:
+            >>> start_time = logger.start_timer()
+            >>> # ... processing ...
+            >>> duration = logger.end_timer(start_time)
+        """
+        return time.time() - start_time
 
 
 class OCRDebugLogger(OCRLogger):

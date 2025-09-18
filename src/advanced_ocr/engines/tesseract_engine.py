@@ -57,8 +57,9 @@ class TesseractEngine(BaseOCREngine):
     
     def __init__(self, config: EngineConfig):
         """Initialize Tesseract engine with optimized settings."""
-        super().__init__("tesseract", config)
-        
+        super().__init__(config)
+        # Set engine name after initialization
+        self.name = "tesseract"
         # Initialize pipeline utilities correctly
         self.image_processor = ImageProcessor()
         self.text_cleaner = TextCleaner()
@@ -119,23 +120,23 @@ class TesseractEngine(BaseOCREngine):
             
         return ' '.join(config_parts)
     
-    def extract(self, image: np.ndarray, text_regions: List[BoundingBox]) -> OCRResult:
+    def _extract_implementation(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
         """
         Extract text from preprocessed image using provided text regions.
-        
+
         Args:
             image: ALREADY PREPROCESSED image from image_processor.py
             text_regions: Text regions from text_detector.py (via image_processor.py)
-            
+
         Returns:
             OCRResult with extracted text and basic confidence scores
         """
         if self._status != EngineStatus.READY:
             raise RuntimeError(f"Engine not ready: {self._status}")
-            
+
         try:
             self._status = EngineStatus.PROCESSING
-            
+
             # Convert numpy array to PIL Image for Tesseract
             if isinstance(image, np.ndarray):
                 # Handle different channel formats
@@ -145,35 +146,35 @@ class TesseractEngine(BaseOCREngine):
                 pil_image = Image.fromarray(image)
             else:
                 pil_image = image
-            
+
             # Extract text from each region
             extracted_words = []
             total_confidence = 0.0
             processed_regions = 0
-            
+
             for region in text_regions:
                 try:
                     # Extract region from image
-                    region_image = self._extract_region(pil_image, region)
-                    
+                    region_image = self._extract_region(pil_image, region.bbox)
+
                     if region_image is None:
                         continue
-                    
+
                     # Run Tesseract on region
-                    region_result = self._extract_from_region(region_image, region)
-                    
+                    region_result = self._extract_from_region(region_image, region.bbox)
+
                     if region_result:
                         extracted_words.extend(region_result['words'])
                         total_confidence += region_result['confidence']
                         processed_regions += 1
-                        
+
                 except Exception as e:
                     self.logger.warning(f"Failed to process region {region}: {e}")
                     continue
-            
+
             # Calculate overall confidence
             overall_confidence = total_confidence / max(processed_regions, 1)
-            
+
             # Create confidence metrics
             confidence_metrics = ConfidenceMetrics(
                 overall_confidence=overall_confidence,
@@ -181,7 +182,7 @@ class TesseractEngine(BaseOCREngine):
                 consensus_confidence=0.0,  # Single engine, no consensus
                 validation_confidence=self._calculate_validation_confidence(extracted_words)
             )
-            
+
             # Build result
             result = OCRResult(
                 engine_name=self.name,
@@ -196,10 +197,10 @@ class TesseractEngine(BaseOCREngine):
                     'total_regions': len(text_regions)
                 }
             )
-            
+
             self._status = EngineStatus.READY
             return result
-            
+
         except Exception as e:
             self._status = EngineStatus.ERROR
             self.logger.error(f"Tesseract extraction failed: {e}")

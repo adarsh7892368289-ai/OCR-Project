@@ -1,6 +1,6 @@
 # src/advanced_ocr/engines/base_engine.py
 """
-Advanced OCR Base Engine Module
+Advanced OCR Base Engine Module - FIXED VERSION
 
 This module provides the abstract base class and common functionality for all OCR
 engines in the advanced OCR system. It defines the standard interface that all
@@ -81,12 +81,6 @@ class BaseOCREngine(ABC):
     - Process ALREADY PREPROCESSED images and text regions
     - Return raw OCRResult (no postprocessing)
     
-    WHAT IT DOESN'T DO (per architecture plan):
-    ❌ Image preprocessing (done by image_processor.py)
-    ❌ Text region detection (provided by image_processor.py) 
-    ❌ Result postprocessing (done by text_processor.py)
-    ❌ Complex validation (handled by pipeline orchestrators)
-    ❌ Resource management complexity
     """
     
     def __init__(self, config: OCRConfig):
@@ -188,13 +182,14 @@ class BaseOCREngine(ABC):
         pass
     
     def _create_error_result(self, error_msg: str, processing_time: float) -> OCRResult:
-        """Create error result for failed extractions"""
+        """Create error result for failed extractions - FIXED VERSION"""
         return OCRResult(
             text="",
             confidence=0.0,
-            bounding_boxes=[],
-            engine_name=self.engine_name,
             processing_time=processing_time,
+            engine_name=self.engine_name,
+            success=False,
+            error_message=error_msg,
             metadata={
                 'error': error_msg,
                 'extraction_failed': True

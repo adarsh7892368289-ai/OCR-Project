@@ -65,10 +65,113 @@ class ContentType(Enum):
 
 @dataclass
 class BoundingBox:
-    """Flexible bounding box with multiple coordinate format support."""
+    """Flexible bounding box with multiple coordinate format support - FIXED VERSION."""
     coordinates: Union[Tuple[float, float, float, float], List[Tuple[float, float]]]
     format: BoundingBoxFormat = BoundingBoxFormat.XYXY
     confidence: float = 1.0
+    
+    def __init__(self, *args, format: BoundingBoxFormat = BoundingBoxFormat.XYXY, confidence: float = 1.0):
+        """
+        Initialize BoundingBox with flexible input formats:
+        
+        # Single tuple/list of coordinates
+        BoundingBox((x1, y1, x2, y2))
+        BoundingBox([x, y, w, h])
+        
+        # Four separate coordinates
+        BoundingBox(x1, y1, x2, y2)
+        
+        # Two points (for test compatibility)
+        BoundingBox((x1, y1), (x2, y2))
+        
+        # Polygon points
+        BoundingBox([(x1,y1), (x2,y2), (x3,y3), ...])
+        """
+        self.format = format
+        self.confidence = confidence
+        
+        if len(args) == 1:
+            # Single argument - could be tuple/list of coordinates or list of points
+            arg = args[0]
+            if isinstance(arg, (tuple, list)):
+                if len(arg) == 4 and all(isinstance(x, (int, float)) for x in arg):
+                    # Single tuple/list of 4 coordinates: (x1, y1, x2, y2) or (x, y, w, h)
+                    self.coordinates = tuple(float(x) for x in arg)
+                elif len(arg) > 0 and isinstance(arg[0], (tuple, list)):
+                    # List of points: [(x1,y1), (x2,y2), ...]
+                    self.coordinates = [tuple(float(coord) for coord in point) for point in arg]
+                    self.format = BoundingBoxFormat.POLYGON
+                else:
+                    raise ValueError(f"Invalid single argument format: {arg}")
+            else:
+                raise ValueError(f"Single argument must be tuple/list, got {type(arg)}")
+                
+        elif len(args) == 2:
+            # Two arguments - assume two points: (x1, y1), (x2, y2)
+            point1, point2 = args
+            if (isinstance(point1, (tuple, list)) and len(point1) == 2 and 
+                isinstance(point2, (tuple, list)) and len(point2) == 2):
+                x1, y1 = float(point1[0]), float(point1[1])
+                x2, y2 = float(point2[0]), float(point2[1])
+                self.coordinates = (x1, y1, x2, y2)
+                self.format = BoundingBoxFormat.XYXY
+            else:
+                raise ValueError(f"Two arguments must be points (x,y), got {args}")
+                
+        elif len(args) == 4:
+            # Four arguments - assume x1, y1, x2, y2
+            self.coordinates = tuple(float(x) for x in args)
+            self.format = BoundingBoxFormat.XYXY
+            
+        else:
+            raise ValueError(f"Invalid number of arguments: {len(args)}. Expected 1, 2, or 4.")
+    
+    # ADDED: Direct property access for backward compatibility
+    @property
+    def x1(self) -> float:
+        """X1 coordinate (left edge)."""
+        x1, y1, x2, y2 = self.to_xyxy()
+        return x1
+    
+    @property
+    def y1(self) -> float:
+        """Y1 coordinate (top edge)."""
+        x1, y1, x2, y2 = self.to_xyxy()
+        return y1
+    
+    @property
+    def x2(self) -> float:
+        """X2 coordinate (right edge)."""
+        x1, y1, x2, y2 = self.to_xyxy()
+        return x2
+    
+    @property
+    def y2(self) -> float:
+        """Y2 coordinate (bottom edge)."""
+        x1, y1, x2, y2 = self.to_xyxy()
+        return y2
+    
+    @property
+    def x(self) -> float:
+        """X coordinate (left edge) - alias for x1."""
+        return self.x1
+    
+    @property
+    def y(self) -> float:
+        """Y coordinate (top edge) - alias for y1."""
+        return self.y1
+    
+    @property
+    def width(self) -> float:
+        """Width of bounding box."""
+        x, y, w, h = self.to_xywh()
+        return w
+    
+    @property
+    def height(self) -> float:
+        """Height of bounding box."""
+        x, y, w, h = self.to_xywh()
+        return h
     
     def to_xyxy(self) -> Tuple[float, float, float, float]:
         """Convert to (x1, y1, x2, y2) format."""
@@ -121,7 +224,6 @@ class BoundingBox:
         
         return intersection / union if union > 0 else 0.0
 
-
 @dataclass
 class ConfidenceMetrics:
     """Multi-dimensional confidence scoring for OCR results."""
@@ -145,7 +247,20 @@ class ConfidenceMetrics:
                 self.std_confidence = statistics.stdev(self.char_confidences)
             else:
                 self.std_confidence = 0.0
-
+    
+    def __format__(self, format_spec: str) -> str:
+        """Support formatting - returns overall confidence formatted."""
+        if format_spec:
+            return format(self.overall, format_spec)
+        return str(self.overall)
+    
+    def __float__(self) -> float:
+        """Convert to float - returns overall confidence."""
+        return float(self.overall)
+    
+    def __str__(self) -> str:
+        """String representation."""
+        return f"{self.overall:.3f}"
 
 @dataclass
 class ProcessingMetrics:
@@ -180,7 +295,7 @@ class ProcessingMetrics:
 
 @dataclass
 class TextRegion:
-    """Base hierarchical text region with spatial and metadata information."""
+    """Base hierarchical text region with spatial and metadata information - FIXED VERSION."""
     text: str
     bbox: BoundingBox
     confidence: ConfidenceMetrics
@@ -199,6 +314,13 @@ class TextRegion:
     children_ids: List[str] = field(default_factory=list)
     processing_time: float = 0.0
     engine_name: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    # ADDED: coordinates property for backward compatibility
+    @property
+    def coordinates(self) -> Tuple[float, float, float, float]:
+        """Get coordinates as (x, y, width, height) for backward compatibility."""
+        return self.bbox.to_xywh()
 
 
 @dataclass
@@ -413,7 +535,6 @@ class BatchResult:
             self.avg_confidence = sum(r.confidence for r in self.results) / len(self.results)
             self.success_rate = sum(1 for r in self.results if r.success) / len(self.results)
             self.engines_used = list(set(r.engine_name for r in self.results))
-
 
 # Type aliases for convenience
 BBox = BoundingBox
