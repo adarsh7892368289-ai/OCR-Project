@@ -1,732 +1,581 @@
-# src/advanced_ocr/preprocessing/image_processor.py
 """
-Advanced OCR Image Preprocessing Module
-
-This module provides comprehensive image preprocessing orchestration for the advanced OCR system.
-It coordinates quality analysis, intelligent image enhancement, and text region detection to
-optimize images for OCR engine processing.
-
-The module focuses on:
-- Unified preprocessing pipeline orchestration from raw images to OCR-ready data
-- Intelligent enhancement strategies based on comprehensive quality analysis
-- Text region detection and filtering to reduce false positives
-- Memory-efficient processing with configurable image size limits
-- Integration with quality analyzer and text detector components
-
-Classes:
-    EnhancementStrategy: Enumeration of image enhancement strategies
-    PreprocessingResult: Data container for complete preprocessing results
-    ImageEnhancer: Intelligent image enhancement based on quality metrics
-    ImageProcessor: Main orchestrator coordinating all preprocessing steps
-
-Functions:
-    create_image_processor: Factory function for creating image processor instances
-    validate_preprocessing_result: Validation function for preprocessing results
-    extract_enhancement_summary: Utility for extracting enhancement operation summaries
-
-Example:
-    >>> from advanced_ocr.preprocessing.image_processor import ImageProcessor
-    >>> from advanced_ocr.utils.model_utils import ModelLoader
-    >>> processor = ImageProcessor(ModelLoader(), config)
-    >>> result = processor.process_image(raw_image)
-    >>> print(f"Enhanced image shape: {result.enhanced_image.shape}")
-    >>> print(f"Detected regions: {len(result.text_regions)}")
-
-    >>> # Access quality metrics
-    >>> quality = result.quality_metrics
-    >>> print(f"Overall quality: {quality.overall_level.value} ({quality.overall_score:.3f})")
+Advanced OCR System - Image Preprocessing Orchestrator
+Orchestrate image enhancement based on quality analysis for optimal OCR results.
 """
 
 import cv2
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Any, Union
-import time
+import logging
+from typing import Tuple, Optional, Dict, Any
 from dataclasses import dataclass
-from enum import Enum
+import time
 
-# Import from parent modules (correct relative imports)
+from .quality_analyzer import QualityAnalyzer, QualityMetrics, QualityIssue
 from ..config import OCRConfig
-from ..utils.logger import OCRLogger
-from ..utils.model_utils import ModelLoader
-from ..results import TextRegion, BoundingBox
-from .quality_analyzer import QualityAnalyzer, QualityMetrics, QualityLevel
-from .text_detector import TextDetector
-
-
-class EnhancementStrategy(Enum):
-    """Image enhancement strategies based on quality analysis."""
-    MINIMAL = "minimal"           # Excellent quality - minimal processing
-    STANDARD = "standard"         # Good quality - standard enhancements
-    AGGRESSIVE = "aggressive"     # Poor quality - aggressive processing
-    DENOISING = "denoising"       # High noise - focus on noise reduction
-    SHARPENING = "sharpening"     # Blurry - focus on sharpening
-    CONTRAST = "contrast"         # Low contrast - focus on contrast enhancement
-    BRIGHTNESS = "brightness"     # Poor lighting - focus on brightness correction
+from ..utils.image_utils import ImageProcessor as ImageUtils, CoordinateTransformer
+from ..results import ProcessingMetrics
 
 
 @dataclass
 class PreprocessingResult:
-    """
-    Complete preprocessing result containing enhanced image, regions, and metrics.
-    """
-    # Enhanced image data
-    enhanced_image: np.ndarray          # Final preprocessed image
-    original_image: np.ndarray          # Original input image (for reference)
+    """Result of image preprocessing operation."""
+    
+    enhanced_image: np.ndarray
+    original_image: np.ndarray
+    quality_metrics: QualityMetrics
+    processing_metrics: ProcessingMetrics
+    transformations_applied: Dict[str, Any]
+    scale_factor: float = 1.0
+    coordinate_transformer: Optional[CoordinateTransformer] = None
 
-    # Text detection results
-    text_regions: List[TextRegion]      # Detected text regions (20-80 regions)
-
-    # Quality analysis
-    quality_metrics: QualityMetrics     # Comprehensive quality analysis
-
-    # Processing metadata
-    enhancement_strategy: EnhancementStrategy  # Strategy used for enhancement
-    processing_time: float              # Total processing time in seconds
-    enhancements_applied: List[str]     # List of enhancement operations applied
-
-    # Image metadata
-    original_dimensions: Tuple[int, int]   # Original image dimensions (W, H)
-    final_dimensions: Tuple[int, int]      # Final image dimensions (W, H)
-    scale_factor: float                    # Scale factor applied (if any)
-
-
-class ImageEnhancer:
-    """
-    Intelligent image enhancement based on quality analysis.
-    """
-
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize image enhancer.
-
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("image_enhancer")
-
-        # Enhancement parameters from config
-        self.enable_denoising = config.get("preprocessing.enhancement.enable_denoising", True)
-        self.enable_sharpening = config.get("preprocessing.enhancement.enable_sharpening", True)
-        self.enable_contrast = config.get("preprocessing.enhancement.enable_contrast", True)
-        self.enable_brightness = config.get("preprocessing.enhancement.enable_brightness", True)
-
-        # Enhancement thresholds
-        self.blur_threshold_for_sharpening = config.get("preprocessing.thresholds.blur_for_sharpening", 0.6)
-        self.noise_threshold_for_denoising = config.get("preprocessing.thresholds.noise_for_denoising", 0.6)
-        self.contrast_threshold_for_enhancement = config.get("preprocessing.thresholds.contrast_for_enhancement", 0.6)
-        self.brightness_threshold_for_correction = config.get("preprocessing.thresholds.brightness_for_correction", 0.6)
-    def _ensure_opencv_compatible(self, image: np.ndarray) -> np.ndarray:
-        """
-        Ensure image has compatible channels for OpenCV operations.
-        
-        OpenCV functions like bilateralFilter only accept:
-        - Grayscale (1 channel)  
-        - RGB/BGR (3 channels)
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            np.ndarray: OpenCV-compatible image
-        """
-        if len(image.shape) == 2:
-            # Already grayscale - compatible
-            return image
-        elif len(image.shape) == 3:
-            channels = image.shape[2]
-            if channels == 4:
-                # RGBA -> RGB: Remove alpha channel
-                return cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-            elif channels == 3:
-                # RGB/BGR - already compatible
-                return image
-            elif channels == 1:
-                # Single channel - squeeze to 2D
-                return image.squeeze()
-            else:
-                # Unknown format - convert to RGB as fallback
-                return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        else:
-            raise ValueError(f"Invalid image shape for OpenCV operations: {image.shape}")
-
-    def determine_enhancement_strategy(self, quality_metrics: QualityMetrics) -> EnhancementStrategy:
-        """
-        Determine optimal enhancement strategy based on quality analysis.
-
-        Args:
-            quality_metrics (QualityMetrics): Quality analysis results
-
-        Returns:
-            EnhancementStrategy: Recommended enhancement strategy
-        """
-        # Check overall quality first
-        if quality_metrics.overall_level == QualityLevel.EXCELLENT:
-            return EnhancementStrategy.MINIMAL
-
-        # Identify primary quality issues and select specialized strategy
-        quality_issues = []
-
-        if quality_metrics.noise_score < self.noise_threshold_for_denoising:
-            quality_issues.append(('noise', quality_metrics.noise_score))
-
-        if quality_metrics.blur_score < self.blur_threshold_for_sharpening:
-            quality_issues.append(('blur', quality_metrics.blur_score))
-
-        if quality_metrics.contrast_score < self.contrast_threshold_for_enhancement:
-            quality_issues.append(('contrast', quality_metrics.contrast_score))
-
-        if quality_metrics.brightness_score < self.brightness_threshold_for_correction:
-            quality_issues.append(('brightness', quality_metrics.brightness_score))
-
-        # Select strategy based on most severe issue
-        if not quality_issues:
-            return EnhancementStrategy.STANDARD
-
-        # Sort by severity (lowest score = most severe)
-        quality_issues.sort(key=lambda x: x[1])
-        primary_issue = quality_issues[0][0]
-
-        strategy_map = {
-            'noise': EnhancementStrategy.DENOISING,
-            'blur': EnhancementStrategy.SHARPENING,
-            'contrast': EnhancementStrategy.CONTRAST,
-            'brightness': EnhancementStrategy.BRIGHTNESS
-        }
-
-        # If multiple severe issues, use aggressive strategy
-        severe_issues = [issue for issue, score in quality_issues if score < 0.4]
-        if len(severe_issues) >= 2:
-            return EnhancementStrategy.AGGRESSIVE
-
-        return strategy_map.get(primary_issue, EnhancementStrategy.STANDARD)
-
-    def enhance_image(self, image: np.ndarray, strategy: EnhancementStrategy,
-                     quality_metrics: QualityMetrics) -> Tuple[np.ndarray, List[str]]:
-        """
-        Apply image enhancements based on strategy and quality metrics.
-
-        Args:
-            image (np.ndarray): Input image
-            strategy (EnhancementStrategy): Enhancement strategy
-            quality_metrics (QualityMetrics): Quality analysis results
-
-        Returns:
-            Tuple[np.ndarray, List[str]]: (enhanced_image, applied_enhancements)
-        """
-        enhanced_image = image.copy()
-        applied_enhancements = []
-
-        self.logger.debug(f"Applying enhancement strategy: {strategy.value}")
-
-        if strategy == EnhancementStrategy.MINIMAL:
-            # Minimal processing for excellent quality images
-            enhanced_image = self._apply_minimal_enhancements(enhanced_image)
-            applied_enhancements.extend(['gamma_correction', 'slight_sharpening'])
-
-        elif strategy == EnhancementStrategy.DENOISING:
-            # Focus on noise reduction
-            enhanced_image = self._apply_denoising(enhanced_image, quality_metrics)
-            applied_enhancements.extend(['bilateral_filter', 'median_filter'])
-
-            # Also apply other enhancements if needed
-            enhanced_image = self._apply_contrast_enhancement(enhanced_image, quality_metrics)
-            applied_enhancements.append('contrast_enhancement')
-
-        elif strategy == EnhancementStrategy.SHARPENING:
-            # Focus on sharpening
-            enhanced_image = self._apply_sharpening(enhanced_image, quality_metrics)
-            applied_enhancements.extend(['unsharp_mask', 'edge_enhancement'])
-
-            # Also apply contrast if needed
-            enhanced_image = self._apply_contrast_enhancement(enhanced_image, quality_metrics)
-            applied_enhancements.append('contrast_enhancement')
-
-        elif strategy == EnhancementStrategy.CONTRAST:
-            # Focus on contrast enhancement
-            enhanced_image = self._apply_contrast_enhancement(enhanced_image, quality_metrics)
-            enhanced_image = self._apply_histogram_equalization(enhanced_image)
-            applied_enhancements.extend(['contrast_enhancement', 'histogram_equalization'])
-
-        elif strategy == EnhancementStrategy.BRIGHTNESS:
-            # Focus on brightness correction
-            enhanced_image = self._apply_brightness_correction(enhanced_image, quality_metrics)
-            enhanced_image = self._apply_contrast_enhancement(enhanced_image, quality_metrics)
-            applied_enhancements.extend(['brightness_correction', 'contrast_enhancement'])
-
-        elif strategy == EnhancementStrategy.AGGRESSIVE:
-            # Apply comprehensive enhancements
-            enhanced_image = self._apply_comprehensive_enhancement(enhanced_image, quality_metrics)
-            applied_enhancements.extend(['denoising', 'sharpening', 'contrast', 'brightness', 'morphology'])
-
-        else:  # STANDARD
-            # Standard enhancement pipeline
-            enhanced_image = self._apply_standard_enhancements(enhanced_image, quality_metrics)
-            applied_enhancements.extend(['denoising', 'contrast', 'sharpening'])
-
-        self.logger.debug(f"Applied enhancements: {', '.join(applied_enhancements)}")
-
-        return enhanced_image, applied_enhancements
-
-    def _apply_minimal_enhancements(self, image: np.ndarray) -> np.ndarray:
-        """Apply minimal enhancements for high-quality images."""
-        # Slight gamma correction
-        gamma = 1.1
-        enhanced = np.power(image / 255.0, 1.0 / gamma)
-        enhanced = (enhanced * 255.0).astype(np.uint8)
-
-        # Very light sharpening
-        kernel = np.array([[-0.1, -0.1, -0.1],
-                          [-0.1,  1.8, -0.1],
-                          [-0.1, -0.1, -0.1]])
-        enhanced = cv2.filter2D(enhanced, -1, kernel)
-
-        return enhanced
-
-    def _apply_denoising(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
-        """Apply noise reduction based on noise level."""
-        # FIX: Ensure OpenCV compatibility
-        enhanced = self._ensure_opencv_compatible(image)
-        
-        if quality_metrics.noise_level == QualityLevel.VERY_POOR:
-            # Aggressive denoising
-            enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
-            enhanced = cv2.medianBlur(enhanced, 5)
-        elif quality_metrics.noise_level == QualityLevel.POOR:
-            # Moderate denoising
-            enhanced = cv2.bilateralFilter(enhanced, 7, 50, 50)
-            enhanced = cv2.medianBlur(enhanced, 3)
-        else:
-            # Light denoising
-            enhanced = cv2.bilateralFilter(enhanced, 5, 30, 30)
-
-        return enhanced
-
-    def _apply_sharpening(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
-        """Apply sharpening based on blur level."""
-        if quality_metrics.blur_level == QualityLevel.VERY_POOR:
-            # Strong sharpening
-            kernel = np.array([[-1, -1, -1],
-                              [-1,  9, -1],
-                              [-1, -1, -1]])
-            enhanced = cv2.filter2D(image, -1, kernel)
-
-            # Additional unsharp masking
-            gaussian = cv2.GaussianBlur(enhanced, (5, 5), 1.0)
-            enhanced = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
-
-        elif quality_metrics.blur_level == QualityLevel.POOR:
-            # Moderate sharpening
-            kernel = np.array([[-0.5, -1, -0.5],
-                              [-1,    7,   -1],
-                              [-0.5, -1, -0.5]])
-            enhanced = cv2.filter2D(image, -1, kernel)
-
-        else:
-            # Light sharpening
-            kernel = np.array([[0, -0.5, 0],
-                              [-0.5, 3, -0.5],
-                              [0, -0.5, 0]])
-            enhanced = cv2.filter2D(image, -1, kernel)
-
-        return enhanced
-
-    def _apply_contrast_enhancement(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
-        """Apply contrast enhancement based on contrast level."""
-        if quality_metrics.contrast_level in [QualityLevel.VERY_POOR, QualityLevel.POOR]:
-            # CLAHE (Contrast Limited Adaptive Histogram Equalization)
-            if len(image.shape) == 3:
-                # Convert to LAB color space for better contrast enhancement
-                lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-                l_channel, a_channel, b_channel = cv2.split(lab)
-
-                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                l_channel = clahe.apply(l_channel)
-
-                enhanced = cv2.merge([l_channel, a_channel, b_channel])
-                enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-            else:
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                enhanced = clahe.apply(image)
-        else:
-            # Simple contrast stretching
-            enhanced = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX)
-
-        return enhanced
-
-    def _apply_brightness_correction(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
-        """Apply brightness correction based on brightness analysis."""
-        mean_brightness = quality_metrics.mean_brightness
-        target_brightness = 140  # Optimal brightness for OCR
-
-        # Calculate brightness adjustment
-        brightness_adjustment = target_brightness - mean_brightness
-
-        # Apply gamma correction for brightness adjustment
-        if brightness_adjustment != 0:
-            if brightness_adjustment > 0:  # Image is too dark
-                gamma = 0.7 + (brightness_adjustment / 100.0)  # Brighten
-            else:  # Image is too bright
-                gamma = 1.3 + (abs(brightness_adjustment) / 100.0)  # Darken
-
-            enhanced = np.power(image / 255.0, 1.0 / gamma)
-            enhanced = (enhanced * 255.0).astype(np.uint8)
-        else:
-            enhanced = image.copy()
-
-        return enhanced
-
-    def _apply_histogram_equalization(self, image: np.ndarray) -> np.ndarray:
-        """Apply histogram equalization."""
-        if len(image.shape) == 3:
-            # Convert to YUV and equalize Y channel
-            yuv = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)
-            yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
-            enhanced = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
-        else:
-            enhanced = cv2.equalizeHist(image)
-
-        return enhanced
-
-    def _apply_standard_enhancements(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
-        """Apply standard enhancement pipeline."""
-        # FIX: Ensure OpenCV compatibility
-        enhanced = self._ensure_opencv_compatible(image.copy())
-
-        # Light denoising
-        if self.enable_denoising and quality_metrics.noise_score < 0.8:
-            enhanced = cv2.bilateralFilter(enhanced, 5, 30, 30)
-
-        # Rest of the method stays the same...
-        # Contrast enhancement
-        if self.enable_contrast and quality_metrics.contrast_score < 0.8:
-            enhanced = self._apply_contrast_enhancement(enhanced, quality_metrics)
-
-        # Light sharpening
-        if self.enable_sharpening and quality_metrics.blur_score < 0.8:
-            kernel = np.array([[0, -0.25, 0],
-                            [-0.25, 2, -0.25],
-                            [0, -0.25, 0]])
-            enhanced = cv2.filter2D(enhanced, -1, kernel)
-
-        return enhanced
-
-    def _apply_comprehensive_enhancement(self, image: np.ndarray, quality_metrics: QualityMetrics) -> np.ndarray:
-        """Apply comprehensive enhancements for very poor quality images."""
-        # CRITICAL FIX: Ensure OpenCV compatibility before any OpenCV operations
-        enhanced = self._ensure_opencv_compatible(image.copy())
-
-        # Step 1: Noise reduction (now safe with compatible channels)
-        enhanced = cv2.bilateralFilter(enhanced, 9, 75, 75)
-        enhanced = cv2.medianBlur(enhanced, 3)
-
-        # Step 2: Brightness and contrast
-        enhanced = self._apply_brightness_correction(enhanced, quality_metrics)
-        enhanced = self._apply_contrast_enhancement(enhanced, quality_metrics)
-
-        # Step 3: Sharpening
-        enhanced = self._apply_sharpening(enhanced, quality_metrics)
-
-        # Step 4: Morphological operations to clean up text
-        if len(enhanced.shape) == 3:
-            gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = enhanced.copy()
-
-        # Apply morphological closing to connect broken text
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-
-        # Convert back to color if original was color
-        if len(image.shape) == 3:
-            enhanced = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        else:
-            enhanced = gray
-
-        return enhanced
 
 class ImageProcessor:
     """
-    Main image preprocessing orchestrator that coordinates quality analysis,
-    text detection, and intelligent image enhancement.
+    Advanced image preprocessing orchestrator.
+    Applies adaptive enhancement based on quality analysis.
     """
-
-    def __init__(self, model_loader: ModelLoader, config: OCRConfig):
+    
+    def __init__(self, config: Optional[OCRConfig] = None):
         """
-        Initialize image processor with model loader and configuration.
-
+        Initialize image processor.
+        
         Args:
-            model_loader (ModelLoader): Model loader instance
-            config (OCRConfig): OCR configuration
+            config: OCR configuration with preprocessing settings
         """
-        self.model_loader = model_loader
-        self.config = config
-        self.logger = OCRLogger("image_processor")
-
+        self.config = config or OCRConfig()
+        self.logger = logging.getLogger(__name__)
+        
         # Initialize components
         self.quality_analyzer = QualityAnalyzer(config)
-        self.text_detector = TextDetector(model_loader, config)
-        self.image_enhancer = ImageEnhancer(config)
-        from ..utils.image_utils import ImageProcessor as ImageUtils
         self.image_utils = ImageUtils()
-
-        # Processing configuration
-        self.enable_quality_analysis = config.get("preprocessing.enable_quality_analysis", True)
-        self.enable_enhancement = config.get("preprocessing.enable_enhancement", True)
-        self.enable_text_detection = config.get("preprocessing.enable_text_detection", True)
-
-        # Image resizing configuration
-        self.max_image_size = config.get("preprocessing.max_image_size", 2048)
-        self.maintain_aspect_ratio = config.get("preprocessing.maintain_aspect_ratio", True)
-
+        
+        # CONSERVATIVE Enhancement settings for OCR
+        self.enhancement_settings = {
+            'max_dimension': getattr(self.config, 'max_image_dimension', 4096),  # Higher for OCR
+            'min_dimension': getattr(self.config, 'min_image_dimension', 800),   # Higher minimum
+            'target_dpi': getattr(self.config, 'target_dpi', 300),
+            'enable_adaptive_enhancement': getattr(self.config, 'enable_adaptive_enhancement', True),
+            'enhancement_strength': getattr(self.config, 'enhancement_strength', 0.3),  # Much lower
+            'preserve_aspect_ratio': getattr(self.config, 'preserve_aspect_ratio', True),
+            'quality_improvement_threshold': -0.1,  # Allow small degradation but not major
+        }
+    
     def process_image(self, image: np.ndarray) -> PreprocessingResult:
         """
-        Complete image preprocessing pipeline.
-
-        CRITICAL: This is the ONLY method called by core.py
-        Orchestrates quality analysis, enhancement, and text detection.
-
+        Process image with adaptive enhancement based on quality analysis.
+        
         Args:
-            image (np.ndarray): Raw input image from core.py
-
+            image: Input image as numpy array
+            
         Returns:
-            PreprocessingResult: Complete preprocessing results
+            PreprocessingResult with enhanced image and metadata
         """
         start_time = time.time()
-
-        self.logger.info(f"Starting image preprocessing for image shape: {image.shape}")
-
-        # Store original image and dimensions
-        original_image = image.copy()
-        original_height, original_width = image.shape[:2]
-        original_dimensions = (original_width, original_height)
-
-        # Step 1: Resize image if too large (for performance)
-        processed_image, scale_factor = self._resize_image_if_needed(image)
-
-        # Step 2: Quality analysis
-        quality_metrics = None
-        if self.enable_quality_analysis:
-            self.logger.debug("Performing quality analysis")
-            quality_metrics = self.quality_analyzer.analyze_image_quality(processed_image)
-        else:
-            # Create default quality metrics
-            quality_metrics = self._create_default_quality_metrics(processed_image)
-
-        # Step 3: Intelligent image enhancement
-        enhanced_image = processed_image.copy()
-        enhancement_strategy = EnhancementStrategy.MINIMAL
-        applied_enhancements = []
-
-        if self.enable_enhancement:
-            self.logger.debug("Applying intelligent image enhancement")
-            enhancement_strategy = self.image_enhancer.determine_enhancement_strategy(quality_metrics)
-            enhanced_image, applied_enhancements = self.image_enhancer.enhance_image(
-                processed_image, enhancement_strategy, quality_metrics
+        
+        if image is None or image.size == 0:
+            raise ValueError("Invalid input image")
+        
+        try:
+            # Store original image
+            original_image = image.copy()
+            
+            self.logger.info(f"Processing image: {image.shape}")
+            
+            # Step 1: Initial quality analysis
+            quality_metrics = self.quality_analyzer.analyze_quality(image)
+            self.logger.debug(f"Initial quality: {quality_metrics.overall_score:.3f}")
+            
+            # Step 2: Check if image already good for OCR (EARLY EXIT)
+            if quality_metrics.overall_score > 0.7 and quality_metrics.ocr_readiness > 0.6:
+                self.logger.info("Image already high quality, applying minimal processing only")
+                return self._apply_minimal_processing(original_image, quality_metrics, start_time)
+            
+            # Step 3: Apply preprocessing transformations
+            processed_image, transformations = self._apply_preprocessing_pipeline(
+                image, quality_metrics
             )
+            
+            # Step 4: Final quality check
+            final_quality = self.quality_analyzer.analyze_quality(processed_image)
+            self.logger.debug(f"Final quality: {final_quality.overall_score:.3f}")
+            
+            # Step 5: QUALITY IMPROVEMENT VALIDATION
+            quality_improvement = final_quality.overall_score - quality_metrics.overall_score
+            
+            if quality_improvement < self.enhancement_settings['quality_improvement_threshold']:
+                self.logger.warning(f"Processing degraded quality by {-quality_improvement:.3f}, reverting to minimal processing")
+                return self._apply_minimal_processing(original_image, quality_metrics, start_time)
+            
+            # Step 6: Create coordinate transformer
+            scale_factor = transformations.get('scale_factor', 1.0)
+            
+            # Step 7: Create processing metrics
+            processing_metrics = ProcessingMetrics(stage_name="image_preprocessing")
+            processing_metrics.start_time = start_time
+            processing_metrics.finish()
 
-        # Step 4: Text region detection
-        text_regions = []
-        if self.enable_text_detection:
-            self.logger.debug("Detecting text regions")
-            try:
-                text_regions = self.text_detector.detect_text_regions(enhanced_image)
-                self.logger.debug(f"Detected {len(text_regions)} text regions")
-            except Exception as e:
-                self.logger.warning(f"Text detection failed: {e}")
-                text_regions = []  # Fallback to empty list
-
-        # Calculate final dimensions
-        final_height, final_width = enhanced_image.shape[:2]
-        final_dimensions = (final_width, final_height)
-
-        # Calculate total processing time
-        processing_time = time.time() - start_time
-
-        # Create comprehensive result
-        result = PreprocessingResult(
-            enhanced_image=enhanced_image,
-            original_image=original_image,
-            text_regions=text_regions,
-            quality_metrics=quality_metrics,
-            enhancement_strategy=enhancement_strategy,
-            processing_time=processing_time,
-            enhancements_applied=applied_enhancements,
-            original_dimensions=original_dimensions,
-            final_dimensions=final_dimensions,
-            scale_factor=scale_factor
-        )
-
-        self.logger.info(
-            f"Image preprocessing completed: "
-            f"quality={quality_metrics.overall_level.value} ({quality_metrics.overall_score:.3f}), "
-            f"strategy={enhancement_strategy.value}, "
-            f"regions={len(text_regions)}, "
-            f"time={processing_time:.3f}s"
-        )
-
-        return result
-
-    def _resize_image_if_needed(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
-        """
-        Resize image if it exceeds maximum dimensions.
-
-        Args:
-            image (np.ndarray): Input image
-
-        Returns:
-            Tuple[np.ndarray, float]: (resized_image, scale_factor)
-        """
-        height, width = image.shape[:2]
-        max_dimension = max(width, height)
-
-        if max_dimension <= self.max_image_size:
-            return image.copy(), 1.0
-
-        # Calculate scale factor
-        scale_factor = self.max_image_size / max_dimension
-
-        if self.maintain_aspect_ratio:
+            # Add the custom metadata to the metadata dictionary
+            processing_metrics.metadata['quality_improvement'] = quality_improvement
+            processing_metrics.metadata['transformations_count'] = len(transformations)
+            
+            result = PreprocessingResult(
+                enhanced_image=processed_image,
+                original_image=original_image,
+                quality_metrics=final_quality,
+                processing_metrics=processing_metrics,
+                transformations_applied=transformations,
+                scale_factor=scale_factor,
+            )
+            
+            self.logger.info(
+                f"Image processed in {processing_metrics.duration:.2f}s: "
+                f"Quality {quality_metrics.overall_score:.3f} -> {final_quality.overall_score:.3f}"
+            )
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Image processing failed: {e}")
+            # Return minimal result with original image
+            processing_metrics = ProcessingMetrics(
+                stage_name="image_preprocessing"
+            )
+            processing_metrics.start_time = start_time
+            processing_metrics.finish()
+            
+            return PreprocessingResult(
+                enhanced_image=original_image,
+                original_image=original_image,
+                quality_metrics=QualityMetrics(),
+                processing_metrics=processing_metrics,
+                transformations_applied={}
+            )
+    
+    def _apply_minimal_processing(self, image: np.ndarray, quality_metrics: QualityMetrics, start_time: float) -> PreprocessingResult:
+        """Apply only essential transformations for already good images."""
+        processed_image = image.copy()
+        transformations = {}
+        
+        # Only essential processing
+        processed_image, format_info = self._normalize_image_format(processed_image)
+        transformations.update(format_info)
+        
+        # Only fix severe skew
+        if abs(quality_metrics.skew_angle) > 3.0:  # Higher threshold
+            processed_image, rotation_info = self._correct_skew(
+                processed_image, quality_metrics.skew_angle
+            )
+            transformations.update(rotation_info)
+        
+        # Gentle resize only if extremely large
+        height, width = processed_image.shape[:2]
+        if max(height, width) > 5000:  # Only if very large
+            scale_factor = 4000 / max(height, width)
             new_width = int(width * scale_factor)
             new_height = int(height * scale_factor)
+            processed_image = cv2.resize(processed_image, (new_width, new_height), cv2.INTER_AREA)
+            transformations.update({
+                'minimal_resize': True,
+                'scale_factor': scale_factor,
+                'original_size': (width, height),
+                'new_size': (new_width, new_height)
+            })
         else:
-            new_width = self.max_image_size
-            new_height = self.max_image_size
-
-        # Resize image
-        resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
-
-        self.logger.debug(f"Resized image from {width}x{height} to {new_width}x{new_height} (scale: {scale_factor:.3f})")
-
-        return resized_image, scale_factor
-
-    def _create_default_quality_metrics(self, image: np.ndarray) -> QualityMetrics:
-        """
-        Create default quality metrics when quality analysis is disabled.
-
-        Args:
-            image (np.ndarray): Input image
-
-        Returns:
-            QualityMetrics: Default quality metrics
-        """
-        from .quality_analyzer import QualityMetrics, QualityLevel
-
-        height, width = image.shape[:2]
-        color_channels = image.shape[2] if len(image.shape) == 3 else 1
-
-        return QualityMetrics(
-            blur_score=0.8,
-            blur_level=QualityLevel.GOOD,
-            laplacian_variance=500.0,
-            noise_score=0.8,
-            noise_level=QualityLevel.GOOD,
-            noise_variance=10.0,
-            contrast_score=0.8,
-            contrast_level=QualityLevel.GOOD,
-            contrast_rms=60.0,
-            histogram_spread=80.0,
-            resolution_score=0.8,
-            resolution_level=QualityLevel.GOOD,
-            effective_resolution=(width, height),
-            dpi_estimate=None,
-            brightness_score=0.8,
-            brightness_level=QualityLevel.GOOD,
-            mean_brightness=140.0,
-            brightness_uniformity=0.8,
-            overall_score=0.8,
-            overall_level=QualityLevel.GOOD,
-            image_dimensions=(width, height),
-            color_channels=color_channels,
-            analysis_time=0.0
+            transformations['scale_factor'] = 1.0
+        
+        # Create metrics
+        processing_metrics = ProcessingMetrics(stage_name="image_preprocessing")
+        processing_metrics.start_time = start_time
+        processing_metrics.finish()
+        processing_metrics.metadata['quality_improvement'] = 0.0  # Minimal processing
+        processing_metrics.metadata['transformations_count'] = len(transformations)
+        processing_metrics.metadata['minimal_processing'] = True
+        
+        return PreprocessingResult(
+            enhanced_image=processed_image,
+            original_image=image,
+            quality_metrics=quality_metrics,
+            processing_metrics=processing_metrics,
+            transformations_applied=transformations,
+            scale_factor=transformations.get('scale_factor', 1.0),
         )
-
-    def get_processing_stats(self) -> Dict[str, Any]:
+    
+    def _apply_preprocessing_pipeline(self, image: np.ndarray, 
+                                    quality_metrics: QualityMetrics) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        Get preprocessing statistics and configuration.
-
+        Apply preprocessing pipeline based on quality analysis.
+        
+        Args:
+            image: Input image
+            quality_metrics: Quality assessment results
+            
         Returns:
-            Dict[str, Any]: Processing statistics
+            Tuple of (processed_image, transformations_applied)
         """
-        return {
-            'quality_analysis_enabled': self.enable_quality_analysis,
-            'enhancement_enabled': self.enable_enhancement,
-            'text_detection_enabled': self.enable_text_detection,
-            'max_image_size': self.max_image_size,
-            'maintain_aspect_ratio': self.maintain_aspect_ratio,
-            'quality_analyzer_config': self.quality_analyzer.get_analysis_config(),
-            'text_detector_stats': self.text_detector.get_detection_stats()
-        }
-
-
-# Utility functions for external use
-def create_image_processor(model_loader: ModelLoader,
-                          config: Optional[OCRConfig] = None) -> ImageProcessor:
-    """
-    Create an image processor instance.
-
-    Args:
-        model_loader (ModelLoader): Model loader instance
-        config (Optional[OCRConfig]): OCR configuration
-
-    Returns:
-        ImageProcessor: Configured image processor
-    """
-    if config is None:
-        from ..config import OCRConfig
-        config = OCRConfig()
-
-    return ImageProcessor(model_loader, config)
-
-
-def validate_preprocessing_result(result: PreprocessingResult) -> bool:
-    """
-    Validate preprocessing result completeness.
-
-    Args:
-        result (PreprocessingResult): Preprocessing result to validate
-
-    Returns:
-        bool: True if result is valid and complete
-    """
-    if result is None:
-        return False
-
-    # Check essential components
-    if result.enhanced_image is None or result.enhanced_image.size == 0:
-        return False
-
-    if result.quality_metrics is None:
-        return False
-
-    if result.processing_time <= 0:
-        return False
-
-    return True
-
-
-def extract_enhancement_summary(result: PreprocessingResult) -> Dict[str, Any]:
-    """
-    Extract summary of enhancement operations applied.
-
-    Args:
-        result (PreprocessingResult): Preprocessing result
-
-    Returns:
-        Dict[str, Any]: Enhancement summary
-    """
-    return {
-        'strategy': result.enhancement_strategy.value,
-        'enhancements_applied': result.enhancements_applied,
-        'quality_improvement': result.quality_metrics.overall_score,
-        'processing_time': result.processing_time,
-        'regions_detected': len(result.text_regions),
-        'scale_factor': result.scale_factor
-    }
-
-
-
-__all__ = [
-    'EnhancementStrategy', 'PreprocessingResult', 'ImageEnhancer', 'ImageProcessor',
-    'create_image_processor', 'validate_preprocessing_result', 'extract_enhancement_summary'
-]
+        processed_image = image.copy()
+        transformations = {}
+        
+        # Step 1: Normalize image format
+        processed_image, format_info = self._normalize_image_format(processed_image)
+        transformations.update(format_info)
+        
+        # Step 2: Correct geometric distortions (higher threshold)
+        if abs(quality_metrics.skew_angle) > 2.0:  # Less sensitive
+            processed_image, rotation_info = self._correct_skew(
+                processed_image, quality_metrics.skew_angle
+            )
+            transformations.update(rotation_info)
+        
+        # Step 3: Conservative resolution optimization
+        processed_image, resize_info = self._optimize_resolution_conservative(processed_image, quality_metrics)
+        transformations.update(resize_info)
+        
+        # Step 4: Apply adaptive enhancements (much more conservative)
+        if self.enhancement_settings['enable_adaptive_enhancement']:
+            processed_image, enhancement_info = self._apply_adaptive_enhancements_conservative(
+                processed_image, quality_metrics
+            )
+            transformations.update(enhancement_info)
+        
+        # Step 5: Final normalization
+        processed_image = self._final_normalization(processed_image)
+        
+        return processed_image, transformations
+    
+    def _optimize_resolution_conservative(self, image: np.ndarray, 
+                                        quality_metrics: QualityMetrics) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Conservative resolution optimization prioritizing OCR readability.
+        """
+        height, width = image.shape[:2]
+        original_size = (width, height)
+        resize_info = {'resolution_optimized': False}
+        
+        max_dim = self.enhancement_settings['max_dimension']  # 4096
+        min_dim = self.enhancement_settings['min_dimension']  # 800
+        
+        # More conservative conditions
+        needs_upscaling = (min(width, height) < min_dim) and quality_metrics.resolution_score < 0.4  # Higher threshold
+        needs_downscaling = max(width, height) > max_dim  # Only if very large
+        
+        if needs_upscaling or needs_downscaling:
+            if needs_upscaling:
+                # Conservative upscaling
+                scale_factor = min_dim / min(width, height)
+                scale_factor = min(scale_factor, 2.0)  # Max 2x upscaling
+                interpolation = cv2.INTER_CUBIC
+                resize_info['upscaled'] = True
+            else:
+                # Conservative downscaling - preserve more detail
+                scale_factor = max_dim / max(width, height)
+                # Ensure we don't go below good OCR resolution
+                if min(width, height) * scale_factor < 1200:  # Ensure good OCR resolution
+                    scale_factor = 1200 / min(width, height)
+                interpolation = cv2.INTER_AREA
+                resize_info['downscaled'] = True
+            
+            # Apply resize
+            new_width = int(width * scale_factor)
+            new_height = int(height * scale_factor)
+            
+            resized_image = cv2.resize(image, (new_width, new_height), interpolation=interpolation)
+            
+            resize_info.update({
+                'resolution_optimized': True,
+                'scale_factor': scale_factor,
+                'original_size': original_size,
+                'new_size': (new_width, new_height),
+                'interpolation': 'cubic' if interpolation == cv2.INTER_CUBIC else 'area'
+            })
+            
+            self.logger.debug(
+                f"Conservative resize: {original_size} -> {(new_width, new_height)} "
+                f"(scale: {scale_factor:.2f}x)"
+            )
+            
+            return resized_image, resize_info
+        
+        resize_info['scale_factor'] = 1.0
+        return image, resize_info
+    
+    def _apply_adaptive_enhancements_conservative(self, image: np.ndarray, 
+                                                quality_metrics: QualityMetrics) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Apply very conservative enhancements.
+        """
+        enhanced_image = image.copy()
+        enhancement_info = {}
+        
+        # Much lower base enhancement strength
+        base_strength = self.enhancement_settings['enhancement_strength']  # 0.3
+        enhancement_params = quality_metrics.enhancement_params
+        
+        # 1. Very conservative sharpening
+        if 'sharpen_strength' in enhancement_params:
+            strength = enhancement_params['sharpen_strength'] * base_strength * 0.5  # Even lower
+            strength = min(strength, 0.2)  # Cap at 20%
+            if strength > 0.05:  # Only if meaningful
+                enhanced_image = self._apply_sharpening(enhanced_image, strength)
+                enhancement_info['sharpening_applied'] = strength
+        
+        # 2. Conservative contrast enhancement (only if really needed)
+        if 'contrast_enhancement' in enhancement_params and quality_metrics.contrast_score < 0.4:
+            strength = enhancement_params['contrast_enhancement'] * base_strength * 0.6
+            strength = min(strength, 0.3)  # Cap at 30%
+            if strength > 0.1:  # Only if meaningful
+                enhanced_image = self._apply_contrast_enhancement_conservative(enhanced_image, strength)
+                enhancement_info['contrast_enhancement_applied'] = strength
+        
+        # 3. Skip noise reduction unless severe (OCR engines handle noise well)
+        if 'noise_reduction_strength' in enhancement_params and quality_metrics.noise_score < 0.3:
+            strength = enhancement_params['noise_reduction_strength'] * base_strength * 0.5
+            strength = min(strength, 0.3)  # Very conservative
+            if strength > 0.1:
+                enhanced_image = self._apply_noise_reduction_conservative(enhanced_image, strength)
+                enhancement_info['noise_reduction_applied'] = strength
+        
+        # 4. Conservative illumination correction (only if severe)
+        if enhancement_params.get('illumination_correction', False) and quality_metrics.lighting_score < 0.3:
+            enhanced_image = self._apply_illumination_correction_conservative(enhanced_image)
+            enhancement_info['illumination_correction_applied'] = True
+        
+        return enhanced_image, enhancement_info
+    
+    def _apply_contrast_enhancement_conservative(self, image: np.ndarray, strength: float) -> np.ndarray:
+        """Conservative contrast enhancement."""
+        try:
+            if len(image.shape) == 3:
+                lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+                l_channel = lab[:, :, 0]
+                
+                # Very gentle CLAHE
+                clip_limit = 1.0 + strength * 2.0  # Lower clip limit
+                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+                l_channel = clahe.apply(l_channel)
+                
+                lab[:, :, 0] = l_channel
+                enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            else:
+                clip_limit = 1.0 + strength * 2.0
+                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+                enhanced = clahe.apply(image)
+            
+            return enhanced
+        except Exception as e:
+            self.logger.warning(f"Conservative contrast enhancement failed: {e}")
+            return image
+    
+    def _apply_noise_reduction_conservative(self, image: np.ndarray, strength: float) -> np.ndarray:
+        """Very conservative noise reduction."""
+        try:
+            # Only gentle median filtering
+            kernel_size = 3  # Small kernel only
+            
+            if len(image.shape) == 3:
+                # Gentle bilateral filter
+                diameter = 5
+                sigma_color = 20 + strength * 30
+                sigma_space = 20 + strength * 30
+                denoised = cv2.bilateralFilter(image, diameter, sigma_color, sigma_space)
+            else:
+                denoised = cv2.medianBlur(image, kernel_size)
+            
+            return denoised
+        except Exception as e:
+            self.logger.warning(f"Conservative noise reduction failed: {e}")
+            return image
+    
+    def _apply_illumination_correction_conservative(self, image: np.ndarray) -> np.ndarray:
+        """Very conservative illumination correction."""
+        try:
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image.copy()
+            
+            # Smaller kernel for gentler correction
+            kernel_size = max(gray.shape) // 80  # Smaller kernel
+            kernel_size = max(kernel_size, 15)
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            background = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+            background = cv2.GaussianBlur(background, (kernel_size, kernel_size), 0)
+            
+            # Gentler correction
+            if len(image.shape) == 3:
+                corrected = image.copy().astype(np.float32)
+                background_3ch = cv2.cvtColor(background, cv2.COLOR_GRAY2BGR).astype(np.float32)
+                
+                # More conservative normalization
+                corrected = corrected / (background_3ch / 255.0 + 0.1) * 255.0  # Higher offset
+                corrected = np.clip(corrected, 0, 255).astype(np.uint8)
+            else:
+                corrected = gray.astype(np.float32)
+                corrected = corrected / (background.astype(np.float32) / 255.0 + 0.1) * 255.0
+                corrected = np.clip(corrected, 0, 255).astype(np.uint8)
+            
+            return corrected
+        except Exception as e:
+            self.logger.warning(f"Conservative illumination correction failed: {e}")
+            return image
+    
+    # Keep all other methods unchanged
+    def _normalize_image_format(self, image: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Normalize image to standard format for processing.
+        
+        Args:
+            image: Input image
+            
+        Returns:
+            Tuple of (normalized_image, format_info)
+        """
+        format_info = {'format_normalized': False}
+        
+        # Ensure image is in correct data type
+        if image.dtype != np.uint8:
+            image = cv2.convertScaleAbs(image)
+            format_info['dtype_converted'] = True
+        
+        # Handle different channel configurations
+        if len(image.shape) == 3:
+            if image.shape[2] == 4:  # RGBA
+                image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+                format_info['alpha_channel_removed'] = True
+            elif image.shape[2] == 3:  # RGB/BGR
+                # Keep as is for now, engines will handle color conversion
+                pass
+        elif len(image.shape) == 2:  # Grayscale
+            # Keep as grayscale
+            pass
+        else:
+            raise ValueError(f"Unsupported image shape: {image.shape}")
+        
+        format_info['format_normalized'] = True
+        return image, format_info
+    
+    def _correct_skew(self, image: np.ndarray, skew_angle: float) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Correct image skew by rotation.
+        
+        Args:
+            image: Input image
+            skew_angle: Detected skew angle in degrees
+            
+        Returns:
+            Tuple of (corrected_image, rotation_info)
+        """
+        try:
+            # Correct the skew by rotating in opposite direction
+            rotation_angle = -skew_angle
+            
+            # Get image center and rotation matrix
+            height, width = image.shape[:2]
+            center = (width // 2, height // 2)
+            rotation_matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
+            
+            # Calculate new bounding dimensions
+            cos_angle = abs(rotation_matrix[0, 0])
+            sin_angle = abs(rotation_matrix[0, 1])
+            new_width = int((height * sin_angle) + (width * cos_angle))
+            new_height = int((height * cos_angle) + (width * sin_angle))
+            
+            # Adjust translation
+            rotation_matrix[0, 2] += (new_width - width) / 2
+            rotation_matrix[1, 2] += (new_height - height) / 2
+            
+            # Apply rotation
+            corrected_image = cv2.warpAffine(
+                image, rotation_matrix, (new_width, new_height),
+                flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+            )
+            
+            rotation_info = {
+                'skew_corrected': True,
+                'rotation_angle': rotation_angle,
+                'original_skew': skew_angle
+            }
+            
+            self.logger.debug(f"Corrected skew: {skew_angle:.2f}° -> {rotation_angle:.2f}°")
+            
+            return corrected_image, rotation_info
+            
+        except Exception as e:
+            self.logger.warning(f"Skew correction failed: {e}")
+            return image, {'skew_correction_failed': True}
+    
+    def _apply_sharpening(self, image: np.ndarray, strength: float) -> np.ndarray:
+        """Apply adaptive sharpening."""
+        try:
+            # Create sharpening kernel based on strength
+            center_value = 4 + strength * 4
+            kernel = np.array([
+                [0, -1, 0],
+                [-1, center_value, -1],
+                [0, -1, 0]
+            ])
+            kernel = kernel / kernel.sum() if kernel.sum() != 0 else kernel
+            
+            # Apply sharpening
+            sharpened = cv2.filter2D(image, -1, kernel)
+            
+            # Blend with original based on strength
+            alpha = 0.5 + strength * 0.5  # 0.5 to 1.0
+            enhanced = cv2.addWeighted(image, 1 - alpha, sharpened, alpha, 0)
+            
+            return enhanced
+            
+        except Exception as e:
+            self.logger.warning(f"Sharpening failed: {e}")
+            return image
+    
+    def _final_normalization(self, image: np.ndarray) -> np.ndarray:
+        """Apply final normalization to the processed image."""
+        # Ensure proper data type
+        if image.dtype != np.uint8:
+            image = cv2.convertScaleAbs(image)
+        
+        # Optional: Apply slight contrast normalization
+        if len(image.shape) == 2:  # Grayscale
+            # Normalize to use full dynamic range
+            min_val, max_val = image.min(), image.max()
+            if max_val > min_val:
+                image = ((image - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+        
+        return image
+    
+    def quick_preprocess(self, image: np.ndarray) -> np.ndarray:
+        """
+        Quick preprocessing without full quality analysis.
+        Useful for batch processing or when speed is prioritized.
+        
+        Args:
+            image: Input image
+            
+        Returns:
+            Quickly processed image
+        """
+        try:
+            # Basic normalization
+            processed_image, _ = self._normalize_image_format(image)
+            
+            # Conservative resize if needed
+            height, width = processed_image.shape[:2]
+            max_dim = self.enhancement_settings['max_dimension']
+            
+            if max(height, width) > max_dim:
+                scale_factor = max_dim / max(height, width)
+                new_width = int(width * scale_factor)
+                new_height = int(height * scale_factor)
+                processed_image = cv2.resize(
+                    processed_image, (new_width, new_height), 
+                    interpolation=cv2.INTER_AREA
+                )
+            
+            return self._final_normalization(processed_image)
+            
+        except Exception as e:
+            self.logger.warning(f"Quick preprocessing failed: {e}")
+            return image

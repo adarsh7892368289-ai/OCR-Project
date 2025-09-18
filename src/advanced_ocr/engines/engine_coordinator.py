@@ -1,451 +1,722 @@
-# src/advanced_ocr/engines/engine_coordinator.py
 """
-Engine Coordinator - FIXED VERSION - Data Type Issue Resolved
-
-CRITICAL FIX: Resolves data type mismatch between PIL Images and numpy arrays
-throughout the pipeline according to the architectural plan.
-
-ONLY JOB: Select and coordinate engines based on content
-DEPENDENCIES: content_classifier.py, base_engine.py, all engines, config.py
-USED BY: core.py ONLY
-
-ROUTING LOGIC:
-- Handwritten → trocr_engine.py + easyocr_engine.py
-- Printed → paddleocr_engine.py + tesseract_engine.py
-- Mixed → paddleocr_engine.py + trocr_engine.py
-
-WHAT IT SHOULD NOT DO:
-❌ Result fusion (done by text_processor.py)
-❌ Image preprocessing
-❌ Final result formatting
-✅ Engine selection and coordination ONLY
+Smart engine selection and coordination for optimal OCR results.
+Implements adaptive strategies with parallel execution and fallback handling.
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional
-from dataclasses import dataclass, field
-from enum import Enum
-from PIL import Image
-import numpy as np
 import time
+import logging
+import threading
+from typing import Dict, List, Optional, Any, Tuple
+from concurrent.futures import ThreadPoolExecutor, Future, as_completed
+from dataclasses import dataclass
+from enum import Enum
 
-from ..preprocessing.content_classifier import ContentClassifier, ContentClassification
-from ..results import OCRResult
-from ..config import OCRConfig
-from ..utils.logger import OCRLogger
-from .base_engine import BaseOCREngine
-
-logger = OCRLogger(__name__)
-
-
-class EngineStrategy(Enum):
-    """Engine selection strategies"""
-    CONTENT_BASED = "content_based"
-    QUALITY_BASED = "quality_based"
-    PERFORMANCE_BASED = "performance_based"
-    SINGLE_BEST = "single_best"
-    MULTI_CONSENSUS = "multi_consensus"
+from .base_engine import BaseOCREngine, EngineStatus
+from ..results import OCRResult, ProcessingMetrics
+from ..config import OCRConfig, EngineStrategy
 
 
 @dataclass
 class EngineSelection:
-    """Engine selection result container"""
-    primary_engines: List[str]
-    fallback_engines: List[str]
-    strategy: EngineStrategy
-    confidence: float
-    reasoning: str
-    content_type: str
+    """Information about engine selection decision."""
+    
+    primary_engine: str
+    secondary_engines: List[str]
+    strategy_used: EngineStrategy
+    selection_reason: str
+    confidence_threshold: float
+    expected_processing_time: float
 
 
-@dataclass
-class CoordinationResult:
-    """Result container for engine coordination operations"""
-    ocr_results: List[OCRResult]
-    engine_selection: EngineSelection
-    total_processing_time: float
-    engines_used: List[str]
-    coordination_metadata: Dict[str, any] = field(default_factory=dict)
+class ContentType(Enum):
+    """Detected content types for engine selection."""
+    PRINTED_TEXT = "printed_text"
+    HANDWRITTEN = "handwritten"
+    MIXED_CONTENT = "mixed_content"
+    DOCUMENT = "document"
+    RECEIPT = "receipt"
+    FORM = "form"
+    UNKNOWN = "unknown"
 
 
 class EngineCoordinator:
     """
-    Intelligent OCR engine coordinator - PROJECT PLAN COMPLIANT - FIXED VERSION
-    
-    CRITICAL FIX: Properly handles image type conversion between PIL and numpy
-    according to the architectural interface contracts.
-    
-    Receives: preprocessed_image + text_regions from core.py
-    Returns: List[OCRResult] (raw results) to core.py
-    
-    Does NOT do result fusion - that's text_processor.py's job
+    Intelligent engine selection and coordination system.
+    Implements adaptive strategies with performance-based optimization.
     """
     
     def __init__(self, config: OCRConfig):
-        self.config = config
-        
-        # Get strategy from config
-        try:
-            strategy_value = config.coordination.engine_selection_strategy
-            self.strategy = EngineStrategy(strategy_value)
-        except (ValueError, AttributeError):
-            logger.warning(f"Invalid/missing strategy, defaulting to CONTENT_BASED")
-            self.strategy = EngineStrategy.CONTENT_BASED
-        
-        # Initialize content classifier
-        try:
-            self.content_classifier = ContentClassifier(config)
-        except Exception as e:
-            logger.error(f"ContentClassifier initialization failed: {e}")
-            self.content_classifier = None
-        
-        # Engine storage (lazy loading)
-        self._engines: Dict[str, BaseOCREngine] = {}
-        
-        # Configuration
-        self.max_parallel_engines = getattr(config.coordination, 'max_engines_per_task', 2)
-        self.engine_timeout = getattr(config.coordination, 'coordination_timeout', 30)
-        self.min_confidence = getattr(config.coordination, 'min_result_confidence', 0.3)
-        
-        logger.info(f"EngineCoordinator initialized with strategy: {self.strategy.value}")
-    
-    def coordinate(self, image: Image.Image, text_regions: List) -> List[OCRResult]:
         """
-        Main coordination method - FIXED VERSION - Data Type Handling
-        
-        CRITICAL FIX: Properly converts between PIL Image (from core.py) and 
-        numpy array (for engines) according to architectural contracts.
+        Initialize engine coordinator.
         
         Args:
-            image: ALREADY PREPROCESSED PIL Image from image_processor.py via core.py
-            text_regions: Detected text regions from image_processor.py
+            config: OCR configuration
+        """
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+        
+        # Engine registry
+        self.engines: Dict[str, BaseOCREngine] = {}
+        self.engine_performance: Dict[str, Dict[str, Any]] = {}
+        self._engine_lock = threading.RLock()
+        
+        # Thread pool for parallel execution
+        max_workers = min(len(config.enabled_engines), config.performance.max_workers)
+        self.executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix='EngineCoordinator'
+        )
+        
+        # Performance tracking
+        self._total_extractions = 0
+        self._strategy_performance: Dict[str, Dict[str, Any]] = {
+            strategy.value: {
+                'used_count': 0,
+                'success_count': 0,
+                'total_time': 0.0,
+                'avg_confidence': 0.0
+            } for strategy in EngineStrategy
+        }
+        
+        self.logger.info(f"Initialized engine coordinator with strategy: {config.engine_strategy.value}")
+    
+    def register_engine(self, engine: BaseOCREngine) -> bool:
+        """
+        Register an OCR engine.
+        
+        Args:
+            engine: OCR engine instance
             
         Returns:
-            List[OCRResult]: Raw OCR results for text_processor.py (NOT wrapped)
+            True if registered successfully
+        """
+        with self._engine_lock:
+            engine_name = engine.name
+            
+            if engine_name in self.engines:
+                self.logger.warning(f"Engine {engine_name} already registered, replacing")
+            
+            # Initialize engine if needed
+            if not engine.is_ready and not engine.initialize():
+                self.logger.error(f"Failed to initialize engine: {engine_name}")
+                return False
+            
+            self.engines[engine_name] = engine
+            
+            # Initialize performance tracking
+            if engine_name not in self.engine_performance:
+                self.engine_performance[engine_name] = {
+                    'success_rate': 0.0,
+                    'avg_processing_time': 0.0,
+                    'avg_confidence': 0.0,
+                    'content_type_performance': {},
+                    'last_used': 0.0,
+                    'total_uses': 0
+                }
+            
+            self.logger.info(f"Registered engine: {engine_name}")
+            return True
+    
+    def extract_text(self, image: Any) -> Optional[OCRResult]:
+        """
+        Extract text using optimal engine selection strategy.
+        
+        Args:
+            image: Input image
+            
+        Returns:
+            OCRResult or None if all engines failed
         """
         start_time = time.time()
-        logger.debug(f"Coordinating engines for {len(text_regions)} regions")
+        self._total_extractions += 1
         
         try:
-            # CRITICAL FIX: Convert PIL Image to numpy array for processing
-            # Engines expect numpy arrays per base_engine.py interface
-            if isinstance(image, Image.Image):
-                np_image = np.array(image)
-                logger.debug(f"Converted PIL Image to numpy array: {np_image.shape}")
-            else:
-                np_image = image
-                logger.debug(f"Using numpy array directly: {np_image.shape}")
+            # Analyze image content for engine selection
+            content_analysis = self._analyze_image_content(image)
             
-            # Step 1: Call content_classifier.py for content type
-            # Content classifier needs PIL Image for ML models
-            pil_image_for_classifier = image if isinstance(image, Image.Image) else Image.fromarray(image)
-            content_classification = self._classify_content_safe(pil_image_for_classifier)
+            # Select engines based on strategy
+            selection = self._select_engines(content_analysis)
             
-            # Step 2: Select appropriate engines based on content type
-            engine_selection = self._select_engines(content_classification)
-            
-            # Step 3: Execute selected engines with numpy array (as per base_engine.py contract)
-            ocr_results = self._execute_engines(engine_selection, np_image, text_regions)
-            
-            # Step 4: Return raw List[OCRResult] directly to core.py (NO wrapper)
-            total_time = time.time() - start_time
-            engines_used = [result.engine_name for result in ocr_results]
-            
-            logger.info(f"Coordination completed: {len(ocr_results)} results in {total_time:.3f}s")
-            
-            # Return List[OCRResult] directly (not wrapped)
-            return ocr_results
-            
-        except Exception as e:
-            logger.error(f"Engine coordination failed: {e}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            # Return empty list instead of CoordinationResult
-            return []
-    
-    def _classify_content_safe(self, image: Image.Image) -> ContentClassification:
-        """Safely classify content with fallback"""
-        if self.content_classifier is None:
-            logger.warning("ContentClassifier not available, using fallback")
-            return ContentClassification(
-                content_type="mixed",
-                confidence_scores={"mixed": 0.5, "handwritten": 0.3, "printed": 0.2},
-                processing_time=0.0
+            self.logger.info(
+                f"Selected engines for {content_analysis['content_type'].value}: "
+                f"primary={selection.primary_engine}, "
+                f"secondary={selection.secondary_engines}, "
+                f"strategy={selection.strategy_used.value}"
             )
-        
-        try:
-            return self.content_classifier.classify_content(image)
-        except Exception as e:
-            logger.warning(f"Content classification failed: {e}, using fallback")
-            return ContentClassification(
-                content_type="mixed", 
-                confidence_scores={"mixed": 0.5, "handwritten": 0.3, "printed": 0.2},
-                processing_time=0.0
-            )
-    
-    def _select_engines(self, classification: ContentClassification) -> EngineSelection:
-        """
-        Select engines based on content type - CORE ROUTING LOGIC FROM PLAN
-        
-        EXACT ROUTING FROM PROJECT PLAN:
-        - Handwritten → trocr_engine.py + easyocr_engine.py
-        - Printed → paddleocr_engine.py + tesseract_engine.py  
-        - Mixed → paddleocr_engine.py + trocr_engine.py
-        """
-        content_type = classification.content_type
-        confidence = max(classification.confidence_scores.values())
-        
-        if content_type == "handwritten":
-            primary = ["trocr", "easyocr"]
-            fallback = ["paddleocr"]
-            reasoning = f"Handwritten content detected (conf: {confidence:.3f}) → TrOCR + EasyOCR"
             
-        elif content_type == "printed":
-            primary = ["paddleocr", "tesseract"]  
-            fallback = ["easyocr"]
-            reasoning = f"Printed content detected (conf: {confidence:.3f}) → PaddleOCR + Tesseract"
+            # Execute extraction based on strategy
+            result = self._execute_extraction(image, selection)
             
-        else:  # mixed or uncertain
-            primary = ["paddleocr", "trocr"]
-            fallback = ["tesseract", "easyocr"]
-            reasoning = f"Mixed/uncertain content (conf: {confidence:.3f}) → PaddleOCR + TrOCR"
-        
-        logger.info(f"Engine selection: {reasoning}")
-        
-        return EngineSelection(
-            primary_engines=primary,
-            fallback_engines=fallback,
-            strategy=self.strategy,
-            confidence=confidence,
-            reasoning=reasoning,
-            content_type=content_type
-        )
-    
-    def _execute_engines(self, selection: EngineSelection, image: np.ndarray, text_regions: List) -> List[OCRResult]:
-        """Execute selected engines and return RAW results (no fusion) - FIXED VERSION"""
-        results = []
-
-        # Determine engines to run based on strategy
-        if self.strategy == EngineStrategy.CONTENT_BASED:
-            engines_to_run = selection.primary_engines[:self.max_parallel_engines]
-        else:
-            engines_to_run = selection.primary_engines[:self.max_parallel_engines]
-
-        logger.info(f"Executing engines: {engines_to_run}")
-
-        # Execute primary engines
-        if len(engines_to_run) == 1:
-            # Single engine execution
-            result = self._run_single_engine(engines_to_run[0], image, text_regions)
-            if result and self._is_result_acceptable(result):
-                results.append(result)
-        else:
-            # Parallel execution
-            results = self._execute_parallel(engines_to_run, image, text_regions)
-
-        # Try fallback engines if no acceptable results
-        if not results and selection.fallback_engines:
-            logger.info("Primary engines failed, trying fallback")
-            fallback_results = self._execute_parallel(selection.fallback_engines[:1], image, text_regions)
-            results.extend(fallback_results)
-
-        # FINAL FALLBACK: If all engines failed, create mock result for testing
-        if not results:
-            logger.warning("All engines failed, creating mock result for testing")
-            mock_result = self._create_mock_result(image, text_regions)
-            if mock_result:
-                results.append(mock_result)
-
-        logger.debug(f"Engine execution completed: {len(results)} results")
-        return results
-    
-    def _execute_parallel(self, engines: List[str], image: np.ndarray, text_regions: List) -> List[OCRResult]:
-        """Execute engines in parallel - FIXED VERSION"""
-        results = []
-        completed_engines = 0
-        
-        with ThreadPoolExecutor(max_workers=min(len(engines), 3)) as executor:
-            future_to_engine = {
-                executor.submit(self._run_single_engine, engine_name, image, text_regions): engine_name
-                for engine_name in engines
-            }
-            
-            for future in as_completed(future_to_engine, timeout=self.engine_timeout):
-                engine_name = future_to_engine[future]
-                completed_engines += 1
-                try:
-                    result = future.result(timeout=5)  # Individual engine timeout
-                    if result and self._is_result_acceptable(result):
-                        results.append(result)
-                        logger.debug(f"Engine {engine_name} completed successfully")
-                    else:
-                        logger.debug(f"Engine {engine_name} returned unacceptable result")
-                except Exception as e:
-                    logger.error(f"Engine {engine_name} failed: {e}")
-        
-        logger.info(f"Parallel execution: {len(results)} successful from {completed_engines} engines")
-        return results
-    
-    def _run_single_engine(self, engine_name: str, image: np.ndarray, text_regions: List) -> Optional[OCRResult]:
-        """
-        Safely run a single engine - CRITICAL FIX for data type handling
-        
-        FIXED: Ensures proper numpy array input to engines as per base_engine.py interface
-        """
-        try:
-            engine = self._get_engine(engine_name)
-            if engine is None:
-                logger.error(f"Failed to get engine: {engine_name}")
-                return None
-            
-            # CRITICAL FIX: Ensure numpy array input (base_engine.py expects np.ndarray)
-            if not isinstance(image, np.ndarray):
-                if hasattr(image, 'size'):  # PIL Image
-                    np_image = np.array(image)
-                else:
-                    logger.error(f"Invalid image type for engine {engine_name}: {type(image)}")
-                    return None
-            else:
-                np_image = image
-            
-            logger.debug(f"Calling {engine_name} with numpy array shape: {np_image.shape}")
-            
-            # Call engine.extract() with numpy array as per base_engine.py interface
-            result = engine.extract(np_image, text_regions)
+            # Update performance metrics
+            processing_time = time.time() - start_time
+            self._update_strategy_performance(selection.strategy_used, result, processing_time)
             
             if result:
-                text_preview = result.text[:50] + "..." if len(result.text) > 50 else result.text
-                logger.debug(f"Engine {engine_name}: extracted '{text_preview}' (conf: {result.confidence:.3f})")
-            else:
-                logger.warning(f"Engine {engine_name} returned None result")
+                # Add coordinator metadata
+                result.metadata.update({
+                    'engine_selection': {
+                        'primary_engine': selection.primary_engine,
+                        'secondary_engines': selection.secondary_engines,
+                        'strategy_used': selection.strategy_used.value,
+                        'selection_reason': selection.selection_reason,
+                        'content_analysis': content_analysis
+                    },
+                    'coordinator_processing_time': processing_time
+                })
             
             return result
             
         except Exception as e:
-            logger.error(f"Engine {engine_name} execution failed: {e}")
-            import traceback
-            logger.error(f"Engine {engine_name} traceback: {traceback.format_exc()}")
+            self.logger.error(f"Engine coordination failed: {e}")
             return None
     
-    def _get_engine(self, engine_name: str) -> Optional[BaseOCREngine]:
-        """Get or create engine instance (lazy loading) - ENHANCED ERROR HANDLING"""
-        if engine_name in self._engines:
-            return self._engines[engine_name]
+    def _analyze_image_content(self, image: Any) -> Dict[str, Any]:
+        """
+        Analyze image content to inform engine selection.
+        
+        Args:
+            image: Input image
+            
+        Returns:
+            Content analysis dictionary
+        """
+        # For now, basic analysis - can be enhanced with ML models
+        analysis = {
+            'content_type': ContentType.PRINTED_TEXT,  # Default assumption
+            'estimated_complexity': 'medium',
+            'has_handwriting': False,
+            'text_density': 'medium',
+            'image_quality': 'good',
+            'confidence': 0.7
+        }
         
         try:
-            # Import and initialize engines as per project plan
-            if engine_name == "tesseract":
-                from .tesseract_engine import TesseractEngine
-                engine = TesseractEngine(self.config)
-                
-            elif engine_name == "paddleocr":
-                from .paddleocr_engine import PaddleOCREngine  
-                engine = PaddleOCREngine(self.config)
-                
-            elif engine_name == "easyocr":
-                from .easyocr_engine import EasyOCREngine
-                engine = EasyOCREngine(self.config)
-                
-            elif engine_name == "trocr":
-                from .trocr_engine import TrOCREngine
-                engine = TrOCREngine(self.config)
-                
+            # Basic image analysis
+            from PIL import Image
+            import numpy as np
+            
+            if isinstance(image, str):
+                pil_image = Image.open(image)
+            elif isinstance(image, Image.Image):
+                pil_image = image
             else:
-                logger.error(f"Unknown engine: {engine_name}")
-                return None
+                # Assume it's a numpy array
+                pil_image = Image.fromarray(image)
             
-            # Initialize if needed
-            if not engine.is_ready():
-                engine.initialize()
+            # Image size analysis
+            width, height = pil_image.size
+            total_pixels = width * height
             
-            self._engines[engine_name] = engine
-            logger.info(f"Initialized {engine_name} engine")
-            return engine
+            if total_pixels < 100000:  # Small image
+                analysis['estimated_complexity'] = 'low'
+            elif total_pixels > 1000000:  # Large image
+                analysis['estimated_complexity'] = 'high'
+            
+            # Convert to grayscale for analysis
+            if pil_image.mode != 'L':
+                gray_image = pil_image.convert('L')
+            else:
+                gray_image = pil_image
+            
+            # Basic quality assessment using variance
+            img_array = np.array(gray_image)
+            variance = np.var(img_array)
+            
+            if variance < 1000:
+                analysis['image_quality'] = 'poor'
+            elif variance > 5000:
+                analysis['image_quality'] = 'excellent'
+            
+            self.logger.debug(f"Content analysis: {analysis}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize {engine_name} engine: {e}")
-            import traceback
-            logger.error(f"Engine {engine_name} initialization traceback: {traceback.format_exc()}")
-            return None
+            self.logger.warning(f"Content analysis failed: {e}, using defaults")
+        
+        return analysis
     
-    def _is_result_acceptable(self, result: OCRResult) -> bool:
-        """Check if OCR result meets minimum quality standards - ENHANCED"""
-        if not result:
-            logger.debug("Result is None - not acceptable")
-            return False
+    def _select_engines(self, content_analysis: Dict[str, Any]) -> EngineSelection:
+        """
+        Select optimal engines based on strategy and content analysis.
+        
+        Args:
+            content_analysis: Image content analysis
             
-        if not hasattr(result, 'text') or not result.text:
-            logger.debug("Result has no text - not acceptable")
-            return False
+        Returns:
+            EngineSelection with chosen engines and strategy
+        """
+        strategy = self.config.engine_strategy
+        enabled_engines = self._get_available_engines()
         
-        # Check minimum text length (avoid single characters)
-        if len(result.text.strip()) < 2:
-            logger.debug(f"Result text too short: '{result.text}' - not acceptable")
-            return False
+        if not enabled_engines:
+            raise RuntimeError("No engines available for text extraction")
         
-        # Check minimum confidence
-        if hasattr(result, 'confidence') and result.confidence < self.min_confidence:
-            logger.debug(f"Result confidence too low: {result.confidence} < {self.min_confidence}")
-            return False
-        
-        # Check for success flag if available
-        if hasattr(result, 'success') and result.success is False:
-            logger.debug("Result marked as failed - not acceptable")
-            return False
-        
-        logger.debug(f"Result acceptable: '{result.text[:30]}...' conf: {getattr(result, 'confidence', 'N/A')}")
-        return True
+        # Strategy-based selection
+        if strategy == EngineStrategy.SINGLE:
+            return self._select_single_engine(content_analysis, enabled_engines)
+        elif strategy == EngineStrategy.DUAL:
+            return self._select_dual_engines(content_analysis, enabled_engines)
+        elif strategy == EngineStrategy.ADAPTIVE:
+            return self._select_adaptive_engines(content_analysis, enabled_engines)
+        else:  # ALL strategy
+            return self._select_all_engines(content_analysis, enabled_engines)
     
-    def _create_mock_result(self, image: np.ndarray, text_regions: List) -> Optional[OCRResult]:
-        """Create mock result for testing when all engines fail"""
+    def _select_single_engine(self, content_analysis: Dict[str, Any], 
+                             available_engines: List[str]) -> EngineSelection:
+        """Select single best engine for content."""
+        # Rank engines based on performance and content type
+        best_engine = self._rank_engines_for_content(content_analysis, available_engines)[0]
+        
+        return EngineSelection(
+            primary_engine=best_engine,
+            secondary_engines=[],
+            strategy_used=EngineStrategy.SINGLE,
+            selection_reason=f"Best performing engine for {content_analysis['content_type'].value}",
+            confidence_threshold=self.config.get_quality_threshold_value(),
+            expected_processing_time=self._estimate_processing_time([best_engine])
+        )
+    
+    def _select_dual_engines(self, content_analysis: Dict[str, Any], 
+                            available_engines: List[str]) -> EngineSelection:
+        """Select two complementary engines."""
+        ranked_engines = self._rank_engines_for_content(content_analysis, available_engines)
+        
+        primary = ranked_engines[0]
+        secondary = [ranked_engines[1]] if len(ranked_engines) > 1 else []
+        
+        return EngineSelection(
+            primary_engine=primary,
+            secondary_engines=secondary,
+            strategy_used=EngineStrategy.DUAL,
+            selection_reason="Dual engine fusion for improved accuracy",
+            confidence_threshold=self.config.get_quality_threshold_value(),
+            expected_processing_time=self._estimate_processing_time([primary] + secondary)
+        )
+    
+    def _select_adaptive_engines(self, content_analysis: Dict[str, Any], 
+                                available_engines: List[str]) -> EngineSelection:
+        """Adaptively select engines based on content and performance."""
+        content_type = content_analysis['content_type']
+        complexity = content_analysis['estimated_complexity']
+        
+        # Adaptive logic based on content
+        if content_type == ContentType.HANDWRITTEN:
+            # Prioritize TrOCR for handwriting
+            if 'trocr' in available_engines:
+                primary = 'trocr'
+                secondary = [e for e in ['paddleocr', 'easyocr'] if e in available_engines][:1]
+                reason = "TrOCR optimized for handwritten text"
+            else:
+                ranked = self._rank_engines_for_content(content_analysis, available_engines)
+                primary = ranked[0]
+                secondary = ranked[1:2]
+                reason = "Best available engine for handwritten text"
+        
+        elif complexity == 'high' or content_analysis['image_quality'] == 'poor':
+            # Use multiple engines for complex/poor quality images
+            ranked = self._rank_engines_for_content(content_analysis, available_engines)
+            primary = ranked[0]
+            secondary = ranked[1:3]  # Use up to 2 secondary engines
+            reason = "Multiple engines for complex/poor quality image"
+        
+        else:
+            # Use single best engine for simple cases
+            best_engine = self._rank_engines_for_content(content_analysis, available_engines)[0]
+            primary = best_engine
+            secondary = []
+            reason = "Single engine sufficient for simple content"
+        
+        return EngineSelection(
+            primary_engine=primary,
+            secondary_engines=secondary,
+            strategy_used=EngineStrategy.ADAPTIVE,
+            selection_reason=reason,
+            confidence_threshold=self.config.get_quality_threshold_value(),
+            expected_processing_time=self._estimate_processing_time([primary] + secondary)
+        )
+    
+    def _select_all_engines(self, content_analysis: Dict[str, Any], 
+                           available_engines: List[str]) -> EngineSelection:
+        """Use all available engines for maximum accuracy."""
+        ranked_engines = self._rank_engines_for_content(content_analysis, available_engines)
+        
+        primary = ranked_engines[0]
+        secondary = ranked_engines[1:]
+        
+        return EngineSelection(
+            primary_engine=primary,
+            secondary_engines=secondary,
+            strategy_used=EngineStrategy.ALL,
+            selection_reason="All engines for maximum accuracy",
+            confidence_threshold=self.config.get_quality_threshold_value(),
+            expected_processing_time=self._estimate_processing_time(ranked_engines)
+        )
+    
+    def _rank_engines_for_content(self, content_analysis: Dict[str, Any], 
+                                 available_engines: List[str]) -> List[str]:
+        """Rank engines based on expected performance for content type."""
+        content_type = content_analysis['content_type']
+        
+        # Engine rankings for different content types
+        rankings = {
+            ContentType.PRINTED_TEXT: ['paddleocr', 'easyocr', 'tesseract', 'trocr'],
+            ContentType.HANDWRITTEN: ['trocr', 'paddleocr', 'easyocr', 'tesseract'],
+            ContentType.DOCUMENT: ['paddleocr', 'tesseract', 'easyocr', 'trocr'],
+            ContentType.RECEIPT: ['paddleocr', 'easyocr', 'tesseract', 'trocr'],
+            ContentType.MIXED_CONTENT: ['paddleocr', 'easyocr', 'trocr', 'tesseract']
+        }
+        
+        # Get base ranking for content type
+        base_ranking = rankings.get(content_type, rankings[ContentType.PRINTED_TEXT])
+        
+        # Filter to available engines and add performance weighting
+        available_ranked = []
+        for engine in base_ranking:
+            if engine in available_engines:
+                # Weight by historical performance
+                performance = self.engine_performance.get(engine, {})
+                success_rate = performance.get('success_rate', 0.5)
+                
+                # Add small random factor to break ties
+                import random
+                weight = success_rate + random.uniform(-0.01, 0.01)
+                available_ranked.append((engine, weight))
+        
+        # Add any remaining engines not in base ranking
+        for engine in available_engines:
+            if engine not in [e[0] for e in available_ranked]:
+                performance = self.engine_performance.get(engine, {})
+                success_rate = performance.get('success_rate', 0.3)  # Lower default for unknown
+                available_ranked.append((engine, success_rate))
+        
+        # Sort by weight (descending)
+        available_ranked.sort(key=lambda x: x[1], reverse=True)
+        
+        return [engine for engine, _ in available_ranked]
+    
+    def _execute_extraction(self, image: Any, selection: EngineSelection) -> Optional[OCRResult]:
+        """Execute text extraction with selected engines."""
+        engines_to_use = [selection.primary_engine] + selection.secondary_engines
+        
+        if len(engines_to_use) == 1:
+            # Single engine extraction
+            return self._extract_with_single_engine(image, selection.primary_engine)
+        else:
+            # Multiple engine extraction with fusion
+            return self._extract_with_multiple_engines(image, engines_to_use, selection)
+    
+    def _extract_with_single_engine(self, image: Any, engine_name: str) -> Optional[OCRResult]:
+        """Extract text with single engine."""
+        engine = self.engines.get(engine_name)
+        if not engine:
+            self.logger.error(f"Engine not found: {engine_name}")
+            return None
+        
         try:
-            # Simple mock result for testing
-            mock_text = f"MOCK_RESULT_{len(text_regions)}_regions"
-            
-            from ..results import OCRResult
-            mock_result = OCRResult(
-                text=mock_text,
-                confidence=0.5,
-                processing_time=0.1,
-                engine_name="mock_engine",
-                success=True,
-                metadata={
-                    'mock_result': True,
-                    'regions_count': len(text_regions),
-                    'image_shape': image.shape
-                }
-            )
-            
-            logger.debug(f"Created mock result: {mock_text}")
-            return mock_result
-            
+            result = engine.extract(image)
+            self._update_engine_performance(engine_name, result is not None, result)
+            return result
         except Exception as e:
-            logger.error(f"Failed to create mock result: {e}")
+            self.logger.error(f"Single engine extraction failed: {e}")
+            self._update_engine_performance(engine_name, False, None)
             return None
     
-    def _create_empty_coordination_result(self) -> List[OCRResult]:
-        """Create empty result list as fallback"""
-        return []
-
-    def get_engine_stats(self) -> Dict[str, any]:
-        """Get statistics for all initialized engines"""
-        stats = {}
-        for name, engine in self._engines.items():
+    def _extract_with_multiple_engines(self, image: Any, engine_names: List[str], 
+                                     selection: EngineSelection) -> Optional[OCRResult]:
+        """Extract text with multiple engines in parallel."""
+        if not self.config.performance.enable_parallel_engines:
+            # Sequential execution
+            return self._extract_sequential(image, engine_names)
+        
+        # Parallel execution
+        future_to_engine = {}
+        
+        for engine_name in engine_names:
+            engine = self.engines.get(engine_name)
+            if engine and engine.is_ready:
+                future = self.executor.submit(engine.extract, image)
+                future_to_engine[future] = engine_name
+        
+        if not future_to_engine:
+            self.logger.error("No engines ready for parallel execution")
+            return None
+        
+        # Collect results as they complete
+        results = {}
+        exceptions = {}
+        
+        try:
+            for future in as_completed(future_to_engine, timeout=self.config.performance.default_timeout):
+                engine_name = future_to_engine[future]
+                try:
+                    result = future.result(timeout=5)  # Quick timeout for individual results
+                    results[engine_name] = result
+                    self._update_engine_performance(engine_name, result is not None, result)
+                    
+                    if result:
+                        self.logger.debug(f"Got result from {engine_name}")
+                    else:
+                        self.logger.warning(f"Engine {engine_name} returned no result")
+                        
+                except Exception as e:
+                    exceptions[engine_name] = str(e)
+                    self.logger.error(f"Engine {engine_name} failed: {e}")
+                    self._update_engine_performance(engine_name, False, None)
+        
+        except Exception as e:
+            self.logger.error(f"Parallel execution failed: {e}")
+            # Cancel remaining futures
+            for future in future_to_engine:
+                future.cancel()
+        
+        # Return best result or fused result
+        valid_results = {name: result for name, result in results.items() if result is not None}
+        
+        if not valid_results:
+            self.logger.error("All engines failed to produce results")
+            return None
+        
+        if len(valid_results) == 1:
+            # Single valid result
+            return list(valid_results.values())[0]
+        
+        # Multiple results - return primary if available, otherwise best confidence
+        if selection.primary_engine in valid_results:
+            primary_result = valid_results[selection.primary_engine]
+            # Add metadata about other engines
+            primary_result.metadata['alternative_engines'] = list(valid_results.keys())
+            return primary_result
+        
+        # Return result with highest confidence
+        best_result = max(valid_results.values(), 
+                         key=lambda r: r.confidence.overall_confidence if r.confidence else 0.0)
+        return best_result
+    
+    def _extract_sequential(self, image: Any, engine_names: List[str]) -> Optional[OCRResult]:
+        """Extract text with engines sequentially (fallback approach)."""
+        for engine_name in engine_names:
+            engine = self.engines.get(engine_name)
+            if not engine or not engine.is_ready:
+                continue
+            
             try:
-                stats[name] = {
-                    'status': engine.get_status().value,
-                    'metrics': engine.get_metrics(),
-                    'is_ready': engine.is_ready()
-                }
+                result = engine.extract(image)
+                self._update_engine_performance(engine_name, result is not None, result)
+                
+                if result and result.confidence:
+                    confidence = result.confidence.overall_confidence
+                    if confidence >= self.config.get_quality_threshold_value():
+                        self.logger.info(f"Sequential: {engine_name} met quality threshold")
+                        return result
+                    else:
+                        self.logger.debug(
+                            f"Sequential: {engine_name} below threshold "
+                            f"({confidence:.2f} < {self.config.get_quality_threshold_value()})"
+                        )
+                
             except Exception as e:
-                stats[name] = {'error': str(e)}
-        return stats
-
-
-# Export classes for project compatibility
-__all__ = [
-    'EngineCoordinator',
-    'CoordinationResult', 
-    'EngineSelection',
-    'EngineStrategy'
-]
+                self.logger.error(f"Sequential engine {engine_name} failed: {e}")
+                self._update_engine_performance(engine_name, False, None)
+        
+        self.logger.warning("All sequential engines failed or below threshold")
+        return None
+    
+    def _get_available_engines(self) -> List[str]:
+        """Get list of available and ready engines."""
+        with self._engine_lock:
+            available = []
+            for name, engine in self.engines.items():
+                if (name in self.config.enabled_engines and 
+                    engine.status == EngineStatus.READY):
+                    available.append(name)
+            return available
+    
+    def _estimate_processing_time(self, engine_names: List[str]) -> float:
+        """Estimate total processing time for engine combination."""
+        if not engine_names:
+            return 0.0
+        
+        if len(engine_names) == 1:
+            # Single engine
+            perf = self.engine_performance.get(engine_names[0], {})
+            return perf.get('avg_processing_time', 5.0)  # Default 5 seconds
+        
+        # Multiple engines - assume parallel execution
+        if self.config.performance.enable_parallel_engines:
+            # Return time of slowest engine
+            max_time = 0.0
+            for engine_name in engine_names:
+                perf = self.engine_performance.get(engine_name, {})
+                engine_time = perf.get('avg_processing_time', 5.0)
+                max_time = max(max_time, engine_time)
+            return max_time
+        else:
+            # Sequential execution - sum all times
+            total_time = 0.0
+            for engine_name in engine_names:
+                perf = self.engine_performance.get(engine_name, {})
+                total_time += perf.get('avg_processing_time', 5.0)
+            return total_time
+    
+    def _update_engine_performance(self, engine_name: str, success: bool, result: Optional[OCRResult]):
+        """Update engine performance metrics."""
+        if engine_name not in self.engine_performance:
+            self.engine_performance[engine_name] = {
+                'success_rate': 0.0,
+                'avg_processing_time': 0.0,
+                'avg_confidence': 0.0,
+                'content_type_performance': {},
+                'last_used': 0.0,
+                'total_uses': 0
+            }
+        
+        perf = self.engine_performance[engine_name]
+        perf['total_uses'] += 1
+        perf['last_used'] = time.time()
+        
+        # Update success rate (exponential moving average)
+        alpha = 0.1  # Learning rate
+        current_success = 1.0 if success else 0.0
+        perf['success_rate'] = (1 - alpha) * perf['success_rate'] + alpha * current_success
+        
+        if result:
+            # Update processing time
+            if result.processing_time > 0:
+                perf['avg_processing_time'] = (
+                    (1 - alpha) * perf['avg_processing_time'] + 
+                    alpha * result.processing_time
+                )
+            
+            # Update confidence
+            if result.confidence:
+                confidence = result.confidence.overall_confidence
+                perf['avg_confidence'] = (
+                    (1 - alpha) * perf['avg_confidence'] + 
+                    alpha * confidence
+                )
+    
+    def _update_strategy_performance(self, strategy: EngineStrategy, result: Optional[OCRResult], 
+                                   processing_time: float):
+        """Update strategy performance metrics."""
+        strategy_perf = self._strategy_performance[strategy.value]
+        strategy_perf['used_count'] += 1
+        strategy_perf['total_time'] += processing_time
+        
+        if result and result.confidence:
+            strategy_perf['success_count'] += 1
+            # Update average confidence (exponential moving average)
+            alpha = 0.1
+            new_confidence = result.confidence.overall_confidence
+            strategy_perf['avg_confidence'] = (
+                (1 - alpha) * strategy_perf['avg_confidence'] + 
+                alpha * new_confidence
+            )
+    
+    def get_engine_stats(self) -> Dict[str, Any]:
+        """Get comprehensive engine performance statistics."""
+        with self._engine_lock:
+            stats = {
+                'total_extractions': self._total_extractions,
+                'registered_engines': len(self.engines),
+                'available_engines': len(self._get_available_engines()),
+                'engine_performance': self.engine_performance.copy(),
+                'strategy_performance': self._strategy_performance.copy(),
+                'engine_status': {
+                    name: engine.status.value 
+                    for name, engine in self.engines.items()
+                }
+            }
+            
+            # Calculate overall coordinator performance
+            total_strategy_uses = sum(
+                perf['used_count'] for perf in self._strategy_performance.values()
+            )
+            if total_strategy_uses > 0:
+                overall_success_rate = sum(
+                    perf['success_count'] for perf in self._strategy_performance.values()
+                ) / total_strategy_uses
+                
+                stats['overall_performance'] = {
+                    'success_rate': overall_success_rate,
+                    'total_strategy_uses': total_strategy_uses,
+                    'avg_processing_time': sum(
+                        perf['total_time'] for perf in self._strategy_performance.values()
+                    ) / total_strategy_uses
+                }
+            
+            return stats
+    
+    def get_engine_recommendations(self) -> Dict[str, Any]:
+        """Get recommendations for engine configuration optimization."""
+        stats = self.get_engine_stats()
+        recommendations = {
+            'engine_recommendations': [],
+            'strategy_recommendations': [],
+            'configuration_suggestions': []
+        }
+        
+        # Analyze engine performance
+        for engine_name, perf in self.engine_performance.items():
+            if perf['total_uses'] < 10:
+                continue  # Not enough data
+            
+            if perf['success_rate'] < 0.5:
+                recommendations['engine_recommendations'].append({
+                    'engine': engine_name,
+                    'issue': 'low_success_rate',
+                    'value': perf['success_rate'],
+                    'suggestion': 'Consider disabling or investigating configuration'
+                })
+            
+            if perf['avg_processing_time'] > 30.0:
+                recommendations['engine_recommendations'].append({
+                    'engine': engine_name,
+                    'issue': 'slow_processing',
+                    'value': perf['avg_processing_time'],
+                    'suggestion': 'Check GPU acceleration or reduce timeout'
+                })
+        
+        # Analyze strategy performance
+        best_strategy = None
+        best_success_rate = 0.0
+        
+        for strategy, perf in self._strategy_performance.items():
+            if perf['used_count'] > 0:
+                success_rate = perf['success_count'] / perf['used_count']
+                if success_rate > best_success_rate:
+                    best_success_rate = success_rate
+                    best_strategy = strategy
+        
+        if best_strategy and best_strategy != self.config.engine_strategy.value:
+            recommendations['strategy_recommendations'].append({
+                'current_strategy': self.config.engine_strategy.value,
+                'recommended_strategy': best_strategy,
+                'current_success_rate': self._strategy_performance[self.config.engine_strategy.value].get('success_count', 0) / max(1, self._strategy_performance[self.config.engine_strategy.value].get('used_count', 1)),
+                'recommended_success_rate': best_success_rate,
+                'reason': 'Higher success rate observed'
+            })
+        
+        return recommendations
+    
+    def shutdown(self):
+        """Shutdown coordinator and all engines."""
+        self.logger.info("Shutting down engine coordinator")
+        
+        # Shutdown thread pool
+        self.executor.shutdown(wait=True)
+        
+        # Shutdown all engines
+        with self._engine_lock:
+            for engine in self.engines.values():
+                try:
+                    engine.shutdown()
+                except Exception as e:
+                    self.logger.error(f"Error shutting down engine {engine.name}: {e}")
+            
+            self.engines.clear()
+    
+    def __del__(self):
+        """Cleanup on destruction."""
+        try:
+            self.shutdown()
+        except:
+            pass

@@ -1,539 +1,571 @@
-# src/advanced_ocr/engines/paddleocr_engine.py
 """
-Advanced OCR PaddleOCR Engine - PIPELINE-COMPLIANT VERSION
-
-ARCHITECTURAL COMPLIANCE:
-- Inherits from BaseOCREngine (proper interface)
-- Lazy initialization (no blocking in __init__)
-- Timeout protection for model loading
-- Processes ALREADY PREPROCESSED images from engine_coordinator.py
-- Returns simple OCRResult (no postprocessing)
-- Proper coordinate handling for BoundingBox objects
-- Fallback mechanisms for testing/failures
-- FIXED: Unicode logging issues and version compatibility
-
-PIPELINE INTEGRATION:
-Receives: preprocessed numpy array + text regions from engine_coordinator.py
-Returns: Raw OCRResult to engine_coordinator.py (no fusion, no postprocessing)
+PaddleOCR Engine Implementation
+High-performance OCR using PaddleOCR with optimal settings for modern AI workflow.
 """
 
-import numpy as np
-from typing import List, Optional, Any
-import warnings
-import threading
 import time
+import logging
+from typing import Any, Optional, List, Tuple, Dict
+import numpy as np
+from PIL import Image
 
-from .base_engine import BaseOCREngine
-from ..results import OCRResult, TextRegion, BoundingBoxFormat
+from .base_engine import BaseOCREngine, EngineStatus
+from ..results import (
+    OCRResult, Page, Paragraph, Line, Word, 
+    BoundingBox, ConfidenceMetrics, CoordinateFormat, ProcessingMetrics
+)
 from ..config import OCRConfig
-
-# Suppress PaddleOCR warnings
-warnings.filterwarnings('ignore', category=UserWarning, module='paddle')
-
-try:
-    from paddleocr import PaddleOCR
-    PADDLEOCR_AVAILABLE = True
-except ImportError:
-    PADDLEOCR_AVAILABLE = False
-    PaddleOCR = None
+from ..utils.model_utils import get_model_loader
+from ..utils.image_utils import ImageLoader
 
 
 class PaddleOCREngine(BaseOCREngine):
     """
-    PaddleOCR-based OCR engine following pipeline architecture exactly
-    
-    CORRECT RESPONSIBILITIES (per pipeline plan):
-    - Extract text using PaddleOCR from PREPROCESSED images
-    - Process provided text regions OR full image
-    - Return RAW OCRResult with simple text and confidence
-    - NO layout analysis, NO hierarchical structure building
-    - NO postprocessing (that's text_processor.py's job)
-    
-    Pipeline Flow:
-    core.py -> engine_coordinator.py -> PaddleOCREngine -> OCRResult -> text_processor.py
+    PaddleOCR implementation with full image processing and hierarchical text extraction.
+    Optimized for printed text with strong performance on diverse document types.
     """
     
     def __init__(self, config: OCRConfig):
-        """Initialize configuration ONLY - NO model loading (per pipeline design)"""
-        super().__init__(config)
+        """
+        Initialize PaddleOCR engine.
         
-        if not PADDLEOCR_AVAILABLE:
-            raise ImportError("PaddleOCR not installed. Install with: pip install paddlepaddle paddleocr")
+        Args:
+            config: OCR configuration
+        """
+        super().__init__("paddleocr", config)
+        self.paddleocr = None
+        self.image_loader = ImageLoader()
         
-        # Configuration extraction - safe access
+        # PaddleOCR specific settings
+        self.use_angle_cls = True
+        self.use_gpu = self._detect_gpu()
+        self.lang = 'en'  # Default to English
+        
+        self.logger.info(f"Initialized PaddleOCR engine (GPU: {self.use_gpu})")
+    
+    def _detect_gpu(self) -> bool:
+        """Detect if GPU acceleration is available."""
         try:
-            self.paddle_config = getattr(config.engines, 'paddleocr', {})
-        except AttributeError:
-            self.paddle_config = {}
-        
-        # PaddleOCR parameters with version compatibility
-        self.language = self.paddle_config.get('language', 'en')
-        self.use_gpu = self.paddle_config.get('use_gpu', False)
-        self.use_textline_orientation = self.paddle_config.get('use_textline_orientation', True)
-        self.show_log = self.paddle_config.get('show_log', False)
-        
-        # Model state management - LAZY LOADING
-        self._paddle_ocr: Optional[PaddleOCR] = None
-        self._initialization_attempted = False
-        self._initialization_lock = threading.Lock()
-        self._model_load_timeout = 30  # 30 second timeout for testing
-        
-        self.logger.info(f"PaddleOCR engine configured (model NOT loaded): lang={self.language}, gpu={self.use_gpu}")
-    
-    def _initialize_implementation(self):
-        """
-        Lazy model initialization with timeout protection and version compatibility
-        
-        CRITICAL: This prevents test hanging by using timeout and fallback
-        """
-        with self._initialization_lock:
-            if self._initialization_attempted:
-                return  # Don't retry failed initialization
-            
-            self._initialization_attempted = True
-        
-        self.logger.info("Initializing PaddleOCR with timeout protection...")
-        
-        # Use threading for timeout control
-        initialization_complete = threading.Event()
-        initialization_success = [False]
-        error_message = [None]
-        
-        def initialize_worker():
-            """Worker thread for PaddleOCR initialization with version compatibility"""
+            import paddle
+            return paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+        except ImportError:
             try:
-                self.logger.debug("Loading PaddleOCR model...")
-                
-                # Try modern parameter set first (PaddleOCR 2.7+)
-                paddle_ocr = self._try_initialize_paddle()
-                
-                if paddle_ocr is None:
-                    raise RuntimeError("All PaddleOCR initialization attempts failed")
-                
-                # Quick validation test
-                test_image = np.ones((50, 100, 3), dtype=np.uint8) * 255
-                test_result = paddle_ocr.ocr(test_image, cls=False)
-                
-                # Success - store model
-                self._paddle_ocr = paddle_ocr
-                initialization_success[0] = True
-                self.logger.info("PaddleOCR model loaded and validated successfully")
-                
-            except Exception as e:
-                error_message[0] = str(e)
-                self.logger.error(f"PaddleOCR initialization failed: {e}")
-            finally:
-                initialization_complete.set()
-        
-        # Start worker thread
-        worker_thread = threading.Thread(target=initialize_worker, daemon=True)
-        worker_thread.start()
-        
-        # Wait with timeout
-        if initialization_complete.wait(timeout=self._model_load_timeout):
-            if not initialization_success[0]:
-                error_msg = error_message[0] or "Unknown initialization error"
-                self.logger.warning(f"PaddleOCR initialization failed: {error_msg}")
-                self._paddle_ocr = None
-        else:
-            self.logger.warning(f"PaddleOCR initialization timed out after {self._model_load_timeout}s")
-            self._paddle_ocr = None
+                import torch
+                return torch.cuda.is_available()
+            except ImportError:
+                return False
     
-    def _try_initialize_paddle(self) -> Optional[PaddleOCR]:
+    def initialize(self) -> bool:
         """
-        Try multiple PaddleOCR initialization methods for version compatibility
+        Initialize PaddleOCR model with optimized settings.
         
         Returns:
-            PaddleOCR instance or None if all methods fail
+            True if initialization successful
         """
-        # Method 1: Try with all parameters (modern versions)
+        if self.status == EngineStatus.READY:
+            return True
+        
+        self.status = EngineStatus.INITIALIZING
+        start_time = time.time()
+        
         try:
-            self.logger.debug("Attempting PaddleOCR initialization with full parameters")
-            paddle_ocr = PaddleOCR(
-                lang=self.language,
+            # Get model loader
+            model_loader = get_model_loader(self.config)
+            
+            # Load PaddleOCR model
+            self.paddleocr = model_loader.load_model('paddleocr')
+            
+            if self.paddleocr is None:
+                # Fallback: try direct initialization
+                self.logger.warning("Model loader failed, trying direct PaddleOCR initialization")
+                self.paddleocr = self._initialize_paddleocr_direct()
+            
+            if self.paddleocr is None:
+                raise RuntimeError("Failed to initialize PaddleOCR")
+            
+            # Test with small image
+            test_result = self._test_engine()
+            if not test_result:
+                raise RuntimeError("Engine test failed")
+            
+            init_time = time.time() - start_time
+            self.status = EngineStatus.READY
+            self.logger.info(f"PaddleOCR initialized successfully in {init_time:.2f}s")
+            return True
+            
+        except Exception as e:
+            self.status = EngineStatus.ERROR
+            self.logger.error(f"PaddleOCR initialization failed: {e}")
+            return False
+    
+    def _initialize_paddleocr_direct(self) -> Optional[Any]:
+        """Direct PaddleOCR initialization as fallback."""
+        try:
+            from paddleocr import PaddleOCR
+            
+            return PaddleOCR(
+                use_angle_cls=self.use_angle_cls,
+                lang=self.lang,
                 use_gpu=self.use_gpu,
-                use_textline_orientation=self.use_textline_orientation,
-                show_log=self.show_log,
-                enable_mkldnn=False  # Disable for stability
+                show_log=False,
+                # Optimization settings
+                det_algorithm='DB',
+                rec_algorithm='SVTR_LCNet',
+                use_space_char=True,
+                drop_score=0.3  # Lower threshold for better recall
             )
-            self.logger.info("PaddleOCR initialized with full parameters")
-            return paddle_ocr
-            
+        except ImportError:
+            self.logger.error("PaddleOCR not installed. Install with: pip install paddleocr")
+            return None
         except Exception as e:
-            self.logger.warning(f"Full parameter initialization failed: {e}")
-        
-        # Method 2: Try without use_gpu parameter (newer versions)
-        if "use_gpu" in str(e) or "Unknown argument" in str(e):
-            try:
-                self.logger.debug("Attempting PaddleOCR initialization without use_gpu")
-                paddle_ocr = PaddleOCR(
-                    lang=self.language,
-                    use_textline_orientation=self.use_textline_orientation,
-                    show_log=self.show_log,
-                    enable_mkldnn=False
-                )
-                self.logger.info("PaddleOCR initialized without use_gpu parameter")
-                return paddle_ocr
-            except Exception as e2:
-                self.logger.warning(f"No use_gpu initialization failed: {e2}")
-        
-        # Method 3: Try with minimal parameters (compatibility mode)
-        try:
-            self.logger.debug("Attempting PaddleOCR initialization with minimal parameters")
-            paddle_ocr = PaddleOCR(
-                lang=self.language,
-                show_log=False  # Always disable logs
-            )
-            self.logger.info("PaddleOCR initialized with minimal parameters")
-            return paddle_ocr
-        except Exception as e3:
-            self.logger.warning(f"Minimal parameter initialization failed: {e3}")
-        
-        # Method 4: Try with absolutely minimal parameters (last resort)
-        try:
-            self.logger.debug("Attempting PaddleOCR initialization with default parameters")
-            paddle_ocr = PaddleOCR(show_log=False)
-            self.logger.warning("PaddleOCR initialized with default parameters only")
-            return paddle_ocr
-        except Exception as e4:
-            self.logger.error(f"Default parameter initialization failed: {e4}")
-        
-        return None
+            self.logger.error(f"Direct PaddleOCR initialization failed: {e}")
+            return None
     
-    def _extract_implementation(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
+    def _test_engine(self) -> bool:
+        """Test engine with a simple image."""
+        try:
+            # Create small test image
+            test_image = Image.new('RGB', (100, 50), color='white')
+            test_array = np.array(test_image)
+            
+            # Quick test
+            result = self.paddleocr.ocr(test_array, cls=False)
+            return True
+        except Exception as e:
+            self.logger.error(f"Engine test failed: {e}")
+            return False
+    
+    def extract(self, image: Any) -> Optional[OCRResult]:
         """
-        Main extraction method - pipeline compliant
+        Extract text from image using PaddleOCR.
         
         Args:
-            image: PREPROCESSED numpy array from image_processor.py via engine_coordinator.py
-            text_regions: Text regions from text_detector.py via engine_coordinator.py
+            image: Input image (file path, PIL Image, or numpy array)
             
         Returns:
-            Raw OCRResult for text_processor.py (no fusion, no postprocessing)
+            OCRResult with hierarchical text structure or None if failed
         """
-        # Ensure model is available
-        if self._paddle_ocr is None:
-            if not self._initialization_attempted:
-                try:
-                    self.initialize()
-                except Exception as e:
-                    self.logger.warning(f"Late initialization failed: {e}")
-            
-            # If still no model, use fallback
-            if self._paddle_ocr is None:
-                return self._create_fallback_result(image, text_regions)
+        if self.status != EngineStatus.READY:
+            self.logger.error("Engine not ready for extraction")
+            return None
         
-        # Prepare image for PaddleOCR
+        self.status = EngineStatus.BUSY
+        start_time = time.time()
+        metrics = ProcessingMetrics("paddleocr_extraction")
+        
         try:
-            ocr_image = self._prepare_image_for_paddle(image)
+            # Load and prepare image
+            pil_image, img_array = self._prepare_image(image)
+            if pil_image is None:
+                return None
+            
+            # Perform OCR extraction
+            ocr_results = self._perform_ocr(img_array)
+            if not ocr_results:
+                self.logger.warning("No OCR results from PaddleOCR")
+                return self._create_empty_result(pil_image, metrics, start_time)
+            
+            # Process results into hierarchical structure
+            ocr_result = self._process_ocr_results(ocr_results, pil_image, metrics, start_time)
+            
+            metrics.finish()
+            if ocr_result:
+                ocr_result.add_processing_metric(metrics)
+            
+            return ocr_result
+            
         except Exception as e:
-            return self._create_error_result(f"Image preparation failed: {e}")
-        
-        # Choose extraction method based on regions
+            metrics.add_error(f"PaddleOCR extraction failed: {str(e)}")
+            metrics.finish()
+            self.logger.error(f"PaddleOCR extraction error: {e}")
+            return None
+        finally:
+            self.status = EngineStatus.READY
+    
+    def _prepare_image(self, image: Any) -> Tuple[Optional[Image.Image], Optional[np.ndarray]]:
+        """Prepare image for PaddleOCR processing."""
         try:
-            if text_regions and len(text_regions) > 3:
-                # Use regions if we have sufficient detected regions
-                extracted_data = self._extract_from_regions(ocr_image, text_regions)
-            else:
-                # Full image extraction for few/no regions
-                extracted_data = self._extract_full_image(ocr_image)
+            # Load image using image loader
+            pil_image = self.image_loader.load_image(image)
+            if pil_image is None:
+                return None, None
             
-            # Create pipeline-compliant result
-            return OCRResult(
-                text=extracted_data.get('text', ''),
-                confidence=extracted_data.get('confidence', 0.0),
-                engine_name=self.engine_name,
-                success=True,
+            # Convert to RGB if needed
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Convert to numpy array
+            img_array = np.array(pil_image)
+            
+            return pil_image, img_array
+            
+        except Exception as e:
+            self.logger.error(f"Image preparation failed: {e}")
+            return None, None
+    
+    def _perform_ocr(self, img_array: np.ndarray) -> Optional[List]:
+        """Perform OCR using PaddleOCR."""
+        try:
+            # PaddleOCR returns: [[[bbox], (text, confidence)], ...]
+            results = self.paddleocr.ocr(img_array, cls=self.use_angle_cls)
+            
+            # PaddleOCR returns list of lists for multiple images, get first result
+            if isinstance(results, list) and len(results) > 0:
+                return results[0] if results[0] is not None else []
+            
+            return []
+            
+        except Exception as e:
+            self.logger.error(f"PaddleOCR processing failed: {e}")
+            return None
+    
+    def _process_ocr_results(self, ocr_results: List, pil_image: Image.Image, 
+                           metrics: ProcessingMetrics, start_time: float) -> Optional[OCRResult]:
+        """Process PaddleOCR results into hierarchical structure."""
+        try:
+            if not ocr_results:
+                return self._create_empty_result(pil_image, metrics, start_time)
+            
+            # Extract words from PaddleOCR results
+            words = self._extract_words(ocr_results)
+            if not words:
+                return self._create_empty_result(pil_image, metrics, start_time)
+            
+            # Group words into lines based on vertical proximity
+            lines = self._group_words_into_lines(words)
+            
+            # Group lines into paragraphs based on spacing
+            paragraphs = self._group_lines_into_paragraphs(lines)
+            
+            # Create page
+            page = Page(
+                paragraphs=paragraphs,
+                page_number=1,
+                image_dimensions=(pil_image.width, pil_image.height),
+                language=self.lang,
+                processing_metadata={
+                    'engine': 'paddleocr',
+                    'words_detected': len(words),
+                    'lines_detected': len(lines),
+                    'paragraphs_detected': len(paragraphs)
+                }
+            )
+            
+            # Create final result
+            processing_time = time.time() - start_time
+            result = OCRResult(
+                pages=[page],
+                processing_time=processing_time,
+                engine_info={
+                    'name': 'paddleocr',
+                    'version': self._get_paddleocr_version(),
+                    'gpu_used': self.use_gpu,
+                    'language': self.lang
+                },
                 metadata={
-                    'extraction_method': extracted_data.get('method', 'unknown'),
-                    'regions_count': len(text_regions) if text_regions else 0,
-                    'image_shape': image.shape,
-                    **extracted_data  # Include all extraction metadata
+                    'total_words': len(words),
+                    'processing_time_per_word': processing_time / max(1, len(words)),
+                    'image_size': f"{pil_image.width}x{pil_image.height}"
                 }
             )
             
-        except Exception as e:
-            self.logger.error(f"PaddleOCR text extraction failed: {e}")
-            return self._create_error_result(f"Text extraction failed: {e}")
-    
-    def _prepare_image_for_paddle(self, image: np.ndarray) -> np.ndarray:
-        """
-        Prepare image for PaddleOCR processing
-        
-        PaddleOCR expects RGB uint8 images
-        """
-        # Input validation
-        if image is None or image.size == 0:
-            raise ValueError("Invalid input image")
-        
-        # Handle different image formats
-        if len(image.shape) == 2:
-            # Grayscale to RGB
-            image = np.stack([image] * 3, axis=-1)
-        elif len(image.shape) == 3:
-            if image.shape[2] == 4:
-                # RGBA to RGB
-                image = image[:, :, :3]
-            elif image.shape[2] == 3:
-                # Already RGB
-                pass
-            else:
-                raise ValueError(f"Unsupported image channels: {image.shape[2]}")
-        else:
-            raise ValueError(f"Unsupported image dimensions: {image.shape}")
-        
-        # Ensure uint8 format
-        if image.dtype != np.uint8:
-            if image.dtype in [np.float32, np.float64]:
-                # Assume normalized [0,1] range
-                image = np.clip(image * 255, 0, 255).astype(np.uint8)
-            else:
-                # Clip to valid range
-                image = np.clip(image, 0, 255).astype(np.uint8)
-        
-        return image
-    
-    def _extract_full_image(self, image: np.ndarray) -> dict:
-        """
-        Extract text from full image using PaddleOCR
-        
-        Returns:
-            dict: Contains 'text', 'confidence', 'method', and other metadata
-        """
-        try:
-            # Run PaddleOCR on full image
-            results = self._paddle_ocr.ocr(image, cls=self.use_textline_orientation)
+            self.logger.info(
+                f"PaddleOCR extracted {len(words)} words in {processing_time:.2f}s"
+            )
             
-            # Handle empty results
-            if not results or not results[0]:
-                return {
-                    'text': '',
-                    'confidence': 0.0,
-                    'method': 'full_image',
-                    'lines_detected': 0
-                }
-            
-            # Extract text lines
-            lines = results[0]
-            text_parts = []
-            confidences = []
-            
-            for line in lines:
-                if line and isinstance(line, (list, tuple)) and len(line) >= 2:
-                    # PaddleOCR format: [coordinates, (text, confidence)]
-                    coords, text_data = line[0], line[1]
-                    
-                    if isinstance(text_data, (list, tuple)) and len(text_data) >= 2:
-                        text, confidence = text_data[0], text_data[1]
-                        if text and isinstance(text, str) and text.strip():
-                            text_parts.append(text.strip())
-                            confidences.append(float(confidence))
-                    elif isinstance(text_data, str) and text_data.strip():
-                        # Sometimes just text without confidence
-                        text_parts.append(text_data.strip())
-                        confidences.append(0.8)  # Default confidence
-            
-            # Combine results
-            combined_text = ' '.join(text_parts)
-            avg_confidence = np.mean(confidences) if confidences else 0.0
-            
-            return {
-                'text': combined_text,
-                'confidence': float(avg_confidence),
-                'method': 'full_image',
-                'lines_detected': len(text_parts),
-                'lines_processed': len(lines)
-            }
+            return result
             
         except Exception as e:
-            self.logger.error(f"Full image extraction failed: {e}")
-            return {
-                'text': '',
-                'confidence': 0.0,
-                'method': 'full_image_error',
-                'error': str(e)
-            }
+            self.logger.error(f"Result processing failed: {e}")
+            metrics.add_error(f"Result processing failed: {str(e)}")
+            return None
     
-    def _extract_from_regions(self, image: np.ndarray, text_regions: List[TextRegion]) -> dict:
-        """
-        Extract text from specific regions using PaddleOCR
+    def _extract_words(self, ocr_results: List) -> List[Word]:
+        """Extract Word objects from PaddleOCR results."""
+        words = []
         
-        CRITICAL: Proper coordinate handling for BoundingBox objects
-        
-        Args:
-            image: Prepared image for PaddleOCR
-            text_regions: Detected text regions with BoundingBox coordinates
-            
-        Returns:
-            dict: Combined extraction results from all regions
-        """
-        all_text_parts = []
-        all_confidences = []
-        successful_extractions = 0
-        failed_extractions = 0
-        
-        # Process regions (limit for performance)
-        regions_to_process = text_regions[:10]  # Limit to 10 regions
-        
-        for i, region in enumerate(regions_to_process):
+        for line_result in ocr_results:
             try:
-                # Extract coordinates from BoundingBox
-                bbox = region.bbox
-                
-                # Handle different coordinate formats
-                if bbox.format == BoundingBoxFormat.XYXY:
-                    coords = bbox.coordinates
-                    if len(coords) >= 4:
-                        x1, y1, x2, y2 = coords[0], coords[1], coords[2], coords[3]
-                    else:
-                        self.logger.warning(f"Invalid XYXY coordinates for region {i}")
-                        failed_extractions += 1
-                        continue
-                        
-                elif bbox.format == BoundingBoxFormat.XYWH:
-                    coords = bbox.coordinates
-                    if len(coords) >= 4:
-                        x, y, w, h = coords[0], coords[1], coords[2], coords[3]
-                        x1, y1, x2, y2 = x, y, x + w, y + h
-                    else:
-                        self.logger.warning(f"Invalid XYWH coordinates for region {i}")
-                        failed_extractions += 1
-                        continue
-                        
-                else:
-                    # Use BoundingBox conversion method
-                    try:
-                        x1, y1, x2, y2 = bbox.to_xyxy()
-                    except Exception as e:
-                        self.logger.warning(f"Failed to convert bbox for region {i}: {e}")
-                        failed_extractions += 1
-                        continue
-                
-                # Ensure valid integer coordinates
-                x1 = max(0, int(x1))
-                y1 = max(0, int(y1))
-                x2 = min(image.shape[1], int(x2))
-                y2 = min(image.shape[0], int(y2))
-                
-                # Validate region
-                if y1 >= y2 or x1 >= x2:
-                    self.logger.debug(f"Invalid region bounds {i}: ({x1},{y1},{x2},{y2})")
-                    failed_extractions += 1
+                if not line_result or len(line_result) != 2:
                     continue
                 
-                if (x2 - x1) < 8 or (y2 - y1) < 4:  # Too small
-                    self.logger.debug(f"Region {i} too small: {x2-x1}x{y2-y1}")
-                    failed_extractions += 1
+                bbox_coords, (text, confidence) = line_result
+                
+                # Skip empty text
+                if not text or not text.strip():
                     continue
                 
-                # Extract region
-                region_image = image[y1:y2, x1:x2]
-                
-                if region_image.size == 0:
-                    failed_extractions += 1
+                # Convert bbox coordinates
+                bbox = self._create_bounding_box(bbox_coords)
+                if bbox is None:
                     continue
                 
-                # Run PaddleOCR on region (faster with cls=False)
-                region_results = self._paddle_ocr.ocr(region_image, cls=False)
+                # Create confidence metrics
+                conf_metrics = ConfidenceMetrics(
+                    character_level=confidence,
+                    word_level=confidence,
+                    line_level=confidence,
+                    text_quality=self._assess_text_quality(text),
+                    spatial_quality=0.8,  # PaddleOCR generally good spatial accuracy
+                    engine_name='paddleocr',
+                    raw_confidence=confidence
+                )
                 
-                # Process region results
-                if region_results and region_results[0]:
-                    for line in region_results[0]:
-                        if line and isinstance(line, (list, tuple)) and len(line) >= 2:
-                            coords_inner, text_data = line[0], line[1]
-                            
-                            if isinstance(text_data, (list, tuple)) and len(text_data) >= 2:
-                                text, confidence = text_data[0], text_data[1]
-                                if text and isinstance(text, str) and text.strip():
-                                    all_text_parts.append(text.strip())
-                                    all_confidences.append(float(confidence))
+                # Create Word object
+                word = Word(
+                    text=text.strip(),
+                    bbox=bbox,
+                    confidence=conf_metrics
+                )
                 
-                successful_extractions += 1
+                words.append(word)
                 
             except Exception as e:
-                self.logger.warning(f"Failed to process region {i}: {e}")
-                failed_extractions += 1
+                self.logger.warning(f"Failed to process word result: {e}")
                 continue
         
-        # Combine all extracted text
-        combined_text = ' '.join(all_text_parts)
-        avg_confidence = np.mean(all_confidences) if all_confidences else 0.0
-        
-        return {
-            'text': combined_text,
-            'confidence': float(avg_confidence),
-            'method': 'regions',
-            'total_regions': len(regions_to_process),
-            'successful_extractions': successful_extractions,
-            'failed_extractions': failed_extractions,
-            'text_parts_found': len(all_text_parts)
-        }
+        return words
     
-    def _create_error_result(self, error_message: str) -> OCRResult:
-        """Create error result for failed operations"""
-        return OCRResult(
-            text="",
-            confidence=0.0,
-            engine_name=self.engine_name,
-            success=False,
-            error_message=error_message,
-            metadata={'error_type': 'extraction_failed'}
+    def _create_bounding_box(self, bbox_coords: List) -> Optional[BoundingBox]:
+        """Create BoundingBox from PaddleOCR coordinates."""
+        try:
+            # PaddleOCR returns [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            if len(bbox_coords) != 4:
+                return None
+            
+            # Extract all x and y coordinates
+            x_coords = [point[0] for point in bbox_coords]
+            y_coords = [point[1] for point in bbox_coords]
+            
+            # Calculate bounding rectangle
+            min_x = min(x_coords)
+            min_y = min(y_coords)
+            max_x = max(x_coords)
+            max_y = max(y_coords)
+            
+            return BoundingBox(
+                coordinates=(min_x, min_y, max_x, max_y),
+                format=CoordinateFormat.XYXY
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to create bounding box: {e}")
+            return None
+    
+    def _assess_text_quality(self, text: str) -> float:
+        """Assess text quality based on content characteristics."""
+        if not text:
+            return 0.0
+        
+        quality_score = 0.5  # Base score
+        
+        # Check for common OCR errors
+        error_indicators = ['|', '~', '`', '@#$', '|||']
+        if not any(indicator in text for indicator in error_indicators):
+            quality_score += 0.2
+        
+        # Check for reasonable character distribution
+        if text.isalnum() or any(c.isalnum() for c in text):
+            quality_score += 0.2
+        
+        # Check length (very short or very long might be errors)
+        if 1 <= len(text) <= 50:
+            quality_score += 0.1
+        
+        return min(1.0, quality_score)
+    
+    def _group_words_into_lines(self, words: List[Word]) -> List[Line]:
+        """Group words into lines based on vertical proximity."""
+        if not words:
+            return []
+        
+        # Sort words by vertical position (top to bottom)
+        sorted_words = sorted(words, key=lambda w: w.bbox.xyxy[1])
+        
+        lines = []
+        current_line_words = [sorted_words[0]]
+        current_line_y = sorted_words[0].bbox.xyxy[1]
+        
+        # Group words with similar y-coordinates
+        line_height_threshold = 10  # pixels
+        
+        for word in sorted_words[1:]:
+            word_y = word.bbox.xyxy[1]
+            
+            if abs(word_y - current_line_y) <= line_height_threshold:
+                # Same line
+                current_line_words.append(word)
+            else:
+                # New line
+                if current_line_words:
+                    # Sort current line words by x-coordinate (left to right)
+                    current_line_words.sort(key=lambda w: w.bbox.xyxy[0])
+                    lines.append(Line(words=current_line_words))
+                
+                current_line_words = [word]
+                current_line_y = word_y
+        
+        # Add the last line
+        if current_line_words:
+            current_line_words.sort(key=lambda w: w.bbox.xyxy[0])
+            lines.append(Line(words=current_line_words))
+        
+        return lines
+    
+    def _group_lines_into_paragraphs(self, lines: List[Line]) -> List[Paragraph]:
+        """Group lines into paragraphs based on spacing."""
+        if not lines:
+            return []
+        
+        paragraphs = []
+        current_paragraph_lines = [lines[0]]
+        
+        # Calculate spacing threshold based on average line height
+        if len(lines) > 1:
+            line_heights = []
+            for line in lines:
+                if line.bbox:
+                    _, _, _, height = line.bbox.xywh
+                    line_heights.append(height)
+            
+            avg_line_height = sum(line_heights) / len(line_heights) if line_heights else 20
+            spacing_threshold = avg_line_height * 1.5  # 1.5x line height indicates paragraph break
+        else:
+            spacing_threshold = 30  # Default threshold
+        
+        # Group lines with reasonable spacing
+        for i in range(1, len(lines)):
+            prev_line = lines[i-1]
+            curr_line = lines[i]
+            
+            if prev_line.bbox and curr_line.bbox:
+                # Calculate vertical spacing
+                prev_bottom = prev_line.bbox.xyxy[3]
+                curr_top = curr_line.bbox.xyxy[1]
+                spacing = curr_top - prev_bottom
+                
+                if spacing <= spacing_threshold:
+                    # Same paragraph
+                    current_paragraph_lines.append(curr_line)
+                else:
+                    # New paragraph
+                    if current_paragraph_lines:
+                        paragraphs.append(Paragraph(lines=current_paragraph_lines))
+                    current_paragraph_lines = [curr_line]
+            else:
+                # If no bbox info, assume same paragraph
+                current_paragraph_lines.append(curr_line)
+        
+        # Add the last paragraph
+        if current_paragraph_lines:
+            paragraphs.append(Paragraph(lines=current_paragraph_lines))
+        
+        return paragraphs
+    
+    def _create_empty_result(self, pil_image: Image.Image, metrics: ProcessingMetrics, 
+                           start_time: float) -> OCRResult:
+        """Create empty result for images with no text."""
+        processing_time = time.time() - start_time
+        
+        # Create empty page
+        page = Page(
+            paragraphs=[],
+            page_number=1,
+            image_dimensions=(pil_image.width, pil_image.height),
+            language=self.lang,
+            processing_metadata={
+                'engine': 'paddleocr',
+                'words_detected': 0,
+                'lines_detected': 0,
+                'paragraphs_detected': 0
+            }
         )
-    
-    def _create_fallback_result(self, image: np.ndarray, text_regions: List[TextRegion]) -> OCRResult:
-        """
-        Create fallback result when PaddleOCR is unavailable
         
-        This enables testing when model can't be loaded
-        """
-        region_count = len(text_regions) if text_regions else 1
-        image_info = f"{image.shape[0]}x{image.shape[1]}"
+        # Create empty confidence
+        empty_confidence = ConfidenceMetrics(
+            character_level=0.0,
+            word_level=0.0,
+            line_level=0.0,
+            layout_level=0.0,
+            text_quality=0.0,
+            spatial_quality=0.0,
+            engine_name='paddleocr'
+        )
         
-        # Generate meaningful fallback text for testing
-        fallback_text = f"PADDLEOCR_FALLBACK_{region_count}regions_{image_info}"
-        
-        self.logger.info(f"Using PaddleOCR fallback result: {fallback_text}")
-        
-        return OCRResult(
-            text=fallback_text,
-            confidence=0.5,  # Moderate confidence for fallback
-            engine_name=self.engine_name,
-            success=True,  # Mark as successful for testing
+        result = OCRResult(
+            pages=[page],
+            confidence=empty_confidence,
+            processing_time=processing_time,
+            engine_info={
+                'name': 'paddleocr',
+                'version': self._get_paddleocr_version(),
+                'gpu_used': self.use_gpu,
+                'language': self.lang
+            },
             metadata={
-                'fallback_used': True,
-                'reason': 'model_unavailable',
-                'image_shape': image.shape,
-                'regions_count': region_count,
-                'fallback_type': 'testing_mode'
+                'total_words': 0,
+                'image_size': f"{pil_image.width}x{pil_image.height}",
+                'no_text_detected': True
             }
         )
+        
+        return result
     
-    def _cleanup_implementation(self):
-        """Clean up PaddleOCR resources"""
-        if self._paddle_ocr is not None:
+    def _get_paddleocr_version(self) -> str:
+        """Get PaddleOCR version."""
+        try:
+            import paddleocr
+            return getattr(paddleocr, '__version__', 'unknown')
+        except:
+            return 'unknown'
+    
+    def shutdown(self) -> None:
+        """Shutdown PaddleOCR engine and cleanup resources."""
+        self.logger.info("Shutting down PaddleOCR engine")
+        
+        if self.paddleocr is not None:
             try:
-                # PaddleOCR doesn't have explicit cleanup, just remove reference
-                self._paddle_ocr = None
-                self.logger.debug("PaddleOCR model reference cleared")
+                # PaddleOCR doesn't have explicit cleanup, but we can clear the reference
+                del self.paddleocr
+                self.paddleocr = None
             except Exception as e:
-                self.logger.warning(f"PaddleOCR cleanup warning: {e}")
+                self.logger.error(f"Error during PaddleOCR cleanup: {e}")
+        
+        self.status = EngineStatus.SHUTDOWN
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
     
-    def get_engine_info(self) -> dict:
-        """Get comprehensive engine information for debugging"""
+    @property
+    def is_ready(self) -> bool:
+        """Check if engine is ready for processing."""
+        return self.status == EngineStatus.READY and self.paddleocr is not None
+    
+    def get_engine_info(self) -> Dict[str, Any]:
+        """Get comprehensive engine information."""
         return {
-            'engine_type': 'paddleocr',
-            'engine_name': self.engine_name,
-            'language': self.language,
-            'use_gpu': self.use_gpu,
-            'use_textline_orientation': self.use_textline_orientation,
-            'paddleocr_available': PADDLEOCR_AVAILABLE,
-            'model_initialized': self._paddle_ocr is not None,
-            'initialization_attempted': self._initialization_attempted,
-            'status': self.get_status().value,
-            'timeout': self._model_load_timeout,
-            'metrics': {
-                'total_extractions': self.get_metrics().total_extractions,
-                'success_rate': self.get_metrics().success_rate,
-                'avg_confidence': self.get_metrics().avg_confidence
-            }
+            'name': self.name,
+            'version': self._get_paddleocr_version(),
+            'status': self.status.value,
+            'gpu_enabled': self.use_gpu,
+            'language': self.lang,
+            'use_angle_classification': self.use_angle_cls,
+            'capabilities': [
+                'text_detection',
+                'text_recognition',
+                'angle_classification',
+                'multilingual_support',
+                'gpu_acceleration'
+            ],
+            'supported_formats': [
+                'jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp'
+            ],
+            'optimal_for': [
+                'printed_text',
+                'documents',
+                'receipts',
+                'forms',
+                'mixed_content'
+            ]
         }

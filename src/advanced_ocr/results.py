@@ -1,559 +1,865 @@
-# src/advanced_ocr/results.py
 """
-Advanced OCR Results Library
-
-This module provides comprehensive data structures for representing OCR results
-with hierarchical text organization, spatial information, and confidence metrics.
-
-Classes:
-    OCRResult: Primary container for OCR extraction results
-    BoundingBox: Flexible coordinate representation with format conversion
-    ConfidenceMetrics: Multi-dimensional confidence scoring
-    TextRegion: Base class for hierarchical text structures
-    Word, Line, Paragraph, Block, Page: Hierarchical text elements
-    ProcessingMetrics: Performance tracking and optimization metrics
-    BatchResult: Container for multi-document processing results
-
-Example:
-    >>> result = OCRResult(
-    ...     text="Hello World",
-    ...     confidence=0.95,
-    ...     engine_name="tesseract"
-    ... )
-    >>> print(f"Extracted: {result.text} (confidence: {result.confidence})")
-    
-    >>> bbox = BoundingBox((10, 20, 100, 50), BoundingBoxFormat.XYXY)
-    >>> x, y, w, h = bbox.to_xywh()
+Modern data structures for OCR results with hierarchical text representation.
+Provides clean, efficient containers without complex region handling.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Union, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 from enum import Enum
-import time
 import json
+import time
 
 
-class BoundingBoxFormat(Enum):
-    XYXY = "xyxy"
-    XYWH = "xywh" 
-    CENTER_WH = "center_wh"
-    POLYGON = "polygon"
-
-
-class TextLevel(Enum):
-    CHARACTER = "character"
-    WORD = "word"
-    LINE = "line"
-    PARAGRAPH = "paragraph" 
-    BLOCK = "block"
-    PAGE = "page"
-    DOCUMENT = "document"
-
-
-class ContentType(Enum):
-    PRINTED_TEXT = "printed_text"
-    HANDWRITTEN_TEXT = "handwritten_text"
-    MIXED_TEXT = "mixed_text"
-    TABLE = "table"
-    FORM_FIELD = "form_field"
-    HEADER = "header"
-    FOOTER = "footer"
-    CAPTION = "caption"
-    SIGNATURE = "signature"
-    UNKNOWN = "unknown"
+class CoordinateFormat(Enum):
+    """Supported coordinate formats for bounding boxes."""
+    XYXY = "xyxy"  # (x1, y1, x2, y2)
+    XYWH = "xywh"  # (x, y, width, height)
+    CENTER = "center"  # (center_x, center_y, width, height)
 
 
 @dataclass
 class BoundingBox:
-    """Flexible bounding box with multiple coordinate format support - FIXED VERSION."""
-    coordinates: Union[Tuple[float, float, float, float], List[Tuple[float, float]]]
-    format: BoundingBoxFormat = BoundingBoxFormat.XYXY
-    confidence: float = 1.0
+    """Flexible bounding box with multiple coordinate format support."""
     
-    def __init__(self, *args, format: BoundingBoxFormat = BoundingBoxFormat.XYXY, confidence: float = 1.0):
-        """
-        Initialize BoundingBox with flexible input formats:
-        
-        # Single tuple/list of coordinates
-        BoundingBox((x1, y1, x2, y2))
-        BoundingBox([x, y, w, h])
-        
-        # Four separate coordinates
-        BoundingBox(x1, y1, x2, y2)
-        
-        # Two points (for test compatibility)
-        BoundingBox((x1, y1), (x2, y2))
-        
-        # Polygon points
-        BoundingBox([(x1,y1), (x2,y2), (x3,y3), ...])
-        """
-        self.format = format
-        self.confidence = confidence
-        
-        if len(args) == 1:
-            # Single argument - could be tuple/list of coordinates or list of points
-            arg = args[0]
-            if isinstance(arg, (tuple, list)):
-                if len(arg) == 4 and all(isinstance(x, (int, float)) for x in arg):
-                    # Single tuple/list of 4 coordinates: (x1, y1, x2, y2) or (x, y, w, h)
-                    self.coordinates = tuple(float(x) for x in arg)
-                elif len(arg) > 0 and isinstance(arg[0], (tuple, list)):
-                    # List of points: [(x1,y1), (x2,y2), ...]
-                    self.coordinates = [tuple(float(coord) for coord in point) for point in arg]
-                    self.format = BoundingBoxFormat.POLYGON
-                else:
-                    raise ValueError(f"Invalid single argument format: {arg}")
-            else:
-                raise ValueError(f"Single argument must be tuple/list, got {type(arg)}")
-                
-        elif len(args) == 2:
-            # Two arguments - assume two points: (x1, y1), (x2, y2)
-            point1, point2 = args
-            if (isinstance(point1, (tuple, list)) and len(point1) == 2 and 
-                isinstance(point2, (tuple, list)) and len(point2) == 2):
-                x1, y1 = float(point1[0]), float(point1[1])
-                x2, y2 = float(point2[0]), float(point2[1])
-                self.coordinates = (x1, y1, x2, y2)
-                self.format = BoundingBoxFormat.XYXY
-            else:
-                raise ValueError(f"Two arguments must be points (x,y), got {args}")
-                
-        elif len(args) == 4:
-            # Four arguments - assume x1, y1, x2, y2
-            self.coordinates = tuple(float(x) for x in args)
-            self.format = BoundingBoxFormat.XYXY
-            
-        else:
-            raise ValueError(f"Invalid number of arguments: {len(args)}. Expected 1, 2, or 4.")
+    coordinates: Tuple[float, float, float, float]
+    format: CoordinateFormat = CoordinateFormat.XYXY
     
-    # ADDED: Direct property access for backward compatibility
-    @property
-    def x1(self) -> float:
-        """X1 coordinate (left edge)."""
-        x1, y1, x2, y2 = self.to_xyxy()
-        return x1
+    def __post_init__(self):
+        """Validate coordinates after initialization."""
+        if len(self.coordinates) != 4:
+            raise ValueError("Coordinates must be a tuple of 4 values")
+        if any(coord < 0 for coord in self.coordinates):
+            raise ValueError("Coordinates cannot be negative")
     
     @property
-    def y1(self) -> float:
-        """Y1 coordinate (top edge)."""
-        x1, y1, x2, y2 = self.to_xyxy()
-        return y1
-    
-    @property
-    def x2(self) -> float:
-        """X2 coordinate (right edge)."""
-        x1, y1, x2, y2 = self.to_xyxy()
-        return x2
-    
-    @property
-    def y2(self) -> float:
-        """Y2 coordinate (bottom edge)."""
-        x1, y1, x2, y2 = self.to_xyxy()
-        return y2
-    
-    @property
-    def x(self) -> float:
-        """X coordinate (left edge) - alias for x1."""
-        return self.x1
-    
-    @property
-    def y(self) -> float:
-        """Y coordinate (top edge) - alias for y1."""
-        return self.y1
-    
-    @property
-    def width(self) -> float:
-        """Width of bounding box."""
-        x, y, w, h = self.to_xywh()
-        return w
-    
-    @property
-    def height(self) -> float:
-        """Height of bounding box."""
-        x, y, w, h = self.to_xywh()
-        return h
-    
-    def to_xyxy(self) -> Tuple[float, float, float, float]:
-        """Convert to (x1, y1, x2, y2) format."""
-        if self.format == BoundingBoxFormat.XYXY:
+    def xyxy(self) -> Tuple[float, float, float, float]:
+        """Get coordinates in (x1, y1, x2, y2) format."""
+        if self.format == CoordinateFormat.XYXY:
             return self.coordinates
-        elif self.format == BoundingBoxFormat.XYWH:
+        elif self.format == CoordinateFormat.XYWH:
             x, y, w, h = self.coordinates
             return (x, y, x + w, y + h)
-        elif self.format == BoundingBoxFormat.CENTER_WH:
+        else:  # CENTER format
             cx, cy, w, h = self.coordinates
             return (cx - w/2, cy - h/2, cx + w/2, cy + h/2)
-        elif self.format == BoundingBoxFormat.POLYGON:
-            xs = [point[0] for point in self.coordinates]
-            ys = [point[1] for point in self.coordinates]
-            return (min(xs), min(ys), max(xs), max(ys))
     
-    def to_xywh(self) -> Tuple[float, float, float, float]:
-        """Convert to (x, y, width, height) format."""
-        x1, y1, x2, y2 = self.to_xyxy()
-        return (x1, y1, x2 - x1, y2 - y1)
+    @property
+    def xywh(self) -> Tuple[float, float, float, float]:
+        """Get coordinates in (x, y, width, height) format."""
+        if self.format == CoordinateFormat.XYWH:
+            return self.coordinates
+        elif self.format == CoordinateFormat.XYXY:
+            x1, y1, x2, y2 = self.coordinates
+            return (x1, y1, x2 - x1, y2 - y1)
+        else:  # CENTER format
+            cx, cy, w, h = self.coordinates
+            return (cx - w/2, cy - h/2, w, h)
     
+    @property
+    def center(self) -> Tuple[float, float, float, float]:
+        """Get coordinates in (center_x, center_y, width, height) format."""
+        if self.format == CoordinateFormat.CENTER:
+            return self.coordinates
+        elif self.format == CoordinateFormat.XYWH:
+            x, y, w, h = self.coordinates
+            return (x + w/2, y + h/2, w, h)
+        else:  # XYXY format
+            x1, y1, x2, y2 = self.coordinates
+            return ((x1 + x2)/2, (y1 + y2)/2, x2 - x1, y2 - y1)
+    
+    @property
     def area(self) -> float:
         """Calculate bounding box area."""
-        if self.format == BoundingBoxFormat.POLYGON:
-            coords = self.coordinates
-            n = len(coords)
-            area = 0.0
-            for i in range(n):
-                j = (i + 1) % n
-                area += coords[i][0] * coords[j][1]
-                area -= coords[j][0] * coords[i][1]
-            return abs(area) / 2.0
-        else:
-            x, y, w, h = self.to_xywh()
-            return w * h
+        _, _, w, h = self.xywh
+        return w * h
     
-    def iou(self, other: 'BoundingBox') -> float:
-        """Calculate Intersection over Union with another bounding box."""
-        x1, y1, x2, y2 = self.to_xyxy()
-        ox1, oy1, ox2, oy2 = other.to_xyxy()
-        
-        ix1, iy1 = max(x1, ox1), max(y1, oy1)
-        ix2, iy2 = min(x2, ox2), min(y2, oy2)
-        
-        if ix1 >= ix2 or iy1 >= iy2:
-            return 0.0
-        
-        intersection = (ix2 - ix1) * (iy2 - iy1)
-        union = self.area() + other.area() - intersection
-        
-        return intersection / union if union > 0 else 0.0
+    def contains_point(self, x: float, y: float) -> bool:
+        """Check if point is inside bounding box."""
+        x1, y1, x2, y2 = self.xyxy
+        return x1 <= x <= x2 and y1 <= y <= y2
+    
+    def intersects(self, other: 'BoundingBox') -> bool:
+        """Check if this box intersects with another box."""
+        x1, y1, x2, y2 = self.xyxy
+        ox1, oy1, ox2, oy2 = other.xyxy
+        return not (x2 < ox1 or x1 > ox2 or y2 < oy1 or y1 > oy2)
+    
+    def scale(self, scale_factor: float) -> 'BoundingBox':
+        """Scale bounding box by given factor."""
+        if self.format == CoordinateFormat.XYXY:
+            x1, y1, x2, y2 = self.coordinates
+            return BoundingBox(
+                (x1 * scale_factor, y1 * scale_factor, 
+                 x2 * scale_factor, y2 * scale_factor),
+                self.format
+            )
+        elif self.format == CoordinateFormat.XYWH:
+            x, y, w, h = self.coordinates
+            return BoundingBox(
+                (x * scale_factor, y * scale_factor,
+                 w * scale_factor, h * scale_factor),
+                self.format
+            )
+        else:  # CENTER format
+            cx, cy, w, h = self.coordinates
+            return BoundingBox(
+                (cx * scale_factor, cy * scale_factor,
+                 w * scale_factor, h * scale_factor),
+                self.format
+            )
+
 
 @dataclass
 class ConfidenceMetrics:
     """Multi-dimensional confidence scoring for OCR results."""
-    overall: float
-    text_detection: float = 0.0
-    text_recognition: float = 0.0
-    layout_analysis: float = 0.0
-    language_detection: float = 0.0
-    char_confidences: Optional[List[float]] = None
-    min_confidence: Optional[float] = None
-    max_confidence: Optional[float] = None
-    std_confidence: Optional[float] = None
+    
+    # Core confidence scores (0.0 to 1.0)
+    character_level: float = 0.0
+    word_level: float = 0.0
+    line_level: float = 0.0
+    layout_level: float = 0.0
+    
+    # Additional quality indicators
+    text_quality: float = 0.0  # Linguistic quality assessment
+    spatial_quality: float = 0.0  # Spatial arrangement quality
+    
+    # Engine-specific metadata
+    engine_name: Optional[str] = None
+    raw_confidence: Optional[float] = None
+    processing_time: float = 0.0
     
     def __post_init__(self):
-        """Calculate derived confidence metrics."""
-        if self.char_confidences:
-            self.min_confidence = min(self.char_confidences)
-            self.max_confidence = max(self.char_confidences)
-            if len(self.char_confidences) > 1:
-                import statistics
-                self.std_confidence = statistics.stdev(self.char_confidences)
-            else:
-                self.std_confidence = 0.0
-    
-    def __format__(self, format_spec: str) -> str:
-        """Support formatting - returns overall confidence formatted."""
-        if format_spec:
-            return format(self.overall, format_spec)
-        return str(self.overall)
-    
-    def __float__(self) -> float:
-        """Convert to float - returns overall confidence."""
-        return float(self.overall)
-    
-    def __str__(self) -> str:
-        """String representation."""
-        return f"{self.overall:.3f}"
-
-@dataclass
-class ProcessingMetrics:
-    """Performance tracking for optimization requirements."""
-    total_processing_time: float = 0.0
-    preprocessing_time: float = 0.0
-    ocr_processing_time: float = 0.0
-    postprocessing_time: float = 0.0
-    regions_detected: int = 0
-    regions_after_filtering: int = 0
-    region_filtering_time: float = 0.0
-    engine_selection_time: float = 0.0
-    engine_initialization_time: float = 0.0
-    character_extraction_rate: float = 0.0
-    peak_memory_usage: float = 0.0
-    memory_efficiency: float = 0.0
+        """Validate confidence scores."""
+        scores = [self.character_level, self.word_level, self.line_level, 
+                 self.layout_level, self.text_quality, self.spatial_quality]
+        for score in scores:
+            if not 0.0 <= score <= 1.0:
+                raise ValueError(f"Confidence scores must be between 0.0 and 1.0, got {score}")
     
     @property
-    def text_detection_efficiency(self) -> float:
-        """Calculate text detection filtering efficiency."""
-        if self.regions_detected == 0:
-            return 0.0
-        return self.regions_after_filtering / self.regions_detected
+    def overall_confidence(self) -> float:
+        """Calculate weighted overall confidence score."""
+        weights = {
+            'character': 0.2,
+            'word': 0.3,
+            'line': 0.2,
+            'layout': 0.1,
+            'text_quality': 0.1,
+            'spatial_quality': 0.1
+        }
+        
+        return (
+            self.character_level * weights['character'] +
+            self.word_level * weights['word'] +
+            self.line_level * weights['line'] +
+            self.layout_level * weights['layout'] +
+            self.text_quality * weights['text_quality'] +
+            self.spatial_quality * weights['spatial_quality']
+        )
     
     @property
-    def speed_accuracy_ratio(self) -> float:
-        """Speed vs accuracy performance metric."""
-        if self.total_processing_time == 0:
-            return 0.0
-        return self.character_extraction_rate / self.total_processing_time
+    def quality_grade(self) -> str:
+        """Get quality grade based on overall confidence."""
+        confidence = self.overall_confidence
+        if confidence >= 0.9:
+            return "Excellent"
+        elif confidence >= 0.8:
+            return "Good"
+        elif confidence >= 0.7:
+            return "Fair"
+        elif confidence >= 0.6:
+            return "Poor"
+        else:
+            return "Very Poor"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            'character_level': self.character_level,
+            'word_level': self.word_level,
+            'line_level': self.line_level,
+            'layout_level': self.layout_level,
+            'text_quality': self.text_quality,
+            'spatial_quality': self.spatial_quality,
+            'overall_confidence': self.overall_confidence,
+            'quality_grade': self.quality_grade,
+            'engine_name': self.engine_name,
+            'raw_confidence': self.raw_confidence,
+            'processing_time': self.processing_time
+        }
 
 
 @dataclass
-class TextRegion:
-    """Base hierarchical text region with spatial and metadata information - FIXED VERSION."""
+class Word:
+    """Individual word with position and confidence."""
+    
     text: str
     bbox: BoundingBox
     confidence: ConfidenceMetrics
-    level: TextLevel
-    element_id: Optional[str] = None
-    content_type: ContentType = ContentType.PRINTED_TEXT
-    language: str = "en"
-    reading_order: Optional[int] = None
-    font_size: Optional[float] = None
-    font_family: Optional[str] = None
-    is_bold: bool = False
-    is_italic: bool = False
-    text_color: Optional[Tuple[int, int, int]] = None
-    background_color: Optional[Tuple[int, int, int]] = None
-    parent_id: Optional[str] = None
-    children_ids: List[str] = field(default_factory=list)
-    processing_time: float = 0.0
-    engine_name: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    # ADDED: coordinates property for backward compatibility
-    @property
-    def coordinates(self) -> Tuple[float, float, float, float]:
-        """Get coordinates as (x, y, width, height) for backward compatibility."""
-        return self.bbox.to_xywh()
-
-
-@dataclass
-class Word(TextRegion):
-    """Word-level text element with character details."""
-    level: TextLevel = field(default=TextLevel.WORD, init=False)
-    char_bboxes: Optional[List[BoundingBox]] = None
-    alternatives: List[str] = field(default_factory=list)
-    is_numeric: bool = False
-    contains_special_chars: bool = False
+    char_confidences: List[float] = field(default_factory=list)
     
     def __post_init__(self):
-        """Initialize word-level properties."""
-        self.is_numeric = self.text.replace('.', '').replace(',', '').isdigit()
-        self.contains_special_chars = not self.text.replace(' ', '').isalnum()
-
-
-@dataclass
-class Line(TextRegion):
-    """Line-level text element containing words."""
-    level: TextLevel = field(default=TextLevel.LINE, init=False)
-    words: List[Word] = field(default_factory=list)
-    baseline: Optional[Tuple[float, float, float, float]] = None
-    text_direction: str = "ltr"
-    line_height: Optional[float] = None
-    
-    def get_text(self, separator: str = " ") -> str:
-        """Get full line text from constituent words."""
-        return separator.join(word.text for word in self.words)
-    
-    def __post_init__(self):
-        """Initialize line text from words."""
-        if not self.text and self.words:
-            self.text = self.get_text()
-
-
-@dataclass
-class Paragraph(TextRegion):
-    """Paragraph-level text element containing lines."""
-    level: TextLevel = field(default=TextLevel.PARAGRAPH, init=False)
-    lines: List[Line] = field(default_factory=list)
-    alignment: str = "left"
-    indentation: float = 0.0
-    line_spacing: Optional[float] = None
-    
-    def get_text(self, line_separator: str = "\n") -> str:
-        """Get full paragraph text from constituent lines."""
-        return line_separator.join(line.get_text() for line in self.lines)
-    
-    def __post_init__(self):
-        """Initialize paragraph text from lines."""
-        if not self.text and self.lines:
-            self.text = self.get_text()
-
-
-@dataclass
-class Block(TextRegion):
-    """Block-level text element containing paragraphs."""
-    level: TextLevel = field(default=TextLevel.BLOCK, init=False)
-    paragraphs: List[Paragraph] = field(default_factory=list)
-    block_type: str = "text"
-    column_index: int = 0
-    
-    def get_text(self, paragraph_separator: str = "\n\n") -> str:
-        """Get full block text from constituent paragraphs."""
-        return paragraph_separator.join(para.get_text() for para in self.paragraphs)
-    
-    def __post_init__(self):
-        """Initialize block text from paragraphs."""
-        if not self.text and self.paragraphs:
-            self.text = self.get_text()
-
-
-@dataclass
-class Page:
-    """Page-level container for OCR results with layout information."""
-    page_number: int
-    blocks: List[Block] = field(default_factory=list)
-    width: float = 0.0
-    height: float = 0.0
-    dpi: float = 300.0
-    rotation: float = 0.0
-    confidence: ConfidenceMetrics = field(default_factory=lambda: ConfidenceMetrics(overall=0.0))
-    detected_languages: List[str] = field(default_factory=lambda: ["en"])
-    processing_time: float = 0.0
-    reading_order: List[str] = field(default_factory=list)
-    column_count: int = 1
-    has_tables: bool = False
-    has_images: bool = False
-    
-    def get_text(self, block_separator: str = "\n\n") -> str:
-        """Get full page text from all blocks."""
-        return block_separator.join(block.get_text() for block in self.blocks)
-    
-    def get_all_words(self) -> List[Word]:
-        """Get all words on the page in a flat list."""
-        words = []
-        for block in self.blocks:
-            for paragraph in block.paragraphs:
-                for line in paragraph.lines:
-                    words.extend(line.words)
-        return words
-    
-    def word_count(self) -> int:
-        """Get total word count for the page."""
-        return len(self.get_all_words())
-
-
-@dataclass
-class OCRResult:
-    """Primary OCR result container with hierarchical structure and metadata."""
-    text: str
-    confidence: float
-    processing_time: float = 0.0
-    engine_name: str = ""
-    pages: List[Page] = field(default_factory=list)
-    detected_languages: List[str] = field(default_factory=lambda: ["en"])
-    dominant_language: str = "en"
-    text_orientation: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: float = field(default_factory=time.time)
-    success: bool = True
-    error_message: Optional[str] = None
-    total_words: int = 0
-    total_characters: int = 0
-    avg_word_confidence: float = 0.0
-    processing_metrics: Optional[ProcessingMetrics] = None
-    
-    def __post_init__(self):
-        """Initialize derived properties."""
-        if not self.text and self.pages:
-            self.text = self.get_full_text()
+        """Validate word data."""
+        if not self.text.strip():
+            raise ValueError("Word text cannot be empty")
         
-        self.total_characters = len(self.text)
-        self.total_words = self.get_word_count()
-        self.avg_word_confidence = self.calculate_avg_word_confidence()
+        # Ensure char_confidences length matches text length if provided
+        if self.char_confidences and len(self.char_confidences) != len(self.text):
+            self.char_confidences = []
     
-    def get_full_text(self, page_separator: str = "\n\n---\n\n") -> str:
-        """Get complete document text from all pages."""
-        return page_separator.join(page.get_text() for page in self.pages)
+    @property
+    def length(self) -> int:
+        """Get word length."""
+        return len(self.text)
     
-    def get_word_count(self) -> int:
-        """Get total word count across all pages."""
-        return sum(page.word_count() for page in self.pages)
+    @property
+    def is_numeric(self) -> bool:
+        """Check if word contains only numbers."""
+        return self.text.replace('.', '').replace(',', '').isdigit()
     
-    def get_all_words(self) -> List[Word]:
-        """Get all words from all pages in a flat list."""
-        words = []
-        for page in self.pages:
-            words.extend(page.get_all_words())
-        return words
-    
-    def calculate_avg_word_confidence(self) -> float:
-        """Calculate average confidence across all words."""
-        words = self.get_all_words()
-        if not words:
-            return 0.0
-        return sum(word.confidence.overall for word in words) / len(words)
+    @property
+    def is_alphabetic(self) -> bool:
+        """Check if word contains only letters."""
+        return self.text.replace('-', '').replace("'", '').isalpha()
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             'text': self.text,
-            'confidence': self.confidence,
+            'bbox': {
+                'coordinates': self.bbox.coordinates,
+                'format': self.bbox.format.value
+            },
+            'confidence': self.confidence.to_dict(),
+            'char_confidences': self.char_confidences,
+            'metadata': {
+                'length': self.length,
+                'is_numeric': self.is_numeric,
+                'is_alphabetic': self.is_alphabetic
+            }
+        }
+
+
+@dataclass
+class Line:
+    """Text line containing multiple words."""
+    
+    words: List[Word] = field(default_factory=list)
+    bbox: Optional[BoundingBox] = None
+    confidence: Optional[ConfidenceMetrics] = None
+    line_height: float = 0.0
+    baseline: float = 0.0
+    
+    def __post_init__(self):
+        """Calculate derived properties after initialization."""
+        if self.words:
+            self._calculate_bbox()
+            self._calculate_confidence()
+            self._calculate_line_metrics()
+    
+    def _calculate_bbox(self):
+        """Calculate line bounding box from words."""
+        if not self.words:
+            return
+        
+        word_boxes = [word.bbox.xyxy for word in self.words]
+        min_x = min(box[0] for box in word_boxes)
+        min_y = min(box[1] for box in word_boxes)
+        max_x = max(box[2] for box in word_boxes)
+        max_y = max(box[3] for box in word_boxes)
+        
+        self.bbox = BoundingBox((min_x, min_y, max_x, max_y), CoordinateFormat.XYXY)
+    
+    def _calculate_confidence(self):
+        """Calculate line confidence from word confidences."""
+        if not self.words:
+            return
+        
+        word_confidences = [word.confidence for word in self.words]
+        
+        # Weight by word length for better accuracy
+        total_chars = sum(len(word.text) for word in self.words)
+        if total_chars == 0:
+            return
+        
+        weighted_char = sum(conf.character_level * len(word.text) 
+                           for word, conf in zip(self.words, word_confidences)) / total_chars
+        weighted_word = sum(conf.word_level * len(word.text) 
+                           for word, conf in zip(self.words, word_confidences)) / total_chars
+        
+        avg_text_quality = sum(conf.text_quality for conf in word_confidences) / len(word_confidences)
+        avg_spatial = sum(conf.spatial_quality for conf in word_confidences) / len(word_confidences)
+        
+        self.confidence = ConfidenceMetrics(
+            character_level=weighted_char,
+            word_level=weighted_word,
+            line_level=weighted_word,  # Line level same as word level for now
+            text_quality=avg_text_quality,
+            spatial_quality=avg_spatial
+        )
+    
+    def _calculate_line_metrics(self):
+        """Calculate line height and baseline."""
+        if not self.words or not self.bbox:
+            return
+        
+        _, _, _, height = self.bbox.xywh
+        self.line_height = height
+        
+        # Approximate baseline as 80% of line height from top
+        _, y, _, _ = self.bbox.xywh
+        self.baseline = y + height * 0.8
+    
+    @property
+    def text(self) -> str:
+        """Get combined text from all words."""
+        return ' '.join(word.text for word in self.words)
+    
+    @property
+    def word_count(self) -> int:
+        """Get number of words in line."""
+        return len(self.words)
+    
+    def add_word(self, word: Word):
+        """Add word to line and recalculate properties."""
+        self.words.append(word)
+        self._calculate_bbox()
+        self._calculate_confidence()
+        self._calculate_line_metrics()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            'text': self.text,
+            'words': [word.to_dict() for word in self.words],
+            'bbox': {
+                'coordinates': self.bbox.coordinates if self.bbox else None,
+                'format': self.bbox.format.value if self.bbox else None
+            } if self.bbox else None,
+            'confidence': self.confidence.to_dict() if self.confidence else None,
+            'metadata': {
+                'word_count': self.word_count,
+                'line_height': self.line_height,
+                'baseline': self.baseline
+            }
+        }
+
+
+@dataclass
+class Paragraph:
+    """Paragraph containing multiple lines."""
+    
+    lines: List[Line] = field(default_factory=list)
+    bbox: Optional[BoundingBox] = None
+    confidence: Optional[ConfidenceMetrics] = None
+    alignment: str = "unknown"  # left, center, right, justified, unknown
+    line_spacing: float = 0.0
+    
+    def __post_init__(self):
+        """Calculate derived properties after initialization."""
+        if self.lines:
+            self._calculate_bbox()
+            self._calculate_confidence()
+            self._calculate_layout_metrics()
+    
+    def _calculate_bbox(self):
+        """Calculate paragraph bounding box from lines."""
+        if not self.lines:
+            return
+        
+        line_boxes = [line.bbox.xyxy for line in self.lines if line.bbox]
+        if not line_boxes:
+            return
+        
+        min_x = min(box[0] for box in line_boxes)
+        min_y = min(box[1] for box in line_boxes)
+        max_x = max(box[2] for box in line_boxes)
+        max_y = max(box[3] for box in line_boxes)
+        
+        self.bbox = BoundingBox((min_x, min_y, max_x, max_y), CoordinateFormat.XYXY)
+    
+    def _calculate_confidence(self):
+        """Calculate paragraph confidence from line confidences."""
+        if not self.lines:
+            return
+        
+        line_confidences = [line.confidence for line in self.lines if line.confidence]
+        if not line_confidences:
+            return
+        
+        # Weight by line length
+        total_chars = sum(len(line.text) for line in self.lines)
+        if total_chars == 0:
+            return
+        
+        weighted_char = sum(conf.character_level * len(line.text) 
+                           for line, conf in zip(self.lines, line_confidences)) / total_chars
+        weighted_word = sum(conf.word_level * len(line.text) 
+                           for line, conf in zip(self.lines, line_confidences)) / total_chars
+        weighted_line = sum(conf.line_level * len(line.text) 
+                           for line, conf in zip(self.lines, line_confidences)) / total_chars
+        
+        avg_text_quality = sum(conf.text_quality for conf in line_confidences) / len(line_confidences)
+        avg_spatial = sum(conf.spatial_quality for conf in line_confidences) / len(line_confidences)
+        
+        self.confidence = ConfidenceMetrics(
+            character_level=weighted_char,
+            word_level=weighted_word,
+            line_level=weighted_line,
+            layout_level=weighted_line,  # Layout level same as line level for paragraphs
+            text_quality=avg_text_quality,
+            spatial_quality=avg_spatial
+        )
+    
+    def _calculate_layout_metrics(self):
+        """Calculate paragraph layout metrics."""
+        if len(self.lines) < 2:
+            return
+        
+        # Calculate average line spacing
+        spacings = []
+        for i in range(len(self.lines) - 1):
+            if self.lines[i].bbox and self.lines[i+1].bbox:
+                _, y1, _, y1_bottom = self.lines[i].bbox.xyxy
+                _, y2, _, _ = self.lines[i+1].bbox.xyxy
+                spacing = y2 - y1_bottom
+                if spacing > 0:
+                    spacings.append(spacing)
+        
+        if spacings:
+            self.line_spacing = sum(spacings) / len(spacings)
+        
+        # Simple alignment detection based on x-coordinates
+        if all(line.bbox for line in self.lines):
+            left_edges = [line.bbox.xyxy[0] for line in self.lines]
+            right_edges = [line.bbox.xyxy[2] for line in self.lines]
+            
+            left_var = max(left_edges) - min(left_edges)
+            right_var = max(right_edges) - min(right_edges)
+            
+            if left_var < 5:  # Small variation in left edges
+                self.alignment = "left"
+            elif right_var < 5:  # Small variation in right edges
+                self.alignment = "right"
+            elif left_var < 10 and right_var < 10:
+                self.alignment = "center"
+    
+    @property
+    def text(self) -> str:
+        """Get combined text from all lines."""
+        return '\n'.join(line.text for line in self.lines)
+    
+    @property
+    def line_count(self) -> int:
+        """Get number of lines in paragraph."""
+        return len(self.lines)
+    
+    @property
+    def word_count(self) -> int:
+        """Get total number of words in paragraph."""
+        return sum(line.word_count for line in self.lines)
+    
+    def add_line(self, line: Line):
+        """Add line to paragraph and recalculate properties."""
+        self.lines.append(line)
+        self._calculate_bbox()
+        self._calculate_confidence()
+        self._calculate_layout_metrics()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            'text': self.text,
+            'lines': [line.to_dict() for line in self.lines],
+            'bbox': {
+                'coordinates': self.bbox.coordinates if self.bbox else None,
+                'format': self.bbox.format.value if self.bbox else None
+            } if self.bbox else None,
+            'confidence': self.confidence.to_dict() if self.confidence else None,
+            'metadata': {
+                'line_count': self.line_count,
+                'word_count': self.word_count,
+                'alignment': self.alignment,
+                'line_spacing': self.line_spacing
+            }
+        }
+
+
+@dataclass
+class Page:
+    """Complete page containing paragraphs and metadata."""
+    
+    paragraphs: List[Paragraph] = field(default_factory=list)
+    page_number: int = 1
+    image_dimensions: Tuple[int, int] = (0, 0)  # (width, height)
+    confidence: Optional[ConfidenceMetrics] = None
+    language: str = "unknown"
+    processing_metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Calculate derived properties after initialization."""
+        if self.paragraphs:
+            self._calculate_confidence()
+    
+    def _calculate_confidence(self):
+        """Calculate page confidence from paragraph confidences."""
+        if not self.paragraphs:
+            return
+        
+        para_confidences = [para.confidence for para in self.paragraphs if para.confidence]
+        if not para_confidences:
+            return
+        
+        # Weight by paragraph word count
+        total_words = sum(para.word_count for para in self.paragraphs)
+        if total_words == 0:
+            return
+        
+        weighted_char = sum(conf.character_level * para.word_count 
+                           for para, conf in zip(self.paragraphs, para_confidences)) / total_words
+        weighted_word = sum(conf.word_level * para.word_count 
+                           for para, conf in zip(self.paragraphs, para_confidences)) / total_words
+        weighted_line = sum(conf.line_level * para.word_count 
+                           for para, conf in zip(self.paragraphs, para_confidences)) / total_words
+        
+        avg_text_quality = sum(conf.text_quality for conf in para_confidences) / len(para_confidences)
+        avg_spatial = sum(conf.spatial_quality for conf in para_confidences) / len(para_confidences)
+        
+        # Calculate layout quality based on paragraph organization
+        layout_quality = min(0.9, len(self.paragraphs) * 0.1 + 0.5)  # More paragraphs = better layout
+        
+        self.confidence = ConfidenceMetrics(
+            character_level=weighted_char,
+            word_level=weighted_word,
+            line_level=weighted_line,
+            layout_level=layout_quality,
+            text_quality=avg_text_quality,
+            spatial_quality=avg_spatial
+        )
+    
+    @property
+    def text(self) -> str:
+        """Get combined text from all paragraphs."""
+        return '\n\n'.join(para.text for para in self.paragraphs)
+    
+    @property
+    def paragraph_count(self) -> int:
+        """Get number of paragraphs on page."""
+        return len(self.paragraphs)
+    
+    @property
+    def line_count(self) -> int:
+        """Get total number of lines on page."""
+        return sum(para.line_count for para in self.paragraphs)
+    
+    @property
+    def word_count(self) -> int:
+        """Get total number of words on page."""
+        return sum(para.word_count for para in self.paragraphs)
+    
+    def add_paragraph(self, paragraph: Paragraph):
+        """Add paragraph to page and recalculate confidence."""
+        self.paragraphs.append(paragraph)
+        self._calculate_confidence()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            'text': self.text,
+            'paragraphs': [para.to_dict() for para in self.paragraphs],
+            'page_number': self.page_number,
+            'image_dimensions': self.image_dimensions,
+            'confidence': self.confidence.to_dict() if self.confidence else None,
+            'language': self.language,
+            'processing_metadata': self.processing_metadata,
+            'statistics': {
+                'paragraph_count': self.paragraph_count,
+                'line_count': self.line_count,
+                'word_count': self.word_count
+            }
+        }
+
+
+@dataclass
+class ProcessingMetrics:
+    """Performance tracking for OCR pipeline stages."""
+    
+    stage_name: str
+    start_time: float = field(default_factory=time.time)
+    end_time: Optional[float] = None
+    duration: Optional[float] = None
+    memory_usage: Optional[float] = None  # MB
+    gpu_usage: Optional[float] = None    # Percentage
+    error_count: int = 0
+    warning_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def finish(self):
+        """Mark stage as finished and calculate duration."""
+        self.end_time = time.time()
+        self.duration = self.end_time - self.start_time
+    
+    def add_error(self, error_msg: str):
+        """Add error to metrics."""
+        self.error_count += 1
+        if 'errors' not in self.metadata:
+            self.metadata['errors'] = []
+        self.metadata['errors'].append(error_msg)
+    
+    def add_warning(self, warning_msg: str):
+        """Add warning to metrics."""
+        self.warning_count += 1
+        if 'warnings' not in self.metadata:
+            self.metadata['warnings'] = []
+        self.metadata['warnings'].append(warning_msg)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            'stage_name': self.stage_name,
+            'start_time': self.start_time,
+            'end_time': self.end_time,
+            'duration': self.duration,
+            'memory_usage': self.memory_usage,
+            'gpu_usage': self.gpu_usage,
+            'error_count': self.error_count,
+            'warning_count': self.warning_count,
+            'metadata': self.metadata
+        }
+
+
+@dataclass
+class OCRResult:
+    """Primary container for complete OCR results with hierarchical structure."""
+    
+    pages: List[Page] = field(default_factory=list)
+    confidence: Optional[ConfidenceMetrics] = None
+    processing_time: float = 0.0
+    engine_info: Dict[str, Any] = field(default_factory=dict)
+    processing_metrics: List[ProcessingMetrics] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Calculate document-level confidence after initialization."""
+        if self.pages:
+            self._calculate_document_confidence()
+    
+    def _calculate_document_confidence(self):
+        """Calculate document confidence from page confidences."""
+        if not self.pages:
+            return
+        
+        page_confidences = [page.confidence for page in self.pages if page.confidence]
+        if not page_confidences:
+            return
+        
+        # Weight by page word count
+        total_words = sum(page.word_count for page in self.pages)
+        if total_words == 0:
+            return
+        
+        weighted_char = sum(conf.character_level * page.word_count 
+                           for page, conf in zip(self.pages, page_confidences)) / total_words
+        weighted_word = sum(conf.word_level * page.word_count 
+                           for page, conf in zip(self.pages, page_confidences)) / total_words
+        weighted_line = sum(conf.line_level * page.word_count 
+                           for page, conf in zip(self.pages, page_confidences)) / total_words
+        weighted_layout = sum(conf.layout_level * page.word_count 
+                             for page, conf in zip(self.pages, page_confidences)) / total_words
+        
+        avg_text_quality = sum(conf.text_quality for conf in page_confidences) / len(page_confidences)
+        avg_spatial = sum(conf.spatial_quality for conf in page_confidences) / len(page_confidences)
+        
+        self.confidence = ConfidenceMetrics(
+            character_level=weighted_char,
+            word_level=weighted_word,
+            line_level=weighted_line,
+            layout_level=weighted_layout,
+            text_quality=avg_text_quality,
+            spatial_quality=avg_spatial
+        )
+    
+    @property
+    def text(self) -> str:
+        """Get combined text from all pages."""
+        page_texts = []
+        for i, page in enumerate(self.pages):
+            if len(self.pages) > 1:
+                page_texts.append(f"--- Page {page.page_number} ---\n{page.text}")
+            else:
+                page_texts.append(page.text)
+        return '\n\n'.join(page_texts)
+    
+    @property
+    def page_count(self) -> int:
+        """Get number of pages in document."""
+        return len(self.pages)
+    
+    @property
+    def paragraph_count(self) -> int:
+        """Get total number of paragraphs across all pages."""
+        return sum(page.paragraph_count for page in self.pages)
+    
+    @property
+    def line_count(self) -> int:
+        """Get total number of lines across all pages."""
+        return sum(page.line_count for page in self.pages)
+    
+    @property
+    def word_count(self) -> int:
+        """Get total number of words across all pages."""
+        return sum(page.word_count for page in self.pages)
+    
+    def add_page(self, page: Page):
+        """Add page to document and recalculate confidence."""
+        self.pages.append(page)
+        self._calculate_document_confidence()
+    
+    def add_processing_metric(self, metric: ProcessingMetrics):
+        """Add processing metric to document."""
+        self.processing_metrics.append(metric)
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """Get summary of processing performance."""
+        total_duration = sum(m.duration for m in self.processing_metrics if m.duration)
+        total_errors = sum(m.error_count for m in self.processing_metrics)
+        total_warnings = sum(m.warning_count for m in self.processing_metrics)
+        
+        return {
+            'total_processing_time': self.processing_time,
+            'stage_processing_time': total_duration,
+            'total_errors': total_errors,
+            'total_warnings': total_warnings,
+            'stages_completed': len(self.processing_metrics),
+            'engine_info': self.engine_info
+        }
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert complete result to dictionary for serialization."""
+        return {
+            'text': self.text,
+            'pages': [page.to_dict() for page in self.pages],
+            'confidence': self.confidence.to_dict() if self.confidence else None,
             'processing_time': self.processing_time,
-            'engine_name': self.engine_name,
-            'total_words': self.total_words,
-            'total_characters': self.total_characters,
-            'avg_word_confidence': self.avg_word_confidence,
-            'detected_languages': self.detected_languages,
-            'dominant_language': self.dominant_language,
-            'success': self.success,
-            'error_message': self.error_message,
-            'timestamp': self.timestamp,
+            'engine_info': self.engine_info,
+            'processing_metrics': [metric.to_dict() for metric in self.processing_metrics],
             'metadata': self.metadata,
-            'pages': len(self.pages)
+            'statistics': {
+                'page_count': self.page_count,
+                'paragraph_count': self.paragraph_count,
+                'line_count': self.line_count,
+                'word_count': self.word_count
+            },
+            'performance_summary': self.get_performance_summary()
         }
     
     def to_json(self, indent: int = 2) -> str:
-        """Export to JSON format."""
-        return json.dumps(self.to_dict(), indent=indent)
-    
-    def export_words_with_bbox(self) -> List[Dict[str, Any]]:
-        """Export word-level results with bounding boxes."""
-        results = []
-        for word in self.get_all_words():
-            x1, y1, x2, y2 = word.bbox.to_xyxy()
-            results.append({
-                'text': word.text,
-                'confidence': word.confidence.overall,
-                'bbox': {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2},
-                'language': word.language
-            })
-        return results
+        """Convert to JSON string."""
+        return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
 
 
 @dataclass
 class BatchResult:
-    """Container for multiple OCR results from batch processing."""
-    results: List[OCRResult]
-    total_pages: int = 0
-    total_processing_time: float = 0.0
-    avg_confidence: float = 0.0
-    success_rate: float = 1.0
-    engines_used: List[str] = field(default_factory=list)
+    """Container for multi-document OCR processing results."""
     
-    def __post_init__(self):
-        """Initialize batch-level properties."""
-        if self.results:
-            self.total_pages = len(self.results)
-            self.total_processing_time = sum(r.processing_time for r in self.results)
-            self.avg_confidence = sum(r.confidence for r in self.results) / len(self.results)
-            self.success_rate = sum(1 for r in self.results if r.success) / len(self.results)
-            self.engines_used = list(set(r.engine_name for r in self.results))
-
-# Type aliases for convenience
-BBox = BoundingBox
-
-# Library exports
-__all__ = [
-    'OCRResult',
-    'BatchResult',
-    'Word',
-    'Line',
-    'Paragraph',
-    'Block',
-    'Page',
-    'BoundingBox',
-    'ConfidenceMetrics',
-    'ProcessingMetrics',
-    'BoundingBoxFormat',
-    'TextLevel',
-    'ContentType',
-    'TextRegion',
-    'BBox'
-]
+    results: List[OCRResult] = field(default_factory=list)
+    batch_id: Optional[str] = None
+    start_time: float = field(default_factory=time.time)
+    end_time: Optional[float] = None
+    total_processing_time: Optional[float] = None
+    failed_documents: List[Dict[str, Any]] = field(default_factory=list)
+    batch_metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def finish(self):
+        """Mark batch processing as finished."""
+        self.end_time = time.time()
+        self.total_processing_time = self.end_time - self.start_time
+    
+    def add_result(self, result: OCRResult):
+        """Add successful result to batch."""
+        self.results.append(result)
+    
+    def add_failed_document(self, document_path: str, error: str):
+        """Add failed document information."""
+        self.failed_documents.append({
+            'document_path': document_path,
+            'error': error,
+            'timestamp': time.time()
+        })
+    
+    @property
+    def success_count(self) -> int:
+        """Get number of successfully processed documents."""
+        return len(self.results)
+    
+    @property
+    def failure_count(self) -> int:
+        """Get number of failed documents."""
+        return len(self.failed_documents)
+    
+    @property
+    def total_documents(self) -> int:
+        """Get total number of documents processed."""
+        return self.success_count + self.failure_count
+    
+    @property
+    def success_rate(self) -> float:
+        """Get processing success rate."""
+        if self.total_documents == 0:
+            return 0.0
+        return self.success_count / self.total_documents
+    
+    @property
+    def total_pages(self) -> int:
+        """Get total number of pages across all documents."""
+        return sum(result.page_count for result in self.results)
+    
+    @property
+    def total_words(self) -> int:
+        """Get total number of words across all documents."""
+        return sum(result.word_count for result in self.results)
+    
+    @property
+    def average_confidence(self) -> float:
+        """Get average confidence across all documents."""
+        confidences = [result.confidence.overall_confidence 
+                      for result in self.results if result.confidence]
+        if not confidences:
+            return 0.0
+        return sum(confidences) / len(confidences)
+    
+    def get_batch_summary(self) -> Dict[str, Any]:
+        """Get comprehensive batch processing summary."""
+        return {
+            'batch_id': self.batch_id,
+            'processing_stats': {
+                'total_documents': self.total_documents,
+                'successful': self.success_count,
+                'failed': self.failure_count,
+                'success_rate': self.success_rate,
+                'total_processing_time': self.total_processing_time
+            },
+            'content_stats': {
+                'total_pages': self.total_pages,
+                'total_words': self.total_words,
+                'average_confidence': self.average_confidence
+            },
+            'failed_documents': self.failed_documents,
+            'batch_metadata': self.batch_metadata
+        }
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert batch result to dictionary."""
+        return {
+            'results': [result.to_dict() for result in self.results],
+            'batch_summary': self.get_batch_summary(),
+            'processing_timeline': {
+                'start_time': self.start_time,
+                'end_time': self.end_time,
+                'total_processing_time': self.total_processing_time
+            }
+        }
+    
+    def to_json(self, indent: int = 2) -> str:
+        """Convert to JSON string."""
+        return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)

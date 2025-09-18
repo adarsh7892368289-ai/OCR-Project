@@ -1,788 +1,662 @@
-# src/advanced_ocr/utils/model_utils.py
 """
 Advanced OCR System - Model Management Utilities
-
-This module provides ML model loading, caching, and management utilities for the OCR system.
-Handles model downloads, version validation, memory management, and caching without
-performing any model inference or selection logic.
-
-Classes:
-    ModelCache: In-memory model caching with LRU eviction
-    ModelDownloader: Model file downloading with validation
-    ModelVersionManager: Model version compatibility checking
-    ModelLoader: Main model loading orchestrator
-    cached_model_load: Decorator for automatic model caching
-
-Example:
-    >>> loader = ModelLoader(config, "models")
-    >>> model = loader.load_model("tesseract_model", "pytorch")
-    >>> print(f"Model loaded successfully: {model is not None}")
-
-    >>> cache_info = loader.get_cache_info()
-    >>> print(f"Cached models: {cache_info['total_models']}")
+Smart ML model loading, caching, and memory management for OCR engines.
 """
 
 import os
+import sys
+import time
 import hashlib
 import pickle
-import json
-import urllib.request
-import urllib.error
-from pathlib import Path
-from typing import Dict, Any, Optional, Union, Tuple, List, Callable
 import threading
-import time
+import psutil
+from pathlib import Path
+from typing import Dict, Any, Optional, Callable, Tuple, List
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, Future
+import logging
+import weakref
 import gc
-from functools import wraps
-
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
-
-try:
-    import transformers
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    transformers = None
-
-try:
-    import tensorflow as tf
-    TF_AVAILABLE = True
-except ImportError:
-    TF_AVAILABLE = False
-    tf = None
-
-try:
-    import sklearn
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-    sklearn = None
-    
-try:
-    import gdown
-    GDOWN_AVAILABLE = True
-except ImportError:
-    GDOWN_AVAILABLE = False
-
-try:
-    from craft_text_detector import CRAFT
-    CRAFT_AVAILABLE = True
-except ImportError:
-    CRAFT_AVAILABLE = False    
-
 
 from ..config import OCRConfig
-from ..utils.logger import OCRLogger
+
+
+@dataclass
+class ModelInfo:
+    """Information about a loaded model."""
+    
+    name: str
+    version: str = "latest"
+    size_mb: float = 0.0
+    load_time: float = 0.0
+    last_used: float = field(default_factory=time.time)
+    use_count: int = 0
+    memory_usage: float = 0.0
+    model_path: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CacheStats:
+    """Cache performance statistics."""
+    
+    hits: int = 0
+    misses: int = 0
+    evictions: int = 0
+    total_memory_mb: float = 0.0
+    models_loaded: int = 0
+    
+    @property
+    def hit_rate(self) -> float:
+        """Calculate cache hit rate."""
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
 
 
 class ModelCache:
     """
-    Manages in-memory model caching with LRU eviction and memory monitoring.
+    LRU cache for ML models with memory management.
+    Thread-safe implementation with automatic cleanup.
     """
     
-    def __init__(self, max_memory_mb: int = 2048, max_models: int = 5):
+    def __init__(self, max_memory_mb: float = 2048, max_models: int = 10):
         """
-        Initialize model cache with memory and count limits.
+        Initialize model cache.
         
         Args:
-            max_memory_mb (int): Maximum memory usage in MB
-            max_models (int): Maximum number of cached models
+            max_memory_mb: Maximum memory usage in MB
+            max_models: Maximum number of models to cache
         """
         self.max_memory_mb = max_memory_mb
         self.max_models = max_models
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        self._access_times: Dict[str, float] = {}
+        self.logger = logging.getLogger(__name__)
+        
+        # Thread-safe cache storage
+        self._cache: OrderedDict[str, Tuple[Any, ModelInfo]] = OrderedDict()
         self._lock = threading.RLock()
-        self.logger = OCRLogger("ModelCache")
+        self._stats = CacheStats()
+        
+        # Weak references to track model usage
+        self._model_refs: Dict[str, weakref.ReferenceType] = {}
+        
+        # Background cleanup thread
+        self._cleanup_thread = None
+        self._stop_cleanup = threading.Event()
+        self._start_cleanup_thread()
     
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Optional[Tuple[Any, ModelInfo]]:
         """
-        Retrieve model from cache.
+        Get model from cache.
         
         Args:
-            key (str): Model cache key
+            key: Model cache key
             
         Returns:
-            Optional[Any]: Cached model or None if not found
+            Tuple of (model, model_info) or None if not found
         """
         with self._lock:
             if key in self._cache:
-                self._access_times[key] = time.time()
-                self.logger.debug(f"Model cache hit: {key}")
-                return self._cache[key]['model']
-            
-            self.logger.debug(f"Model cache miss: {key}")
-            return None
-    
-    def put(self, key: str, model: Any, size_mb: Optional[float] = None) -> bool:
-        """
-        Store model in cache with automatic eviction if needed.
-        
-        Args:
-            key (str): Model cache key
-            model (Any): Model object to cache
-            size_mb (Optional[float]): Model size in MB (estimated if None)
-            
-        Returns:
-            bool: True if successfully cached, False otherwise
-        """
-        with self._lock:
-            # Estimate model size if not provided
-            if size_mb is None:
-                size_mb = self._estimate_model_size(model)
-            
-            # Check if we need to evict models
-            current_memory = self._get_current_memory_usage()
-            
-            if (current_memory + size_mb > self.max_memory_mb or 
-                len(self._cache) >= self.max_models):
+                # Move to end (most recently used)
+                model, info = self._cache.pop(key)
+                self._cache[key] = (model, info)
                 
-                if not self._evict_lru_models(size_mb):
-                    self.logger.warning(f"Failed to evict enough memory for model: {key}")
-                    return False
-            
-            # Store the model
-            self._cache[key] = {
-                'model': model,
-                'size_mb': size_mb,
-                'created_at': time.time()
-            }
-            self._access_times[key] = time.time()
-            
-            self.logger.info(f"Model cached: {key} ({size_mb:.1f} MB)")
-            return True
+                # Update usage stats
+                info.last_used = time.time()
+                info.use_count += 1
+                self._stats.hits += 1
+                
+                self.logger.debug(f"Cache hit for model: {key}")
+                return model, info
+            else:
+                self._stats.misses += 1
+                self.logger.debug(f"Cache miss for model: {key}")
+                return None
     
-    def remove(self, key: str) -> bool:
+    def put(self, key: str, model: Any, info: ModelInfo) -> bool:
         """
-        Remove model from cache.
+        Store model in cache.
         
         Args:
-            key (str): Model cache key
+            key: Model cache key
+            model: Model object to cache
+            info: Model information
             
         Returns:
-            bool: True if model was removed, False if not found
+            True if stored successfully, False otherwise
         """
         with self._lock:
-            if key in self._cache:
-                del self._cache[key]
-                del self._access_times[key]
-                self.logger.debug(f"Model removed from cache: {key}")
+            try:
+                # Check if we need to evict models
+                self._ensure_space(info.memory_usage)
+                
+                # Store model
+                self._cache[key] = (model, info)
+                self._stats.total_memory_mb += info.memory_usage
+                self._stats.models_loaded += 1
+                
+                # Create weak reference for tracking
+                self._model_refs[key] = weakref.ref(model, self._model_cleanup_callback(key))
+                
+                self.logger.info(
+                    f"Cached model {key}: {info.memory_usage:.1f}MB "
+                    f"(Total: {self._stats.total_memory_mb:.1f}MB)"
+                )
                 return True
-            return False
+                
+            except Exception as e:
+                self.logger.error(f"Failed to cache model {key}: {e}")
+                return False
+    
+    def _ensure_space(self, required_mb: float) -> None:
+        """Ensure sufficient cache space by evicting models if needed."""
+        # Check memory limit
+        while (self._stats.total_memory_mb + required_mb > self.max_memory_mb or 
+               len(self._cache) >= self.max_models):
+            
+            if not self._cache:
+                break
+                
+            # Evict least recently used model
+            evicted_key, (evicted_model, evicted_info) = self._cache.popitem(last=False)
+            self._stats.total_memory_mb -= evicted_info.memory_usage
+            self._stats.evictions += 1
+            
+            # Clean up weak reference
+            if evicted_key in self._model_refs:
+                del self._model_refs[evicted_key]
+            
+            self.logger.info(f"Evicted model {evicted_key} ({evicted_info.memory_usage:.1f}MB)")
+            
+            # Force garbage collection
+            del evicted_model
+            gc.collect()
+    
+    def _model_cleanup_callback(self, key: str) -> Callable:
+        """Create cleanup callback for weak references."""
+        def cleanup(ref):
+            with self._lock:
+                if key in self._model_refs and self._model_refs[key] is ref:
+                    del self._model_refs[key]
+                    self.logger.debug(f"Cleaned up weak reference for model: {key}")
+        return cleanup
     
     def clear(self) -> None:
         """Clear all cached models."""
         with self._lock:
             self._cache.clear()
-            self._access_times.clear()
+            self._model_refs.clear()
+            self._stats = CacheStats()
             gc.collect()
-            self.logger.info("Model cache cleared")
+            self.logger.info("Cleared model cache")
     
-    def get_cache_info(self) -> Dict[str, Any]:
-        """
-        Get cache statistics.
-        
-        Returns:
-            Dict[str, Any]: Cache statistics
-        """
+    def get_stats(self) -> CacheStats:
+        """Get cache statistics."""
         with self._lock:
-            return {
-                'total_models': len(self._cache),
-                'memory_usage_mb': self._get_current_memory_usage(),
-                'max_memory_mb': self.max_memory_mb,
-                'max_models': self.max_models,
-                'models': list(self._cache.keys())
-            }
+            return CacheStats(
+                hits=self._stats.hits,
+                misses=self._stats.misses,
+                evictions=self._stats.evictions,
+                total_memory_mb=self._stats.total_memory_mb,
+                models_loaded=len(self._cache)
+            )
     
-    def _estimate_model_size(self, model: Any) -> float:
-        """Estimate model size in MB."""
-        try:
-            if TORCH_AVAILABLE and hasattr(model, 'parameters'):
-                # PyTorch model
-                param_size = sum(p.numel() * p.element_size() for p in model.parameters())
-                buffer_size = sum(b.numel() * b.element_size() for b in model.buffers())
-                return (param_size + buffer_size) / (1024 * 1024)
-            
-            elif hasattr(model, 'count_params'):
-                # TensorFlow/Keras model
-                return model.count_params() * 4 / (1024 * 1024)  # Assume float32
-            
-            else:
-                # Generic estimation using pickle
-                import sys
-                return sys.getsizeof(pickle.dumps(model)) / (1024 * 1024)
+    def _start_cleanup_thread(self) -> None:
+        """Start background cleanup thread."""
+        def cleanup_worker():
+            while not self._stop_cleanup.wait(60):  # Check every minute
+                try:
+                    self._periodic_cleanup()
+                except Exception as e:
+                    self.logger.error(f"Cleanup thread error: {e}")
         
-        except Exception:
-            return 100.0  # Default estimate
+        self._cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
+        self._cleanup_thread.start()
     
-    def _get_current_memory_usage(self) -> float:
-        """Get current memory usage of cached models in MB."""
-        return sum(info['size_mb'] for info in self._cache.values())
+    def _periodic_cleanup(self) -> None:
+        """Periodic cleanup of unused models."""
+        current_time = time.time()
+        cleanup_threshold = 1800  # 30 minutes
+        
+        with self._lock:
+            to_remove = []
+            for key, (model, info) in self._cache.items():
+                if current_time - info.last_used > cleanup_threshold:
+                    to_remove.append(key)
+            
+            for key in to_remove:
+                model, info = self._cache.pop(key)
+                self._stats.total_memory_mb -= info.memory_usage
+                if key in self._model_refs:
+                    del self._model_refs[key]
+                self.logger.info(f"Cleanup: removed unused model {key}")
+                del model
+        
+        if to_remove:
+            gc.collect()
     
-    def _evict_lru_models(self, required_mb: float) -> bool:
-        """
-        Evict least recently used models to free memory.
-        
-        Args:
-            required_mb (float): Required memory in MB
-            
-        Returns:
-            bool: True if enough memory was freed
-        """
-        current_memory = self._get_current_memory_usage()
-        target_memory = self.max_memory_mb - required_mb
-        
-        if current_memory <= target_memory:
-            return True
-        
-        # Sort by access time (oldest first)
-        sorted_models = sorted(self._access_times.items(), key=lambda x: x[1])
-        
-        for key, _ in sorted_models:
-            if current_memory <= target_memory:
-                break
-            
-            model_size = self._cache[key]['size_mb']
-            del self._cache[key]
-            del self._access_times[key]
-            current_memory -= model_size
-            
-            self.logger.debug(f"Evicted model from cache: {key} ({model_size:.1f} MB)")
-        
-        # Force garbage collection
-        gc.collect()
-        
-        return current_memory <= target_memory
+    def __del__(self):
+        """Cleanup on destruction."""
+        if self._cleanup_thread and self._cleanup_thread.is_alive():
+            self._stop_cleanup.set()
 
 
 class ModelDownloader:
     """
-    Handles model downloads with progress tracking and validation.
+    Automatic model download and management.
+    Handles downloading models with progress tracking and verification.
     """
     
-    def __init__(self, models_dir: str = "models"):
+    def __init__(self, cache_dir: Optional[str] = None):
         """
         Initialize model downloader.
         
         Args:
-            models_dir (str): Directory to store downloaded models
+            cache_dir: Directory to cache downloaded models
         """
-        self.models_dir = Path(models_dir)
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = OCRLogger("ModelDownloader")
+        self.cache_dir = Path(cache_dir or self._get_default_cache_dir())
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger(__name__)
+        
+        # Model registry with download information
+        self.model_registry = {
+            'paddleocr': {
+                'det_model': {
+                    'url': 'https://paddleocr.bj.bcebos.com/PP-OCRv3/english/en_PP-OCRv3_det_infer.tar',
+                    'filename': 'en_PP-OCRv3_det_infer.tar',
+                    'extract': True,
+                    'size_mb': 2.3
+                },
+                'rec_model': {
+                    'url': 'https://paddleocr.bj.bcebos.com/PP-OCRv3/english/en_PP-OCRv3_rec_infer.tar',
+                    'filename': 'en_PP-OCRv3_rec_infer.tar',
+                    'extract': True,
+                    'size_mb': 8.5
+                }
+            },
+            'easyocr': {
+                'detector': {
+                    'url': 'https://github.com/JaidedAI/EasyOCR/releases/download/v1.3.2/craft_mlt_25k.pth',
+                    'filename': 'craft_mlt_25k.pth',
+                    'extract': False,
+                    'size_mb': 87.8
+                },
+                'recognizer': {
+                    'url': 'https://github.com/JaidedAI/EasyOCR/releases/download/v1.3.2/english_g2.pth',
+                    'filename': 'english_g2.pth',
+                    'extract': False,
+                    'size_mb': 45.2
+                }
+            }
+        }
     
-    def download_model(self, url: str, filename: str, 
-                      expected_hash: Optional[str] = None,
-                      chunk_size: int = 8192) -> Path:
+    def _get_default_cache_dir(self) -> str:
+        """Get default cache directory based on platform."""
+        if sys.platform == "win32":
+            cache_base = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+            return os.path.join(cache_base, 'AdvancedOCR', 'models')
+        else:
+            cache_base = os.environ.get('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
+            return os.path.join(cache_base, 'advanced-ocr', 'models')
+    
+    def download_model(self, engine: str, model_name: str, 
+                      progress_callback: Optional[Callable[[float], None]] = None) -> Optional[str]:
         """
-        Download model file with validation.
+        Download model if not already cached.
         
         Args:
-            url (str): Download URL
-            filename (str): Local filename
-            expected_hash (Optional[str]): Expected SHA256 hash for validation
-            chunk_size (int): Download chunk size in bytes
+            engine: Engine name (e.g., 'paddleocr', 'easyocr')
+            model_name: Model name within engine
+            progress_callback: Optional progress callback function
             
         Returns:
-            Path: Path to downloaded file
-            
-        Raises:
-            ValueError: If hash validation fails
-            urllib.error.URLError: If download fails
+            Path to downloaded/cached model or None if failed
         """
-        filepath = self.models_dir / filename
+        if engine not in self.model_registry:
+            self.logger.error(f"Unknown engine: {engine}")
+            return None
         
-        # Check if file already exists and is valid
-        if filepath.exists() and expected_hash:
-            if self._validate_file_hash(filepath, expected_hash):
-                self.logger.info(f"Model already exists and is valid: {filename}")
-                return filepath
+        if model_name not in self.model_registry[engine]:
+            self.logger.error(f"Unknown model {model_name} for engine {engine}")
+            return None
         
-        self.logger.info(f"Downloading model: {filename} from {url}")
+        model_info = self.model_registry[engine][model_name]
+        model_path = self.cache_dir / engine / model_info['filename']
+        
+        # Check if already downloaded
+        if model_path.exists() and self._verify_model(model_path, model_info):
+            self.logger.debug(f"Model already cached: {model_path}")
+            return str(model_path)
         
         try:
-            # Download with progress tracking
-            with urllib.request.urlopen(url) as response:
-                total_size = int(response.headers.get('content-length', 0))
-                
-                with open(filepath, 'wb') as f:
-                    downloaded = 0
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            if downloaded % (chunk_size * 100) == 0:  # Log every ~800KB
-                                self.logger.debug(f"Download progress: {progress:.1f}%")
-            
-            # Validate hash if provided
-            if expected_hash:
-                if not self._validate_file_hash(filepath, expected_hash):
-                    filepath.unlink()  # Remove invalid file
-                    raise ValueError(f"Hash validation failed for {filename}")
-            
-            self.logger.info(f"Model downloaded successfully: {filename}")
-            return filepath
-        
+            return self._download_file(model_info, model_path, progress_callback)
         except Exception as e:
-            if filepath.exists():
-                filepath.unlink()  # Clean up partial download
-            raise e
+            self.logger.error(f"Failed to download model {engine}/{model_name}: {e}")
+            return None
     
-    def _validate_file_hash(self, filepath: Path, expected_hash: str) -> bool:
-        """
-        Validate file SHA256 hash.
+    def _download_file(self, model_info: Dict[str, Any], target_path: Path,
+                      progress_callback: Optional[Callable[[float], None]] = None) -> str:
+        """Download file with progress tracking."""
+        import requests
+        from tqdm import tqdm
         
-        Args:
-            filepath (Path): Path to file
-            expected_hash (str): Expected SHA256 hash
-            
-        Returns:
-            bool: True if hash matches
-        """
-        try:
-            sha256_hash = hashlib.sha256()
-            with open(filepath, "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(chunk)
-            
-            actual_hash = sha256_hash.hexdigest()
-            return actual_hash.lower() == expected_hash.lower()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        url = model_info['url']
         
-        except Exception:
+        self.logger.info(f"Downloading model from {url}")
+        
+        with requests.get(url, stream=True) as response:
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            
+            with open(target_path, 'wb') as f:
+                if total_size == 0:
+                    f.write(response.content)
+                else:
+                    downloaded = 0
+                    chunk_size = 8192
+                    
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if progress_callback:
+                                progress = downloaded / total_size
+                                progress_callback(progress)
+        
+        # Extract if needed
+        if model_info.get('extract', False):
+            return self._extract_model(target_path)
+        
+        return str(target_path)
+    
+    def _extract_model(self, archive_path: Path) -> str:
+        """Extract model archive."""
+        import tarfile
+        import zipfile
+        
+        extract_dir = archive_path.parent / archive_path.stem
+        extract_dir.mkdir(exist_ok=True)
+        
+        if archive_path.suffix == '.tar':
+            with tarfile.open(archive_path, 'r') as tar:
+                tar.extractall(extract_dir)
+        elif archive_path.suffix in ['.zip', '.tar.gz']:
+            if archive_path.suffix == '.zip':
+                with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+            else:
+                with tarfile.open(archive_path, 'r:gz') as tar:
+                    tar.extractall(extract_dir)
+        
+        return str(extract_dir)
+    
+    def _verify_model(self, model_path: Path, model_info: Dict[str, Any]) -> bool:
+        """Verify downloaded model integrity."""
+        if not model_path.exists():
             return False
-
-
-class ModelVersionManager:
-    """
-    Manages model version compatibility and requirements.
-    """
-    
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize version manager.
         
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("ModelVersionManager")
-    
-    def check_model_compatibility(self, model_name: str, 
-                                model_version: str) -> Tuple[bool, str]:
-        """
-        Check if model version is compatible with current system.
-        
-        Args:
-            model_name (str): Name of the model
-            model_version (str): Version string
+        # Check file size
+        expected_size_mb = model_info.get('size_mb', 0)
+        if expected_size_mb > 0:
+            actual_size_mb = model_path.stat().st_size / (1024 * 1024)
+            size_diff_pct = abs(actual_size_mb - expected_size_mb) / expected_size_mb
             
-        Returns:
-            Tuple[bool, str]: (is_compatible, reason)
-        """
-        # Get model requirements from config
-        model_config = self.config.get(f"models.{model_name}", {})
-        required_version = model_config.get("version", "any")
+            if size_diff_pct > 0.1:  # 10% tolerance
+                self.logger.warning(
+                    f"Model size mismatch: expected {expected_size_mb:.1f}MB, "
+                    f"got {actual_size_mb:.1f}MB"
+                )
+                return False
         
-        if required_version == "any":
-            return True, "No version constraint"
-        
-        # Simple version comparison (can be enhanced for semantic versioning)
-        if model_version == required_version:
-            return True, f"Version matches requirement: {required_version}"
-        
-        return False, f"Version mismatch: got {model_version}, required {required_version}"
-    
-    def check_framework_compatibility(self, framework: str, 
-                                    min_version: Optional[str] = None) -> Tuple[bool, str]:
-        """
-        Check if ML framework is available and compatible.
-        
-        Args:
-            framework (str): Framework name ('pytorch', 'tensorflow', 'transformers', 'sklearn')
-            min_version (Optional[str]): Minimum required version
-            
-        Returns:
-            Tuple[bool, str]: (is_compatible, reason)
-        """
-        # Handle framework name variations
-        framework_lower = framework.lower()
-        
-        if framework_lower in ["torch", "pytorch"]:
-            if not TORCH_AVAILABLE:
-                return False, "PyTorch not available"
-            if min_version and hasattr(torch, '__version__'):
-                return True, f"PyTorch {torch.__version__} available"
-            return True, "PyTorch available"
-        
-        elif framework_lower in ["tensorflow", "tf"]:
-            if not TF_AVAILABLE:
-                return False, "TensorFlow not available"
-            if min_version and hasattr(tf, '__version__'):
-                return True, f"TensorFlow {tf.__version__} available"
-            return True, "TensorFlow available"
-        
-        elif framework_lower == "transformers":
-            if not TRANSFORMERS_AVAILABLE:
-                return False, "Transformers library not available"
-            if min_version and hasattr(transformers, '__version__'):
-                return True, f"Transformers {transformers.__version__} available"
-            return True, "Transformers library available"
-        
-        elif framework_lower == "sklearn":
-            if not SKLEARN_AVAILABLE:
-                return False, "Scikit-learn not available"
-            if min_version and SKLEARN_AVAILABLE:
-                try:
-                    import sklearn
-                    return True, f"Scikit-learn {sklearn.__version__} available"
-                except AttributeError:
-                    return True, "Scikit-learn available"
-            return True, "Scikit-learn available"
-        
-        return False, f"Unknown framework: {framework}"
+        return True
+
 
 class ModelLoader:
     """
-    Main model loading orchestrator with caching and validation.
+    Main model loading orchestrator with caching and error handling.
+    Coordinates model downloading, caching, and loading operations.
     """
     
-    def __init__(self, config: OCRConfig, models_dir: str = "models"):
+    def __init__(self, config: Optional[OCRConfig] = None):
         """
         Initialize model loader.
         
         Args:
-            config (OCRConfig): OCR configuration
-            models_dir (str): Directory containing model files
+            config: OCR configuration
         """
-        self.config = config
-        self.models_dir = Path(models_dir)
+        self.config = config or OCRConfig()
+        self.logger = logging.getLogger(__name__)
         
-        # Get memory limit from config with fallback
-        memory_limit = getattr(config, 'performance', None)
-        if memory_limit and hasattr(memory_limit, 'memory_limit_mb'):
-            max_memory = memory_limit.memory_limit_mb
-        else:
-            max_memory = config.get("performance.memory_limit_mb", 2048)
+        # Initialize components
+        cache_memory_mb = getattr(self.config, 'model_cache_memory_mb', 2048)
+        max_models = getattr(self.config, 'max_cached_models', 10)
         
-        self.cache = ModelCache(max_memory_mb=max_memory, max_models=5)
-        self.downloader = ModelDownloader(models_dir)
-        self.version_manager = ModelVersionManager(config)
-        self.logger = OCRLogger("ModelLoader")
+        self.cache = ModelCache(max_memory_mb=cache_memory_mb, max_models=max_models)
+        self.downloader = ModelDownloader()
+        
+        # Thread pool for async operations
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='ModelLoader')
         
         # Model loading functions registry
-        self._loaders: Dict[str, Callable] = {}
+        self.loaders: Dict[str, Callable] = {}
         self._register_default_loaders()
     
-    def _download_craft_model(self, model_path: Path) -> None:
-        """Download CRAFT model using gdown."""
-        if not GDOWN_AVAILABLE:
-            raise ImportError("gdown not available. Install with: pip install gdown")
-        
-        import gdown
-        model_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        self.logger.info("Downloading CRAFT model (17MB)...")
-        
-        # Official CRAFT model from Google Drive
-        file_id = "1Jk4eGD7crsqCCg9C9VjCLkMN3ze8kutZ"
-        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(model_path), quiet=False)
-        
-        self.logger.info(f"CRAFT model downloaded: {model_path}")
-
-    def register_loader(self, model_type: str, loader_func: Callable) -> None:
-        """
-        Register custom model loader function.
-        
-        Args:
-            model_type (str): Model type identifier
-            loader_func (Callable): Function to load model
-        """
-        self._loaders[model_type] = loader_func
-        self.logger.debug(f"Registered loader for model type: {model_type}")
+    def _register_default_loaders(self) -> None:
+        """Register default model loaders for common engines."""
+        self.loaders.update({
+            'paddleocr': self._load_paddleocr_models,
+            'easyocr': self._load_easyocr_models,
+            'trocr': self._load_trocr_models,
+        })
     
-    def load_model(self, model_name: str, model_type: str = None, 
-                   framework: str = None, force_reload: bool = False, **kwargs) -> Any:
+    def load_model(self, engine: str, force_reload: bool = False) -> Optional[Any]:
         """
-        Load model with caching and validation.
+        Load model for specified engine.
         
         Args:
-            model_name (str): Name of the model
-            model_type (str): Type of model (e.g., 'pytorch', 'tensorflow', 'pickle')
-            framework (str): Framework name (alternative to model_type for compatibility)
-            force_reload (bool): Force reload even if cached
-            **kwargs: Additional arguments for model loading
+            engine: Engine name
+            force_reload: Force reload even if cached
             
         Returns:
-            Any: Loaded model object
-            
-        Raises:
-            ValueError: If model type not supported or loading fails
-            FileNotFoundError: If model file not found
+            Loaded model object or None if failed
         """
-        # Handle framework parameter for text_detector.py compatibility
-        if framework and not model_type:
-            model_type = framework
-        elif not model_type and not framework:
-            raise ValueError("Either model_type or framework parameter must be provided")
+        cache_key = f"{engine}_model"
         
-        cache_key = f"{model_name}_{model_type}"
-        
-        # Check cache first
+        # Check cache first (unless force reload)
         if not force_reload:
-            cached_model = self.cache.get(cache_key)
-            if cached_model is not None:
-                self.logger.debug(f"Using cached model: {cache_key}")
-                return cached_model
-        
-        # Check if loader is registered
-        if model_type not in self._loaders:
-            raise ValueError(f"Unsupported model type: {model_type}")
-        
-        # Get model configuration
-        model_config = self.config.get(f"models.{model_name}", {})
-        
-        # Check framework compatibility
-        framework_name = model_config.get("framework", model_type)
-        if framework_name:
-            is_compatible, reason = self.version_manager.check_framework_compatibility(framework_name)
-            if not is_compatible:
-                raise ValueError(f"Framework compatibility issue: {reason}")
+            cached = self.cache.get(cache_key)
+            if cached:
+                model, info = cached
+                self.logger.debug(f"Using cached model for {engine}")
+                return model
         
         # Load model
         try:
-            self.logger.info(f"Loading model: {model_name} ({model_type})")
             start_time = time.time()
+            self.logger.info(f"Loading model for engine: {engine}")
             
-            model = self._loaders[model_type](model_name, model_config, **kwargs)
+            if engine not in self.loaders:
+                self.logger.error(f"No loader registered for engine: {engine}")
+                return None
             
+            # Load using registered loader
+            model = self.loaders[engine]()
+            if model is None:
+                return None
+            
+            # Calculate memory usage
+            memory_usage = self._estimate_model_memory(model)
             load_time = time.time() - start_time
-            self.logger.info(f"Model loaded in {load_time:.2f}s: {model_name}")
+            
+            # Create model info
+            model_info = ModelInfo(
+                name=engine,
+                size_mb=memory_usage,
+                load_time=load_time,
+                memory_usage=memory_usage,
+                metadata={'engine': engine, 'loaded_at': time.time()}
+            )
             
             # Cache the model
-            self.cache.put(cache_key, model)
+            self.cache.put(cache_key, model, model_info)
             
+            self.logger.info(
+                f"Loaded {engine} model: {memory_usage:.1f}MB in {load_time:.2f}s"
+            )
             return model
-        
+            
         except Exception as e:
-            self.logger.error(f"Failed to load model {model_name}: {str(e)}")
-            raise e
+            self.logger.error(f"Failed to load model for {engine}: {e}")
+            return None
     
-    def unload_model(self, model_name: str, model_type: str) -> bool:
+    def load_model_async(self, engine: str, force_reload: bool = False) -> Future:
         """
-        Unload model from cache.
+        Load model asynchronously.
         
         Args:
-            model_name (str): Name of the model
-            model_type (str): Type of model
+            engine: Engine name
+            force_reload: Force reload even if cached
             
         Returns:
-            bool: True if model was unloaded
+            Future object for the loading operation
         """
-        cache_key = f"{model_name}_{model_type}"
-        return self.cache.remove(cache_key)
+        return self.executor.submit(self.load_model, engine, force_reload)
     
-    def get_cache_info(self) -> Dict[str, Any]:
-        """Get model cache information."""
-        return self.cache.get_cache_info()
+    def _load_paddleocr_models(self) -> Optional[Any]:
+        """Load PaddleOCR models."""
+        try:
+            # Import PaddleOCR
+            from paddleocr import PaddleOCR
+            
+            # Download models if needed
+            det_path = self.downloader.download_model('paddleocr', 'det_model')
+            rec_path = self.downloader.download_model('paddleocr', 'rec_model')
+            
+            # Initialize PaddleOCR
+            ocr = PaddleOCR(
+                use_angle_cls=True,
+                lang='en',
+                use_gpu=self._has_gpu(),
+                show_log=False
+            )
+            
+            return ocr
+            
+        except ImportError:
+            self.logger.error("PaddleOCR not installed. Install with: pip install paddleocr")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to load PaddleOCR: {e}")
+            return None
+    
+    def _load_easyocr_models(self) -> Optional[Any]:
+        """Load EasyOCR models."""
+        try:
+            # Import EasyOCR
+            import easyocr
+            
+            # Download models if needed
+            det_path = self.downloader.download_model('easyocr', 'detector')
+            rec_path = self.downloader.download_model('easyocr', 'recognizer')
+            
+            # Initialize EasyOCR
+            reader = easyocr.Reader(
+                ['en'],
+                gpu=self._has_gpu(),
+                verbose=False
+            )
+            
+            return reader
+            
+        except ImportError:
+            self.logger.error("EasyOCR not installed. Install with: pip install easyocr")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to load EasyOCR: {e}")
+            return None
+    
+    def _load_trocr_models(self) -> Optional[Any]:
+        """Load TrOCR models."""
+        try:
+            # Import transformers
+            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+            
+            # Load processor and model
+            processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
+            model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-printed")
+            
+            return {'processor': processor, 'model': model}
+            
+        except ImportError:
+            self.logger.error("Transformers not installed. Install with: pip install transformers")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to load TrOCR: {e}")
+            return None
+    
+    def _has_gpu(self) -> bool:
+        """Check if GPU is available."""
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except ImportError:
+            try:
+                import tensorflow as tf
+                return len(tf.config.list_physical_devices('GPU')) > 0
+            except ImportError:
+                return False
+    
+    def _estimate_model_memory(self, model: Any) -> float:
+        """Estimate model memory usage in MB."""
+        try:
+            # Try to get actual memory usage
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            return memory_info.rss / (1024 * 1024)  # Convert to MB
+        except:
+            # Fallback to rough estimation
+            return 100.0  # Default estimate
+    
+    def get_cache_stats(self) -> CacheStats:
+        """Get model cache statistics."""
+        return self.cache.get_stats()
     
     def clear_cache(self) -> None:
-        """Clear all cached models."""
+        """Clear model cache."""
         self.cache.clear()
     
-    # COMPLETE FIX: Replace the _register_default_loaders method in your model_utils.py
+    def __del__(self):
+        """Cleanup on destruction."""
+        if hasattr(self, 'executor'):
+            self.executor.shutdown(wait=False)
 
-    def _register_default_loaders(self) -> None:
-        """Register default model loaders."""
-        
-        def load_pytorch_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load PyTorch model with CRAFT auto-download."""
-            if not TORCH_AVAILABLE:
-                raise ImportError("PyTorch not available")
-            
-            model_path = self.models_dir / f"{model_name}.pth"
-            
-            # Special handling for CRAFT model
-            if model_name == "craft_mlt_25k" and not model_path.exists():
-                self.logger.info("CRAFT model not found locally. Downloading...")
-                try:
-                    self._download_craft_model(model_path)
-                except Exception as e:
-                    self.logger.error(f"Failed to download CRAFT model: {e}")
-                    raise FileNotFoundError(f"CRAFT model download failed: {e}")
-            
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-            device = kwargs.get('device', 'cpu')
-            return torch.load(model_path, map_location=device)
-        
-        def load_tensorflow_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load TensorFlow model."""
-            if not TF_AVAILABLE:
-                raise ImportError("TensorFlow not available")
-            
-            model_path = self.models_dir / model_name
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model directory not found: {model_path}")
-            
-            return tf.keras.models.load_model(str(model_path))
-        
-        def load_transformers_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load Transformers model with proper TrOCR support."""
-            if not TRANSFORMERS_AVAILABLE:
-                raise ImportError("Transformers library not available")
-            
-            if "trocr" in model_name.lower():
-                model_class = "VisionEncoderDecoderModel"
-            else:
-                model_class = model_config.get("model_class", "AutoModel")
-            
-            # FIX: Map generic model names to actual HuggingFace model identifiers
-            model_name_mapping = {
-                "trocr": "microsoft/trocr-base-printed",  # Default TrOCR model
-                "trocr_handwritten": "microsoft/trocr-base-handwritten", 
-                "trocr_printed": "microsoft/trocr-base-printed",
-                "trocr_large": "microsoft/trocr-large-printed",
-            }
-            
-            # Use mapped name if available
-            actual_model_name = model_name_mapping.get(model_name, model_name)
-            
-            model_class_obj = getattr(transformers, model_class)
-            
-            # Check if local model exists first
-            local_path = self.models_dir / model_name
-            if local_path.exists():
-                return model_class_obj.from_pretrained(str(local_path))
-            else:
-                # Download from HuggingFace Hub using the correct identifier
-                self.logger.info(f"Loading model from HuggingFace: {actual_model_name}")
-                return model_class_obj.from_pretrained(actual_model_name)
-        
-        def load_pickle_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load pickled model."""
-            model_path = self.models_dir / f"{model_name}.pkl"
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-            with open(model_path, 'rb') as f:
-                return pickle.load(f)
-        
-        def load_sklearn_model(model_name: str, model_config: Dict[str, Any], **kwargs) -> Any:
-            """Load scikit-learn model."""
-            if not SKLEARN_AVAILABLE:
-                raise ImportError("Scikit-learn not available")
-            
-            model_path = self.models_dir / f"{model_name}.pkl"
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-            with open(model_path, 'rb') as f:
-                return pickle.load(f)
-        
-        # Register default loaders
-        self._loaders.update({
-            'pytorch': load_pytorch_model,
-            'torch': load_pytorch_model,  # Alias
-            'tensorflow': load_tensorflow_model,
-            'tf': load_tensorflow_model,  # Alias
-            'transformers': load_transformers_model,
-            'pickle': load_pickle_model,
-            'sklearn': load_sklearn_model,
-        })
-        
-# Decorator for automatic model caching
-def cached_model_load(model_name: str, model_type: str):
+
+# Convenience functions for common operations
+def get_model_loader(config: Optional[OCRConfig] = None) -> ModelLoader:
+    """Get singleton model loader instance."""
+    if not hasattr(get_model_loader, '_instance'):
+        get_model_loader._instance = ModelLoader(config)
+    return get_model_loader._instance
+
+
+def load_engine_model(engine: str, config: Optional[OCRConfig] = None) -> Optional[Any]:
     """
-    Decorator for automatic model loading and caching.
+    Convenience function to load model for specific engine.
     
     Args:
-        model_name (str): Name of the model
-        model_type (str): Type of model
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Get model loader from config (assume it's passed as kwarg or available globally)
-            model_loader = kwargs.get('model_loader')
-            if not model_loader:
-                # Try to create a default loader
-                config = kwargs.get('config') or OCRConfig()
-                model_loader = ModelLoader(config)
-            
-            # Load model
-            model = model_loader.load_model(model_name, model_type)
-            
-            # Add model to function kwargs
-            kwargs['model'] = model
-            
-            return func(*args, **kwargs)
-        
-        return wrapper
-    return decorator
-
-
-# Utility functions for external use
-def create_model_loader(config: Optional[OCRConfig] = None, 
-                       models_dir: str = "models") -> ModelLoader:
-    """
-    Create a model loader instance.
-    
-    Args:
-        config (Optional[OCRConfig]): OCR configuration
-        models_dir (str): Models directory
+        engine: Engine name
+        config: Optional OCR configuration
         
     Returns:
-        ModelLoader: Configured model loader
+        Loaded model or None if failed
     """
-    if config is None:
-        config = OCRConfig()
-    
-    return ModelLoader(config, models_dir)
+    loader = get_model_loader(config)
+    return loader.load_model(engine)
 
 
-def get_available_frameworks() -> Dict[str, bool]:
-    """
-    Check which ML frameworks are available.
-    
-    Returns:
-        Dict[str, bool]: Framework availability status
-    """
-    return {
-        'pytorch': TORCH_AVAILABLE,
-        'tensorflow': TF_AVAILABLE,
-        'transformers': TRANSFORMERS_AVAILABLE,
-        'sklearn': SKLEARN_AVAILABLE,
-    }
-
-
-def estimate_model_memory_usage(model: Any) -> float:
-    """
-    Estimate model memory usage in MB.
-    
-    Args:
-        model (Any): Model object
-        
-    Returns:
-        float: Estimated memory usage in MB
-    """
-    cache = ModelCache()
-    return cache._estimate_model_size(model)
-
-
-__all__ = [
-    'ModelCache', 'ModelDownloader', 'ModelVersionManager', 'ModelLoader',
-    'cached_model_load', 'create_model_loader', 'get_available_frameworks',
-    'estimate_model_memory_usage'
-]
+def clear_model_cache() -> None:
+    """Clear global model cache."""
+    if hasattr(get_model_loader, '_instance'):
+        get_model_loader._instance.clear_cache()

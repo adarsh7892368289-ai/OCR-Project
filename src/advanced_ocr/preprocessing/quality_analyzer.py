@@ -1,723 +1,586 @@
-# src/advanced_ocr/preprocessing/quality_analyzer.py
 """
-Advanced OCR Image Quality Analysis Module
-
-This module provides comprehensive image quality analysis for the advanced OCR system.
-It analyzes multiple quality dimensions including blur, noise, contrast, resolution,
-brightness, and overall quality to enable intelligent preprocessing decisions.
-
-The module focuses on:
-- Multi-dimensional quality assessment using computer vision techniques
-- Quality level classification with configurable thresholds
-- Statistical analysis of image characteristics for OCR optimization
-- Performance-optimized analysis with minimal computational overhead
-- Integration with preprocessing pipeline for adaptive enhancement strategies
-
-Classes:
-    QualityLevel: Enumeration of quality assessment levels
-    QualityMetrics: Data container for comprehensive quality analysis results
-    BlurAnalyzer: Specialized analyzer for image blur detection
-    NoiseAnalyzer: Specialized analyzer for image noise assessment
-    ContrastAnalyzer: Specialized analyzer for contrast and histogram analysis
-    ResolutionAnalyzer: Specialized analyzer for resolution and DPI estimation
-    BrightnessAnalyzer: Specialized analyzer for lighting and brightness analysis
-    QualityAnalyzer: Main orchestrator coordinating all quality analysis components
-
-Functions:
-    create_quality_analyzer: Factory function for creating quality analyzer instances
-    get_quality_level_description: Utility for human-readable quality level descriptions
-    analyze_quality_trends: Utility for analyzing quality trends across multiple images
-
-Example:
-    >>> from advanced_ocr.preprocessing.quality_analyzer import QualityAnalyzer
-    >>> analyzer = QualityAnalyzer(config)
-    >>> metrics = analyzer.analyze_image_quality(image)
-    >>> print(f"Overall quality: {metrics.overall_level.value} ({metrics.overall_score:.3f})")
-    >>> print(f"Blur level: {metrics.blur_level.value}, Noise level: {metrics.noise_level.value}")
-
-    >>> # Access detailed metrics
-    >>> print(f"Blur score: {metrics.blur_score:.3f}, Contrast score: {metrics.contrast_score:.3f}")
+Advanced OCR System - Image Quality Analysis
+Analyze image quality to guide enhancement decisions for optimal OCR results.
 """
 
 import cv2
 import numpy as np
-from typing import Dict, Tuple, Optional, Any, List
-import math
+import logging
+from typing import Dict, Tuple, Optional, List
 from dataclasses import dataclass
 from enum import Enum
+import math
 
-# Import from parent modules (correct relative imports)
 from ..config import OCRConfig
-from ..utils.logger import OCRLogger
 
 
-class QualityLevel(Enum):
-    """Enumeration for image quality levels."""
-    EXCELLENT = "excellent"
-    GOOD = "good" 
-    FAIR = "fair"
-    POOR = "poor"
-    VERY_POOR = "very_poor"
+class QualityIssue(Enum):
+    """Types of image quality issues that can affect OCR."""
+    
+    BLUR = "blur"
+    NOISE = "noise"
+    LOW_CONTRAST = "low_contrast"
+    POOR_RESOLUTION = "poor_resolution"
+    SKEW = "skew"
+    UNEVEN_LIGHTING = "uneven_lighting"
+    ARTIFACTS = "artifacts"
 
 
 @dataclass
 class QualityMetrics:
-    """
-    Data class containing comprehensive image quality metrics.
-    """
-    # Blur analysis
-    blur_score: float           # 0.0 = very blurry, 1.0 = sharp
-    blur_level: QualityLevel
-    laplacian_variance: float   # Raw Laplacian variance
+    """Comprehensive image quality metrics for OCR optimization."""
     
-    # Noise analysis  
-    noise_score: float          # 0.0 = very noisy, 1.0 = clean
-    noise_level: QualityLevel
-    noise_variance: float       # Estimated noise variance
+    # Core quality scores (0.0 = poor, 1.0 = excellent)
+    blur_score: float = 0.0
+    noise_score: float = 0.0
+    contrast_score: float = 0.0
+    resolution_score: float = 0.0
+    lighting_score: float = 0.0
     
-    # Contrast analysis
-    contrast_score: float       # 0.0 = no contrast, 1.0 = excellent contrast
-    contrast_level: QualityLevel
-    contrast_rms: float         # RMS contrast value
-    histogram_spread: float     # Histogram spread measure
+    # Geometric properties
+    skew_angle: float = 0.0
+    text_orientation: float = 0.0
     
-    # Resolution analysis
-    resolution_score: float     # 0.0 = very low, 1.0 = high resolution
-    resolution_level: QualityLevel
-    effective_resolution: Tuple[int, int]  # Effective resolution (width, height)
-    dpi_estimate: Optional[float]          # Estimated DPI if calculable
+    # Overall assessment
+    overall_score: float = 0.0
+    ocr_readiness: float = 0.0
     
-    # Lighting analysis
-    brightness_score: float     # 0.0 = too dark/bright, 1.0 = optimal
-    brightness_level: QualityLevel
-    mean_brightness: float      # Mean brightness value (0-255)
-    brightness_uniformity: float # Uniformity of brightness distribution
+    # Detected issues and recommendations
+    issues: List[QualityIssue] = None
+    recommendations: List[str] = None
     
-    # Overall quality
-    overall_score: float        # Weighted combination of all metrics
-    overall_level: QualityLevel
+    # Enhancement parameters (for adaptive processing)
+    enhancement_params: Dict[str, float] = None
     
-    # Additional metadata
-    image_dimensions: Tuple[int, int]  # Original image dimensions
-    color_channels: int         # Number of color channels
-    analysis_time: float        # Time taken for analysis in seconds
-
-
-class BlurAnalyzer:
-    """
-    Analyzes image blur using multiple detection methods.
-    """
-    
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize blur analyzer.
-
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("blur_analyzer")
-        
-        # Blur detection thresholds from config
-        self.laplacian_threshold_excellent = getattr(config.preprocessing, 'laplacian_threshold_excellent', 1000)
-        self.laplacian_threshold_good = config.get("quality.blur.laplacian_good", 500)
-        self.laplacian_threshold_fair = config.get("quality.blur.laplacian_fair", 100)
-        self.laplacian_threshold_poor = config.get("quality.blur.laplacian_poor", 50)
-    
-    def analyze_blur(self, image: np.ndarray) -> Tuple[float, QualityLevel, float]:
-        """
-        Analyze image blur using Laplacian variance method.
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            Tuple[float, QualityLevel, float]: (blur_score, blur_level, laplacian_variance)
-        """
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Calculate Laplacian variance (focus measure)
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        laplacian_variance = laplacian.var()
-        
-        # Determine blur level based on thresholds
-        if laplacian_variance >= self.laplacian_threshold_excellent:
-            blur_level = QualityLevel.EXCELLENT
-            blur_score = min(1.0, laplacian_variance / self.laplacian_threshold_excellent)
-        elif laplacian_variance >= self.laplacian_threshold_good:
-            blur_level = QualityLevel.GOOD
-            blur_score = 0.8 * (laplacian_variance / self.laplacian_threshold_good)
-        elif laplacian_variance >= self.laplacian_threshold_fair:
-            blur_level = QualityLevel.FAIR
-            blur_score = 0.6 * (laplacian_variance / self.laplacian_threshold_fair)
-        elif laplacian_variance >= self.laplacian_threshold_poor:
-            blur_level = QualityLevel.POOR
-            blur_score = 0.4 * (laplacian_variance / self.laplacian_threshold_poor)
-        else:
-            blur_level = QualityLevel.VERY_POOR
-            blur_score = min(0.3, laplacian_variance / self.laplacian_threshold_poor)
-        
-        self.logger.debug(f"Blur analysis: variance={laplacian_variance:.2f}, score={blur_score:.3f}, level={blur_level.value}")
-        
-        return blur_score, blur_level, laplacian_variance
-    
-    def analyze_blur_gradient(self, image: np.ndarray) -> float:
-        """
-        Alternative blur analysis using gradient magnitude.
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            float: Gradient-based blur score (0.0-1.0)
-        """
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Calculate gradients
-        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
-        # Calculate gradient magnitude
-        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
-        
-        # Use mean gradient magnitude as sharpness measure
-        mean_gradient = np.mean(gradient_magnitude)
-        
-        # Normalize to 0-1 scale (adjust based on empirical observations)
-        normalized_score = min(1.0, mean_gradient / 100.0)
-        
-        return normalized_score
-
-
-class NoiseAnalyzer:
-    """
-    Analyzes image noise using statistical methods.
-    """
-    
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize noise analyzer.
-        
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("noise_analyzer")
-
-        # Noise detection parameters
-        self.noise_kernel_size = config.get("quality.noise.kernel_size", 5)
-        self.noise_threshold_excellent = config.get("quality.noise.threshold_excellent", 5)
-        self.noise_threshold_good = config.get("quality.noise.threshold_good", 15)
-        self.noise_threshold_fair = config.get("quality.noise.threshold_fair", 30)
-        self.noise_threshold_poor = config.get("quality.noise.threshold_poor", 50)
-    
-    def analyze_noise(self, image: np.ndarray) -> Tuple[float, QualityLevel, float]:
-        """
-        Analyze image noise using local variance method.
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            Tuple[float, QualityLevel, float]: (noise_score, noise_level, noise_variance)
-        """
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Apply median filter to get noise-free version
-        median_filtered = cv2.medianBlur(gray, self.noise_kernel_size)
-        
-        # Calculate noise as difference between original and filtered
-        noise = cv2.absdiff(gray.astype(np.float32), median_filtered.astype(np.float32))
-        
-        # Calculate noise variance
-        noise_variance = np.var(noise)
-        
-        # Determine noise level and score
-        if noise_variance <= self.noise_threshold_excellent:
-            noise_level = QualityLevel.EXCELLENT
-            noise_score = 1.0 - (noise_variance / self.noise_threshold_excellent) * 0.2
-        elif noise_variance <= self.noise_threshold_good:
-            noise_level = QualityLevel.GOOD
-            noise_score = 0.8 - (noise_variance / self.noise_threshold_good) * 0.2
-        elif noise_variance <= self.noise_threshold_fair:
-            noise_level = QualityLevel.FAIR
-            noise_score = 0.6 - (noise_variance / self.noise_threshold_fair) * 0.2
-        elif noise_variance <= self.noise_threshold_poor:
-            noise_level = QualityLevel.POOR
-            noise_score = 0.4 - (noise_variance / self.noise_threshold_poor) * 0.2
-        else:
-            noise_level = QualityLevel.VERY_POOR
-            noise_score = max(0.0, 0.2 - (noise_variance / self.noise_threshold_poor) * 0.2)
-        
-        self.logger.debug(f"Noise analysis: variance={noise_variance:.2f}, score={noise_score:.3f}, level={noise_level.value}")
-        
-        return noise_score, noise_level, noise_variance
-
-
-class ContrastAnalyzer:
-    """
-    Analyzes image contrast using multiple metrics.
-    """
-    
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize contrast analyzer.
-        
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("contrast_analyzer")
-        
-        # Contrast analysis parameters
-        self.rms_excellent = config.get("quality.contrast.rms_excellent", 80)
-        self.rms_good = config.get("quality.contrast.rms_good", 60)
-        self.rms_fair = config.get("quality.contrast.rms_fair", 40)
-        self.rms_poor = config.get("quality.contrast.rms_poor", 20)
-    
-    def analyze_contrast(self, image: np.ndarray) -> Tuple[float, QualityLevel, float, float]:
-        """
-        Analyze image contrast using RMS and histogram methods.
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            Tuple[float, QualityLevel, float, float]: (contrast_score, contrast_level, rms_contrast, histogram_spread)
-        """
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Calculate RMS contrast
-        mean_intensity = np.mean(gray)
-        rms_contrast = np.sqrt(np.mean((gray - mean_intensity) ** 2))
-        
-        # Calculate histogram spread
-        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-        hist_normalized = hist.flatten() / hist.sum()
-        
-        # Calculate histogram spread (standard deviation of histogram)
-        bin_centers = np.arange(256)
-        histogram_mean = np.sum(bin_centers * hist_normalized)
-        histogram_spread = np.sqrt(np.sum(hist_normalized * (bin_centers - histogram_mean) ** 2))
-        
-        # Determine contrast level based on RMS contrast
-        if rms_contrast >= self.rms_excellent:
-            contrast_level = QualityLevel.EXCELLENT
-            contrast_score = min(1.0, rms_contrast / self.rms_excellent)
-        elif rms_contrast >= self.rms_good:
-            contrast_level = QualityLevel.GOOD
-            contrast_score = 0.8 * (rms_contrast / self.rms_good)
-        elif rms_contrast >= self.rms_fair:
-            contrast_level = QualityLevel.FAIR
-            contrast_score = 0.6 * (rms_contrast / self.rms_fair)
-        elif rms_contrast >= self.rms_poor:
-            contrast_level = QualityLevel.POOR
-            contrast_score = 0.4 * (rms_contrast / self.rms_poor)
-        else:
-            contrast_level = QualityLevel.VERY_POOR
-            contrast_score = min(0.3, rms_contrast / self.rms_poor)
-        
-        self.logger.debug(f"Contrast analysis: RMS={rms_contrast:.2f}, spread={histogram_spread:.2f}, score={contrast_score:.3f}, level={contrast_level.value}")
-        
-        return contrast_score, contrast_level, rms_contrast, histogram_spread
-
-
-class ResolutionAnalyzer:
-    """
-    Analyzes image resolution and estimates effective DPI.
-    """
-    
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize resolution analyzer.
-        
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("resolution_analyzer")
-        
-        # Resolution thresholds (pixels)
-        self.min_width_excellent = config.get("quality.resolution.min_width_excellent", 1200)
-        self.min_height_excellent = config.get("quality.resolution.min_height_excellent", 1600)
-        self.min_width_good = config.get("quality.resolution.min_width_good", 800)
-        self.min_height_good = config.get("quality.resolution.min_height_good", 1000)
-        self.min_width_fair = config.get("quality.resolution.min_width_fair", 600)
-        self.min_height_fair = config.get("quality.resolution.min_height_fair", 800)
-    
-    def analyze_resolution(self, image: np.ndarray) -> Tuple[float, QualityLevel, Tuple[int, int], Optional[float]]:
-        """
-        Analyze image resolution and estimate DPI.
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            Tuple[float, QualityLevel, Tuple[int, int], Optional[float]]: 
-                (resolution_score, resolution_level, effective_resolution, dpi_estimate)
-        """
-        height, width = image.shape[:2]
-        effective_resolution = (width, height)
-        
-        # Calculate resolution score based on minimum dimension
-        min_dimension = min(width, height)
-        
-        if width >= self.min_width_excellent and height >= self.min_height_excellent:
-            resolution_level = QualityLevel.EXCELLENT
-            resolution_score = 1.0
-        elif width >= self.min_width_good and height >= self.min_height_good:
-            resolution_level = QualityLevel.GOOD
-            resolution_score = 0.8
-        elif width >= self.min_width_fair and height >= self.min_height_fair:
-            resolution_level = QualityLevel.FAIR
-            resolution_score = 0.6
-        elif min_dimension >= 300:  # Minimum usable resolution
-            resolution_level = QualityLevel.POOR
-            resolution_score = 0.4
-        else:
-            resolution_level = QualityLevel.VERY_POOR
-            resolution_score = 0.2
-        
-        # Estimate DPI (very rough estimation)
-        # Assume typical document is 8.5" x 11" for estimation
-        dpi_estimate = None
-        if width > 0 and height > 0:
-            # Estimate based on typical document proportions
-            aspect_ratio = width / height
-            if 0.7 <= aspect_ratio <= 0.8:  # Portrait document-like
-                dpi_estimate = height / 11.0  # Assume 11 inch height
-            elif 1.2 <= aspect_ratio <= 1.4:  # Landscape document-like
-                dpi_estimate = width / 11.0   # Assume 11 inch width
-            else:
-                dpi_estimate = min_dimension / 8.5  # Use smaller dimension
-        
-        self.logger.debug(f"Resolution analysis: {width}x{height}, score={resolution_score:.3f}, level={resolution_level.value}, DPI≈{dpi_estimate:.0f}" if dpi_estimate else f"Resolution analysis: {width}x{height}, score={resolution_score:.3f}, level={resolution_level.value}")
-        
-        return resolution_score, resolution_level, effective_resolution, dpi_estimate
-
-
-class BrightnessAnalyzer:
-    """
-    Analyzes image brightness and lighting conditions.
-    """
-    
-    def __init__(self, config: OCRConfig):
-        """
-        Initialize brightness analyzer.
-        
-        Args:
-            config (OCRConfig): OCR configuration
-        """
-        self.config = config
-        self.logger = OCRLogger("brightness_analyzer")
-        
-        # Optimal brightness range
-        self.optimal_brightness_min = config.get("quality.brightness.optimal_min", 100)
-        self.optimal_brightness_max = config.get("quality.brightness.optimal_max", 180)
-        self.acceptable_brightness_min = config.get("quality.brightness.acceptable_min", 80)
-        self.acceptable_brightness_max = config.get("quality.brightness.acceptable_max", 200)
-    
-    def analyze_brightness(self, image: np.ndarray) -> Tuple[float, QualityLevel, float, float]:
-        """
-        Analyze image brightness and uniformity.
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            Tuple[float, QualityLevel, float, float]: 
-                (brightness_score, brightness_level, mean_brightness, uniformity)
-        """
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Calculate mean brightness
-        mean_brightness = np.mean(gray)
-        
-        # Calculate brightness uniformity (inverse of standard deviation)
-        brightness_std = np.std(gray)
-        brightness_uniformity = max(0.0, 1.0 - (brightness_std / 128.0))  # Normalize by max possible std
-        
-        # Determine brightness score and level
-        if self.optimal_brightness_min <= mean_brightness <= self.optimal_brightness_max:
-            brightness_level = QualityLevel.EXCELLENT
-            brightness_score = 1.0 - abs(mean_brightness - 140) / 40  # Peak at 140
-        elif self.acceptable_brightness_min <= mean_brightness <= self.acceptable_brightness_max:
-            brightness_level = QualityLevel.GOOD
-            if mean_brightness < self.optimal_brightness_min:
-                brightness_score = 0.8 * (mean_brightness / self.optimal_brightness_min)
-            else:
-                brightness_score = 0.8 * (self.acceptable_brightness_max / mean_brightness)
-        elif 50 <= mean_brightness <= 220:  # Usable range
-            brightness_level = QualityLevel.FAIR
-            brightness_score = 0.6
-        elif 30 <= mean_brightness <= 240:  # Marginal range
-            brightness_level = QualityLevel.POOR
-            brightness_score = 0.4
-        else:  # Too dark or too bright
-            brightness_level = QualityLevel.VERY_POOR
-            brightness_score = 0.2
-        
-        # Adjust score based on uniformity
-        brightness_score *= (0.7 + 0.3 * brightness_uniformity)
-        
-        self.logger.debug(f"Brightness analysis: mean={mean_brightness:.1f}, uniformity={brightness_uniformity:.3f}, score={brightness_score:.3f}, level={brightness_level.value}")
-        
-        return brightness_score, brightness_level, mean_brightness, brightness_uniformity
+    def __post_init__(self):
+        if self.issues is None:
+            self.issues = []
+        if self.recommendations is None:
+            self.recommendations = []
+        if self.enhancement_params is None:
+            self.enhancement_params = {}
 
 
 class QualityAnalyzer:
     """
-    Main image quality analyzer that orchestrates all quality analysis components.
-    Provides comprehensive quality metrics without making processing decisions.
+    Advanced image quality analyzer for OCR preprocessing.
+    Provides comprehensive quality assessment and enhancement recommendations.
     """
     
-    def __init__(self, config: OCRConfig):
+    def __init__(self, config: Optional[OCRConfig] = None):
         """
-        Initialize quality analyzer with configuration.
+        Initialize quality analyzer.
         
         Args:
-            config (OCRConfig): OCR configuration
+            config: OCR configuration with quality thresholds
         """
-        self.config = config
-        self.logger = OCRLogger("quality_analyzer")
+        self.config = config or OCRConfig()
+        self.logger = logging.getLogger(__name__)
         
-        # Initialize component analyzers
-        self.blur_analyzer = BlurAnalyzer(config)
-        self.noise_analyzer = NoiseAnalyzer(config)
-        self.contrast_analyzer = ContrastAnalyzer(config)
-        self.resolution_analyzer = ResolutionAnalyzer(config)
-        self.brightness_analyzer = BrightnessAnalyzer(config)
+        # CONSERVATIVE Quality thresholds - much less sensitive
+        self.thresholds = {
+            'blur_threshold': 50.0,       # Lower threshold (was 100.0)
+            'noise_threshold': 0.25,      # Higher tolerance (was 0.15) 
+            'contrast_threshold': 0.2,    # Lower requirement (was 0.3)
+            'resolution_threshold': 100,  # Lower requirement (was 150)
+            'skew_threshold': 3.0,        # Higher tolerance (was 2.0)
+            'lighting_variance': 0.1      # Much lower sensitivity (was 0.2)
+        }
         
-        # Quality weighting factors from config
-        self.weight_blur = config.get("quality.weights.blur", 0.25)
-        self.weight_noise = config.get("quality.weights.noise", 0.20)
-        self.weight_contrast = config.get("quality.weights.contrast", 0.20)
-        self.weight_resolution = config.get("quality.weights.resolution", 0.15)
-        self.weight_brightness = config.get("quality.weights.brightness", 0.20)
-        
-        # Normalize weights
-        total_weight = (self.weight_blur + self.weight_noise + self.weight_contrast + 
-                       self.weight_resolution + self.weight_brightness)
-        if total_weight > 0:
-            self.weight_blur /= total_weight
-            self.weight_noise /= total_weight
-            self.weight_contrast /= total_weight
-            self.weight_resolution /= total_weight
-            self.weight_brightness /= total_weight
+        # Update thresholds from config if available
+        if hasattr(self.config, 'quality_thresholds'):
+            self.thresholds.update(self.config.quality_thresholds)
     
-    def analyze_image_quality(self, image: np.ndarray) -> QualityMetrics:
+    def analyze_quality(self, image: np.ndarray) -> QualityMetrics:
         """
-        Comprehensive image quality analysis.
-        
-        CRITICAL: This is the ONLY method called by image_processor.py
-        Returns quality metrics for intelligent preprocessing decisions.
+        Perform comprehensive quality analysis of the image.
         
         Args:
-            image (np.ndarray): Input image (original, not preprocessed)
+            image: Input image as numpy array
             
         Returns:
-            QualityMetrics: Comprehensive quality analysis results
+            QualityMetrics with detailed quality assessment
         """
-        start_time = cv2.getTickCount()
+        if image is None or image.size == 0:
+            self.logger.warning("Empty or invalid image provided")
+            return QualityMetrics()
         
-        self.logger.debug(f"Starting quality analysis for image shape: {image.shape}")
-        
-        # Analyze blur
-        blur_score, blur_level, laplacian_variance = self.blur_analyzer.analyze_blur(image)
-        
-        # Analyze noise
-        noise_score, noise_level, noise_variance = self.noise_analyzer.analyze_noise(image)
-        
-        # Analyze contrast
-        contrast_score, contrast_level, contrast_rms, histogram_spread = self.contrast_analyzer.analyze_contrast(image)
-        
-        # Analyze resolution
-        resolution_score, resolution_level, effective_resolution, dpi_estimate = self.resolution_analyzer.analyze_resolution(image)
-        
-        # Analyze brightness
-        brightness_score, brightness_level, mean_brightness, brightness_uniformity = self.brightness_analyzer.analyze_brightness(image)
-        
-        # Calculate overall quality score
-        overall_score = (
-            self.weight_blur * blur_score +
-            self.weight_noise * noise_score +
-            self.weight_contrast * contrast_score +
-            self.weight_resolution * resolution_score +
-            self.weight_brightness * brightness_score
-        )
-        
-        # Determine overall quality level
-        if overall_score >= 0.9:
-            overall_level = QualityLevel.EXCELLENT
-        elif overall_score >= 0.75:
-            overall_level = QualityLevel.GOOD
-        elif overall_score >= 0.6:
-            overall_level = QualityLevel.FAIR
-        elif overall_score >= 0.4:
-            overall_level = QualityLevel.POOR
-        else:
-            overall_level = QualityLevel.VERY_POOR
-        
-        # Calculate analysis time
-        end_time = cv2.getTickCount()
-        analysis_time = (end_time - start_time) / cv2.getTickFrequency()
-        
-        # Get image metadata
-        height, width = image.shape[:2]
-        color_channels = image.shape[2] if len(image.shape) == 3 else 1
-        
-        # Create comprehensive quality metrics
-        quality_metrics = QualityMetrics(
-            blur_score=blur_score,
-            blur_level=blur_level,
-            laplacian_variance=laplacian_variance,
-            noise_score=noise_score,
-            noise_level=noise_level,
-            noise_variance=noise_variance,
-            contrast_score=contrast_score,
-            contrast_level=contrast_level,
-            contrast_rms=contrast_rms,
-            histogram_spread=histogram_spread,
-            resolution_score=resolution_score,
-            resolution_level=resolution_level,
-            effective_resolution=effective_resolution,
-            dpi_estimate=dpi_estimate,
-            brightness_score=brightness_score,
-            brightness_level=brightness_level,
-            mean_brightness=mean_brightness,
-            brightness_uniformity=brightness_uniformity,
-            overall_score=overall_score,
-            overall_level=overall_level,
-            image_dimensions=(width, height),
-            color_channels=color_channels,
-            analysis_time=analysis_time
-        )
-        
-        self.logger.info(
-            f"Quality analysis completed: overall={overall_level.value} ({overall_score:.3f}), "
-            f"blur={blur_level.value} ({blur_score:.3f}), "
-            f"noise={noise_level.value} ({noise_score:.3f}), "
-            f"contrast={contrast_level.value} ({contrast_score:.3f}), "
-            f"resolution={resolution_level.value} ({resolution_score:.3f}), "
-            f"brightness={brightness_level.value} ({brightness_score:.3f}), "
-            f"time={analysis_time:.3f}s"
-        )
-        
-        return quality_metrics
+        try:
+            # Ensure image is in correct format
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image.copy()
+            
+            metrics = QualityMetrics()
+            
+            # Core quality assessments
+            metrics.blur_score = self._assess_blur(gray)
+            metrics.noise_score = self._assess_noise(gray)
+            metrics.contrast_score = self._assess_contrast(gray)
+            metrics.resolution_score = self._assess_resolution(gray)
+            metrics.lighting_score = self._assess_lighting(gray)
+            
+            # Geometric assessments
+            metrics.skew_angle = self._detect_skew(gray)
+            metrics.text_orientation = self._detect_text_orientation(gray)
+            
+            # Overall scores
+            metrics.overall_score = self._calculate_overall_score(metrics)
+            metrics.ocr_readiness = self._calculate_ocr_readiness(metrics)
+            
+            # Issue detection and recommendations (more conservative)
+            metrics.issues = self._detect_issues_conservative(metrics)
+            metrics.recommendations = self._generate_recommendations_conservative(metrics)
+            metrics.enhancement_params = self._calculate_enhancement_params_conservative(metrics)
+            
+            self.logger.debug(
+                f"Quality analysis: Overall={metrics.overall_score:.3f}, "
+                f"OCR Readiness={metrics.ocr_readiness:.3f}, "
+                f"Issues={len(metrics.issues)}"
+            )
+            
+            return metrics
+            
+        except Exception as e:
+            self.logger.error(f"Quality analysis failed: {e}")
+            return QualityMetrics(overall_score=0.5, ocr_readiness=0.5)
     
-    def get_analysis_config(self) -> Dict[str, Any]:
+    def _assess_blur(self, gray: np.ndarray) -> float:
         """
-        Get current analysis configuration.
+        Assess image blur using Laplacian variance method.
         
+        Args:
+            gray: Grayscale image
+            
         Returns:
-            Dict[str, Any]: Analysis configuration
+            Blur score (0.0 = very blurry, 1.0 = sharp)
         """
-        return {
-            'weights': {
-                'blur': self.weight_blur,
-                'noise': self.weight_noise,
-                'contrast': self.weight_contrast,
-                'resolution': self.weight_resolution,
-                'brightness': self.weight_brightness
-            },
-            'thresholds': {
-                'blur_excellent': self.blur_analyzer.laplacian_threshold_excellent,
-                'noise_excellent': self.noise_analyzer.noise_threshold_excellent,
-                'contrast_excellent': self.contrast_analyzer.rms_excellent,
-                'resolution_min_width': self.resolution_analyzer.min_width_excellent,
-                'brightness_optimal_min': self.brightness_analyzer.optimal_brightness_min
-            }
+        try:
+            # Compute Laplacian variance
+            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            variance = laplacian.var()
+            
+            # Also compute gradient magnitude for additional validation
+            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2).mean()
+            
+            # Combine both metrics (more lenient thresholds)
+            blur_score = min(variance / self.thresholds['blur_threshold'], 1.0)
+            gradient_score = min(gradient_magnitude / 30.0, 1.0)  # Lower threshold
+            
+            # Weighted combination
+            final_score = (blur_score * 0.7 + gradient_score * 0.3)
+            
+            return min(final_score, 1.0)
+            
+        except Exception as e:
+            self.logger.warning(f"Blur assessment failed: {e}")
+            return 0.5
+    
+    def _assess_noise(self, gray: np.ndarray) -> float:
+        """
+        Assess image noise level.
+        
+        Args:
+            gray: Grayscale image
+            
+        Returns:
+            Noise score (0.0 = very noisy, 1.0 = clean)
+        """
+        try:
+            # Method 1: Standard deviation of Laplacian
+            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            noise_level_1 = laplacian.std()
+            
+            # Method 2: Difference from median filtered image
+            median_filtered = cv2.medianBlur(gray, 5)
+            noise_level_2 = np.std(gray.astype(np.float32) - median_filtered.astype(np.float32))
+            
+            # Method 3: High frequency content analysis
+            kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]])
+            high_freq = cv2.filter2D(gray, cv2.CV_64F, kernel)
+            noise_level_3 = np.std(high_freq)
+            
+            # Combine methods
+            combined_noise = (noise_level_1 * 0.4 + noise_level_2 * 0.4 + noise_level_3 * 0.2)
+            
+            # More lenient normalization
+            max_expected_noise = gray.std() * 0.8  # Higher tolerance
+            noise_ratio = min(combined_noise / max_expected_noise, 2.0)
+            
+            # Convert to quality score (more lenient)
+            noise_score = max(0.0, 1.0 - (noise_ratio * 0.3))  # Reduced penalty
+            
+            return noise_score
+            
+        except Exception as e:
+            self.logger.warning(f"Noise assessment failed: {e}")
+            return 0.5
+    
+    def _assess_contrast(self, gray: np.ndarray) -> float:
+        """
+        Assess image contrast quality.
+        
+        Args:
+            gray: Grayscale image
+            
+        Returns:
+            Contrast score (0.0 = poor contrast, 1.0 = excellent contrast)
+        """
+        try:
+            # Method 1: RMS contrast
+            mean_val = gray.mean()
+            if mean_val > 0:
+                rms_contrast = gray.std() / mean_val
+            else:
+                rms_contrast = 0.0
+            
+            # Method 2: Michelson contrast
+            max_val, min_val = gray.max(), gray.min()
+            
+            # Convert to safe float types BEFORE any operations to prevent overflow
+            max_val_safe = np.float64(max_val)
+            min_val_safe = np.float64(min_val)
+            
+            # Now check conditions using safe values
+            if max_val_safe > 0 and min_val_safe >= 0:
+                denominator = max_val_safe + min_val_safe
+                if denominator > 0:
+                    michelson_contrast = (max_val_safe - min_val_safe) / denominator
+                else:
+                    michelson_contrast = 0.0
+            else:
+                michelson_contrast = 0.0
+            
+            # Method 3: Histogram analysis
+            hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+            hist_spread = np.sum(hist > np.max(hist) * 0.01)  # Count significant bins
+            spread_score = min(hist_spread / 128.0, 1.0)  # Normalize
+            
+            # Combine methods (more lenient thresholds)
+            contrast_score = (
+                min(rms_contrast / 0.2, 1.0) * 0.4 +  # Lower threshold
+                michelson_contrast * 0.4 +
+                spread_score * 0.2
+            )
+            
+            return min(contrast_score, 1.0)
+            
+        except Exception as e:
+            self.logger.warning(f"Contrast assessment failed: {e}")
+            return 0.5
+    
+    def _assess_resolution(self, gray: np.ndarray) -> float:
+        """
+        Assess image resolution adequacy for OCR.
+        
+        Args:
+            gray: Grayscale image
+            
+        Returns:
+            Resolution score (0.0 = too low, 1.0 = adequate/high)
+        """
+        try:
+            height, width = gray.shape
+            total_pixels = height * width
+            
+            # More lenient resolution assessment
+            # Use edge detection to find potential text regions
+            edges = cv2.Canny(gray, 50, 150)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                # Analyze contour heights as proxy for text size
+                heights = []
+                for contour in contours:
+                    _, _, _, h = cv2.boundingRect(contour)
+                    if 3 < h < height // 4:  # More lenient filtering
+                        heights.append(h)
+                
+                if heights:
+                    median_text_height = np.median(heights)
+                    # More lenient - 15 pixels is acceptable
+                    resolution_score = min(median_text_height / 15.0, 1.0)
+                else:
+                    # Fallback: assume reasonable text size
+                    estimated_text_height = height / 20
+                    resolution_score = min(estimated_text_height / 12.0, 1.0)  # More lenient
+            else:
+                # No edges found - more lenient pixel count requirement
+                min_pixels = 200 * 150  # Lower requirement
+                resolution_score = min(total_pixels / min_pixels, 1.0)
+            
+            # Bonus for higher resolutions
+            if total_pixels > 800000:  # > 0.8MP (lower threshold)
+                resolution_score = min(resolution_score * 1.1, 1.0)
+            
+            return resolution_score
+            
+        except Exception as e:
+            self.logger.warning(f"Resolution assessment failed: {e}")
+            return 0.5
+    
+    def _assess_lighting(self, gray: np.ndarray) -> float:
+        """
+        Assess lighting uniformity and quality.
+        
+        Args:
+            gray: Grayscale image
+            
+        Returns:
+            Lighting score (0.0 = poor lighting, 1.0 = uniform lighting)
+        """
+        try:
+            # Method 1: Local variance analysis
+            h, w = gray.shape
+            block_size = min(h, w) // 8
+            
+            if block_size < 10:
+                return 0.8  # More lenient for small images
+            
+            variances = []
+            means = []
+            
+            for y in range(0, h - block_size, block_size):
+                for x in range(0, w - block_size, block_size):
+                    block = gray[y:y+block_size, x:x+block_size]
+                    variances.append(np.var(block))
+                    means.append(np.mean(block))
+            
+            # More lenient assessment
+            mean_variance = np.mean(variances)
+            variance_std = np.std(variances)
+            mean_std = np.std(means)
+            
+            # Lighting uniformity score (more tolerant)
+            if mean_variance > 0:
+                uniformity_score = 1.0 - min(variance_std / mean_variance, 1.0) * 0.7  # Reduced penalty
+            else:
+                uniformity_score = 1.0
+            
+            # Mean intensity distribution score (more tolerant)
+            mean_distribution_score = 1.0 - min(mean_std / 150.0, 1.0)  # Higher threshold
+            
+            # Method 2: Gradient-based assessment (more lenient)
+            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=5)
+            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=5)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            
+            # Look for gradual lighting changes
+            kernel = np.ones((10, 10), np.float32) / 100
+            smoothed_grad = cv2.filter2D(gradient_magnitude, -1, kernel)
+            lighting_gradient_score = 1.0 - min(np.mean(smoothed_grad) / 70.0, 1.0)  # Higher threshold
+            
+            # Combine scores (more weight on being lenient)
+            lighting_score = (
+                uniformity_score * 0.3 +      # Reduced weight
+                mean_distribution_score * 0.3 +
+                lighting_gradient_score * 0.4  # Increased weight on gradients
+            )
+            
+            return min(lighting_score, 1.0)
+            
+        except Exception as e:
+            self.logger.warning(f"Lighting assessment failed: {e}")
+            return 0.6  # More lenient default
+    
+    def _detect_skew(self, gray: np.ndarray) -> float:
+        """
+        Detect text skew angle using Hough line detection.
+        
+        Args:
+            gray: Grayscale image
+            
+        Returns:
+            Skew angle in degrees (-45 to +45)
+        """
+        try:
+            # Edge detection
+            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+            
+            # Hough line detection
+            lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=100)
+            
+            if lines is None or len(lines) == 0:
+                return 0.0
+            
+            # Analyze line angles
+            angles = []
+            for line in lines:
+                rho, theta = line[0]
+                angle = theta * 180.0 / np.pi - 90.0
+                
+                # Focus on near-horizontal lines (likely text lines)
+                if -45 < angle < 45:
+                    angles.append(angle)
+            
+            if not angles:
+                return 0.0
+            
+            # Use median angle to reduce outlier impact
+            skew_angle = np.median(angles)
+            
+            # Validate reasonable range
+            return max(-45.0, min(45.0, skew_angle))
+            
+        except Exception as e:
+            self.logger.warning(f"Skew detection failed: {e}")
+            return 0.0
+    
+    def _detect_text_orientation(self, gray: np.ndarray) -> float:
+        """
+        Detect overall text orientation.
+        
+        Args:
+            gray: Grayscale image
+            
+        Returns:
+            Text orientation in degrees (0, 90, 180, 270)
+        """
+        try:
+            # Use morphological operations to find text regions
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 2))
+            horizontal = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 20))
+            vertical = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+            
+            # Count horizontal vs vertical features
+            h_score = np.sum(horizontal > 0)
+            v_score = np.sum(vertical > 0)
+            
+            # Determine orientation
+            if h_score > v_score * 1.5:
+                return 0.0  # Horizontal text
+            elif v_score > h_score * 1.5:
+                return 90.0  # Vertical text
+            else:
+                return 0.0  # Default to horizontal
+                
+        except Exception as e:
+            self.logger.warning(f"Text orientation detection failed: {e}")
+            return 0.0
+    
+    def _calculate_overall_score(self, metrics: QualityMetrics) -> float:
+        """Calculate weighted overall quality score."""
+        weights = {
+            'blur': 0.25,
+            'noise': 0.15,      # Reduced weight
+            'contrast': 0.25,
+            'resolution': 0.25, # Increased weight
+            'lighting': 0.10
         }
-
-
-# Utility functions for external use
-def create_quality_analyzer(config: Optional[OCRConfig] = None) -> QualityAnalyzer:
-    """
-    Create a quality analyzer instance.
-    
-    Args:
-        config (Optional[OCRConfig]): OCR configuration
         
-    Returns:
-        QualityAnalyzer: Configured quality analyzer
-    """
-    if config is None:
-        from ..config import OCRConfig
-        config = OCRConfig()
-    
-    return QualityAnalyzer(config)
-
-
-def get_quality_level_description(level: QualityLevel) -> str:
-    """
-    Get human-readable description of quality level.
-    
-    Args:
-        level (QualityLevel): Quality level enum
+        overall = (
+            metrics.blur_score * weights['blur'] +
+            metrics.noise_score * weights['noise'] +
+            metrics.contrast_score * weights['contrast'] +
+            metrics.resolution_score * weights['resolution'] +
+            metrics.lighting_score * weights['lighting']
+        )
         
-    Returns:
-        str: Description of the quality level
-    """
-    descriptions = {
-        QualityLevel.EXCELLENT: "Excellent quality - optimal for OCR",
-        QualityLevel.GOOD: "Good quality - suitable for OCR with minimal preprocessing",
-        QualityLevel.FAIR: "Fair quality - may benefit from preprocessing",
-        QualityLevel.POOR: "Poor quality - requires significant preprocessing",
-        QualityLevel.VERY_POOR: "Very poor quality - may not be suitable for OCR"
-    }
+        return min(overall, 1.0)
     
-    return descriptions.get(level, "Unknown quality level")
-
-
-def analyze_quality_trends(quality_history: List[QualityMetrics]) -> Dict[str, Any]:
-    """
-    Analyze trends in quality metrics over multiple images.
-    
-    Args:
-        quality_history (List[QualityMetrics]): List of quality metrics from multiple images
+    def _calculate_ocr_readiness(self, metrics: QualityMetrics) -> float:
+        """Calculate OCR-specific readiness score."""
+        # OCR readiness prioritizes sharpness, contrast, and resolution
+        ocr_weights = {
+            'blur': 0.30,      # Slightly reduced
+            'contrast': 0.30,  
+            'resolution': 0.25, # Increased
+            'noise': 0.10,     
+            'lighting': 0.05   
+        }
         
-    Returns:
-        Dict[str, Any]: Quality trend analysis
-    """
-    if not quality_history:
-        return {}
+        readiness = (
+            metrics.blur_score * ocr_weights['blur'] +
+            metrics.contrast_score * ocr_weights['contrast'] +
+            metrics.resolution_score * ocr_weights['resolution'] +
+            metrics.noise_score * ocr_weights['noise'] +
+            metrics.lighting_score * ocr_weights['lighting']
+        )
+        
+        # Reduced penalty for skew
+        skew_penalty = min(abs(metrics.skew_angle) / self.thresholds['skew_threshold'], 1.0)
+        readiness *= (1.0 - skew_penalty * 0.1)  # Reduced penalty
+        
+        return min(readiness, 1.0)
     
-    # Extract scores for trend analysis
-    overall_scores = [q.overall_score for q in quality_history]
-    blur_scores = [q.blur_score for q in quality_history]
-    noise_scores = [q.noise_score for q in quality_history]
+    def _detect_issues_conservative(self, metrics: QualityMetrics) -> List[QualityIssue]:
+        """Detect specific quality issues based on metrics (more conservative)."""
+        issues = []
+        
+        # Much more conservative thresholds
+        if metrics.blur_score < 0.4:  # Was 0.6
+            issues.append(QualityIssue.BLUR)
+        
+        if metrics.noise_score < 0.3:  # Was 0.6
+            issues.append(QualityIssue.NOISE)
+        
+        if metrics.contrast_score < 0.3:  # Was 0.5
+            issues.append(QualityIssue.LOW_CONTRAST)
+        
+        if metrics.resolution_score < 0.3:  # Was 0.5
+            issues.append(QualityIssue.POOR_RESOLUTION)
+        
+        if abs(metrics.skew_angle) > self.thresholds['skew_threshold']:  # Now 3.0
+            issues.append(QualityIssue.SKEW)
+        
+        if metrics.lighting_score < 0.3:  # Was 0.5
+            issues.append(QualityIssue.UNEVEN_LIGHTING)
+        
+        return issues
     
-    return {
-        'count': len(quality_history),
-        'overall_mean': np.mean(overall_scores),
-        'overall_std': np.std(overall_scores),
-        'blur_mean': np.mean(blur_scores),
-        'noise_mean': np.mean(noise_scores),
-        'trend_improving': overall_scores[-1] > overall_scores[0] if len(overall_scores) > 1 else None
-    }
-
-__all__ = [
-    'QualityLevel', 'QualityMetrics', 'BlurAnalyzer', 'NoiseAnalyzer', 
-    'ContrastAnalyzer', 'ResolutionAnalyzer', 'BrightnessAnalyzer', 'QualityAnalyzer',
-    'create_quality_analyzer', 'get_quality_level_description', 'analyze_quality_trends'
-]
+    def _generate_recommendations_conservative(self, metrics: QualityMetrics) -> List[str]:
+        """Generate enhancement recommendations (more conservative)."""
+        recommendations = []
+        
+        for issue in metrics.issues:
+            if issue == QualityIssue.BLUR:
+                recommendations.append("Apply sharpening filter")
+            elif issue == QualityIssue.NOISE:
+                recommendations.append("Apply noise reduction (median filter)")
+            elif issue == QualityIssue.LOW_CONTRAST:
+                recommendations.append("Enhance contrast (CLAHE or histogram equalization)")
+            elif issue == QualityIssue.POOR_RESOLUTION:
+                recommendations.append("Consider image upscaling")
+            elif issue == QualityIssue.SKEW:
+                recommendations.append(f"Correct skew (rotate by {-metrics.skew_angle:.1f}°)")
+            elif issue == QualityIssue.UNEVEN_LIGHTING:
+                recommendations.append("Apply illumination correction")
+        
+        if not recommendations:
+            recommendations.append("Image quality is good for OCR")
+        
+        return recommendations
+    
+    def _calculate_enhancement_params_conservative(self, metrics: QualityMetrics) -> Dict[str, float]:
+        """Calculate specific parameters for adaptive enhancement (more conservative)."""
+        params = {}
+        
+        # Much more conservative sharpening parameters
+        if metrics.blur_score < 0.5:  # Higher threshold
+            sharpening_strength = (0.5 - metrics.blur_score) * 1.0  # Reduced multiplier
+            params['sharpen_strength'] = min(sharpening_strength, 0.5)  # Lower cap
+        
+        # More conservative noise reduction parameters  
+        if metrics.noise_score < 0.4:  # Higher threshold
+            noise_reduction_strength = (0.4 - metrics.noise_score) * 1.0
+            params['noise_reduction_strength'] = min(noise_reduction_strength, 0.5)
+        
+        # More conservative contrast enhancement parameters
+        if metrics.contrast_score < 0.4:  # Higher threshold
+            contrast_enhancement = (0.4 - metrics.contrast_score) * 1.0
+            params['contrast_enhancement'] = min(contrast_enhancement, 0.5)
+        
+        # Less aggressive skew correction
+        if abs(metrics.skew_angle) > 2.0:  # Higher threshold
+            params['rotation_angle'] = -metrics.skew_angle
+        
+        # Much more conservative illumination correction
+        if metrics.lighting_score < 0.3:  # Much lower threshold
+            params['illumination_correction'] = True
+        
+        return params
