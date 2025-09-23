@@ -1,134 +1,61 @@
-# data/configs/ocr_config.yaml - FIXED VERSION
-profile: balanced
+# Main OCR System Configuration
+system:
+  name: "Advanced OCR System"
+  version: "2.0.0"
+  debug: false
 
+# Engine Configuration
 engines:
   tesseract:
     enabled: true
     priority: 3
-    confidence_threshold: 0.6
-    timeout: 15.0
-    custom_params:
-      psm: 6
-      oem: 3
+    languages: ["eng"]
+    config: "--oem 1 --psm 6"
+    
   paddleocr:
     enabled: true
-    priority: 2
-    confidence_threshold: 0.7
-    timeout: 20.0
-    gpu_enabled: true
-    custom_params:
-      use_angle_cls: true
-      use_space_char: true
+    priority: 1
+    languages: ["en"]
+    use_gpu: true
+    
   easyocr:
     enabled: true
-    priority: 4
-    confidence_threshold: 0.6
-    timeout: 25.0
-    gpu_enabled: true
-    custom_params:
-      width_ths: 0.7
-      height_ths: 0.7
+    priority: 2
+    languages: ["en"]
+    use_gpu: true
+    
   trocr:
     enabled: true
-    priority: 1
-    confidence_threshold: 0.5
-    timeout: 30.0
-    gpu_enabled: true
-    batch_size: 4
-    custom_params:
-      max_image_size: 800
-      use_cache: true
+    priority: 4
+    model: "microsoft/trocr-base-printed"
 
-# FIXED: Proper nested structure for text detection
-text_detection:
-  method: craft
-  fallback_enabled: true
-  min_regions: 15
-  max_regions: 80
-  target_regions: 50
-  min_region_area: 150
-  max_region_area: 30000
-  nms_threshold: 0.3
-  
-  # CRAFT-specific settings (properly nested)
-  craft:
-    text_threshold: 0.7        # Was: text_detection_threshold
-    link_threshold: 0.4
-    low_text: 0.4
-    canvas_size: 640
-    mag_ratio: 1.0
-    multiscale: true
-    scales: [0.8, 1.0, 1.2]
-  
-  # Fast detector fallback settings
-  fast:
-    min_area: 200
-    max_area: 25000
+# Engine Manager Settings
+engine_manager:
+  max_workers: 3
+  timeout: 300
+  enable_parallel: true
+  selection_strategy: "adaptive"
 
-preprocessing:
-  image_enhancement_enabled: true
-  max_image_size: 2048
-  quality_analysis_enabled: true
-  content_classification_enabled: true
-  preprocessing_timeout: 10.0
-  blur_correction_enabled: true
-  noise_reduction_enabled: true
-  contrast_enhancement_enabled: true
-  rotation_correction_enabled: true
-  merge_nearby_regions: true
-  region_padding: 5
+# Quality Analyzer Settings
+quality_analyzer:
+  min_quality_score: 0.5
+  enable_enhancement: true
 
-postprocessing:
-  text_cleaning_enabled: true
-  spell_correction_enabled: false
-  result_fusion_enabled: true
-  layout_reconstruction_enabled: true
-  confidence_analysis_enabled: true
-  min_word_confidence: 0.3
-  fusion_strategy: confidence_weighted
-  remove_extra_whitespace: true
-  normalize_unicode: true
-  remove_ocr_artifacts: true
-  preserve_formatting: true
-  preserve_line_breaks: true
-  preserve_paragraphs: true
-  reading_order_analysis: true
+# Image Enhancer Settings
+image_enhancer:
+  auto_enhance: true
+  contrast_enhancement: true
+  noise_reduction: true
 
-performance:
-  max_processing_time: 30.0     # Increased for complex images
-  memory_limit_mb: 2048
-  cpu_threads: 4
-  gpu_memory_limit_mb: 1024
-  enable_model_caching: true
-  enable_parallel_engines: true
-  processing_priority: normal
-  engine_selection_timeout: 1.0  # Increased
-  engine_initialization_timeout: 5.0  # Increased
-  result_fusion_timeout: 2.0     # Increased
-  cleanup_after_processing: true
-  force_garbage_collection: false
+# Text Detector Settings
+text_detector:
+  method: "craft"
+  confidence_threshold: 0.7
+  min_text_size: 10
 
-# FIXED: Added models section for proper model configuration
-models:
-  craft_mlt_25k:
-    framework: pytorch
-    version: any
-    device: auto
-  tesseract_model:
-    framework: tesseract
-    version: any
-  paddleocr_model:
-    framework: pytorch
-    version: any
-  easyocr_model:
-    framework: pytorch  
-    version: any
-  trocr:
-    framework: transformers
-    version: any
-    model_class: VisionEncoderDecoderModel
-
-metadata:
-  version: "1.0.0"
-  created: "2024-01-01"
-  description: "Fixed OCR configuration with proper text detection settings"
+# Logging Configuration
+logging:
+  level: "INFO"
+  file: "logs/ocr_system.log"
+  max_size: "10MB"
+  backup_count: 5

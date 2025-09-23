@@ -1,0 +1,53 @@
+# Preprocessing Configuration
+# Optimized parameters for form documents
+
+text_detection:
+  method: "mser"
+  confidence_threshold: 0.75
+
+  traditional:
+    min_text_size: 25
+    max_text_size: 150
+    
+    mser:
+      min_area: 300
+      max_area: 5000
+      max_variation: 0.12
+      min_diversity: 0.6
+      max_evolution: 50
+      area_threshold: 3.0
+      min_margin: 0.02
+
+  postprocessing:
+    min_aspect_ratio: 0.25
+    max_aspect_ratio: 12.0
+    min_width: 25
+    min_height: 15
+    overlap_threshold: 0.5
+
+# Boundary detection
+boundary_detection:
+  enabled: true
+  min_document_area_ratio: 0.15
+  max_document_area_ratio: 0.85
+  gaussian_blur_size: 5
+  canny_low: 50
+  canny_high: 150
+
+# Image enhancement
+image_enhancement:
+  enabled: true
+  auto_adjust: true
+  contrast_enhancement:
+    enabled: true
+    clip_limit: 2.0
+  noise_reduction:
+    enabled: true
+    filter_size: 5
+
+# Quality analysis
+quality_analysis:
+  enabled: true
+  min_quality_score: 0.5
+  sharpness_threshold: 100
+  contrast_threshold: 50
