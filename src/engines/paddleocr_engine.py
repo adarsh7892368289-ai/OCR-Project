@@ -47,35 +47,23 @@ class PaddleOCREngine(BaseOCREngine):
         self.supports_structure_analysis = True
         
     def initialize(self) -> bool:
-        """Initialize PaddleOCR with robust error handling"""
+        """Simple PaddleOCR initialization"""
         try:
-            self.logger.info(f"Initializing PaddleOCR with languages: {self.languages}")
-            
-            # Import PaddleOCR
             from paddleocr import PaddleOCR
             
-            # Initialize with modern configuration
+            # SIMPLE: Most basic initialization that usually works
             self.ocr = PaddleOCR(
-                use_angle_cls=True,  # Enable angle classification
-                lang='en',           # Default language
+                use_angle_cls=True,
+                lang='en',
             )
             
-            self.supported_languages = self.get_supported_languages()
             self.is_initialized = True
             self.model_loaded = True
-            
             self.logger.info("PaddleOCR initialized successfully")
             return True
             
-        except ImportError as e:
-            self.logger.error(f"PaddleOCR not installed: {e}")
-            self.logger.info("Install with: pip install paddlepaddle paddleocr")
-            return False
         except Exception as e:
             self.logger.error(f"PaddleOCR initialization failed: {e}")
-            self.ocr = None
-            self.is_initialized = False
-            self.model_loaded = False
             return False
             
     def get_supported_languages(self) -> List[str]:
@@ -89,14 +77,7 @@ class PaddleOCREngine(BaseOCREngine):
         
     def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        Process preprocessed image with PaddleOCR - FIXED: Returns single OCRResult with preserved layout
-        
-        Args:
-            preprocessed_image: Image from YOUR preprocessing pipeline
-            **kwargs: Additional parameters
-            
-        Returns:
-            OCRResult: Single result compatible with YOUR base engine
+        Process preprocessed image with PaddleOCR - FIXED for new PaddleOCR format
         """
         start_time = time.time()
         
@@ -110,34 +91,105 @@ class PaddleOCREngine(BaseOCREngine):
             if not self.validate_image(preprocessed_image):
                 raise ValueError("Invalid preprocessed image")
             
-            # Convert preprocessed image to PaddleOCR format
+            # Convert image for PaddleOCR
             paddle_image = self._prepare_for_paddleocr(preprocessed_image)
             
-            # Extract OCR data with angle classification
-            paddle_results = self.ocr.ocr(paddle_image, cls=True)
+            # Call PaddleOCR
+            try:
+                results = self.ocr.ocr(paddle_image, cls=True)
+            except Exception as e1:
+                try:
+                    results = self.ocr.ocr(paddle_image)
+                except Exception as e2:
+                    self.logger.error(f"Both PaddleOCR calls failed: {e1}, {e2}")
+                    raise e2
             
-            # FIXED: Convert to single OCRResult with layout preservation
-            result = self._combine_ocr_results_with_layout(paddle_results)
+            # FIXED: Handle the new PaddleOCR result format
+            if results and len(results) > 0 and isinstance(results[0], dict):
+                # New format - results is list of dicts with structured data
+                result_dict = results[0]  # First page
+                
+                # Extract text and scores from the structured format
+                rec_texts = result_dict.get('rec_texts', [])
+                rec_scores = result_dict.get('rec_scores', [])
+                rec_polys = result_dict.get('rec_polys', [])
+                
+                self.logger.info(f"New format: Found {len(rec_texts)} texts, {len(rec_scores)} scores, {len(rec_polys)} polys")
+                
+                # Combine all text with proper spacing and create regions
+                full_text = ""
+                all_confidences = []
+                regions = []
+                
+                for i, text in enumerate(rec_texts):
+                    if i < len(rec_scores):
+                        confidence = float(rec_scores[i])
+                    else:
+                        confidence = 0.5
+                    
+                    # Filter low confidence
+                    if confidence > 0.1 and text.strip():
+                        full_text += text.strip() + " "
+                        all_confidences.append(confidence)
+                        
+                        # Create region if we have polygon data
+                        if i < len(rec_polys):
+                            poly = rec_polys[i]
+                            # Convert polygon to bounding box
+                            x_coords = [p[0] for p in poly]
+                            y_coords = [p[1] for p in poly]
+                            
+                            bbox = BoundingBox(
+                                x=int(min(x_coords)),
+                                y=int(min(y_coords)),
+                                width=int(max(x_coords) - min(x_coords)),
+                                height=int(max(y_coords) - min(y_coords)),
+                                confidence=confidence
+                            )
+                            
+                            region = TextRegion(
+                                text=text.strip(),
+                                confidence=confidence,
+                                bbox=bbox,
+                                text_type=TextType.PRINTED
+                            )
+                            regions.append(region)
             
-            # Set processing time and engine info
+            else:
+                # Fallback for other formats or empty results
+                self.logger.warning("Unexpected result format or empty results")
+                full_text = ""
+                all_confidences = []
+                regions = []
+            
+            # Clean up and create final result
+            full_text = full_text.strip()
+            overall_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
             processing_time = time.time() - start_time
-            result.processing_time = processing_time
-            result.engine_name = self.name
             
-            # Update stats
-            self.processing_stats['total_processed'] += 1
-            self.processing_stats['total_time'] += processing_time
-            if result.text.strip():
-                self.processing_stats['successful_extractions'] += 1
+            result = OCRResult(
+                text=full_text,
+                confidence=overall_confidence,
+                processing_time=processing_time,
+                engine_name=self.name,
+                regions=regions,
+                metadata={
+                    "detection_count": len(all_confidences),
+                    "method": "fixed_paddleocr_new_format"
+                }
+            )
+            
+            if full_text:
+                self.logger.info(f"SUCCESS: PaddleOCR extracted {len(full_text)} chars (conf: {overall_confidence:.3f}) in {processing_time:.2f}s")
+            else:
+                self.logger.warning(f"NO TEXT: PaddleOCR found no text in {processing_time:.2f}s")
             
             return result
             
         except Exception as e:
-            self.logger.error(f"PaddleOCR extraction failed: {e}")
             processing_time = time.time() - start_time
-            self.processing_stats['errors'] += 1
+            self.logger.error(f"PaddleOCR failed: {e}")
             
-            # Return empty result instead of raising
             return OCRResult(
                 text="",
                 confidence=0.0,
@@ -145,7 +197,6 @@ class PaddleOCREngine(BaseOCREngine):
                 engine_name=self.name,
                 metadata={"error": str(e)}
             )
-    
     def _prepare_for_paddleocr(self, image: np.ndarray) -> np.ndarray:
         """
         Minimal conversion for PaddleOCR compatibility
@@ -179,49 +230,58 @@ class PaddleOCREngine(BaseOCREngine):
                 metadata={"detection_count": 0}
             )
         
-        # Process each detection
+        # Process each detection - FIXED unpacking
         for detection in paddle_results[0]:
-            if len(detection) >= 2:
-                bbox_points, text_info = detection
-                
-                # Extract text and confidence
-                text = text_info[0] if text_info and len(text_info) > 0 else ""
-                confidence = text_info[1] if text_info and len(text_info) > 1 else 0.0
-                
-                # Filter very low confidence results
-                if not text.strip() or confidence <= 0.1:
-                    continue
-                
-                # Convert polygon to bounding box
-                x, y, w, h = self._polygon_to_bbox(bbox_points)
-                bbox = BoundingBox(
-                    x=x, y=y, width=w, height=h, 
-                    confidence=confidence,
-                    text_type=TextType.PRINTED
-                )
-                
-                # Create text region with spatial information
-                region = TextRegion(
-                    text=text.strip(),
-                    confidence=confidence,
-                    bbox=bbox,
-                    text_type=TextType.PRINTED,
-                    language="en"
-                )
-                
-                regions.append(region)
-                detection_count += 1
+            try:
+                # FIXED: Handle different PaddleOCR result formats
+                if isinstance(detection, (list, tuple)) and len(detection) >= 2:
+                    # Standard format: [bbox_points, (text, confidence)]
+                    bbox_points = detection[0]
+                    text_info = detection[1]
+                    
+                    # Extract text and confidence safely
+                    if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                        text = str(text_info[0]) if text_info[0] else ""
+                        confidence = float(text_info[1]) if text_info[1] else 0.0
+                    else:
+                        # Fallback if text_info format is different
+                        text = str(text_info) if text_info else ""
+                        confidence = 0.5  # Default confidence
+                    
+                    # Filter very low confidence results
+                    if not text.strip() or confidence <= 0.1:
+                        continue
+                    
+                    # Convert polygon to bounding box
+                    x, y, w, h = self._polygon_to_bbox(bbox_points)
+                    bbox = BoundingBox(
+                        x=x, y=y, width=w, height=h, 
+                        confidence=confidence,
+                        text_type=TextType.PRINTED
+                    )
+                    
+                    # Create text region with spatial information
+                    region = TextRegion(
+                        text=text.strip(),
+                        confidence=confidence,
+                        bbox=bbox,
+                        text_type=TextType.PRINTED,
+                        language="en"
+                    )
+                    
+                    regions.append(region)
+                    detection_count += 1
+                    
+            except (ValueError, IndexError, TypeError) as e:
+                # Log the problematic detection for debugging
+                self.logger.warning(f"Skipping problematic detection: {detection}, error: {e}")
+                continue
         
-        # FIXED: Reconstruct text with proper layout based on spatial positioning
+        # Rest of your method stays the same...
         formatted_text = self._reconstruct_document_layout(regions)
-        
-        # Calculate overall confidence
         overall_confidence = sum(r.confidence for r in regions) / len(regions) if regions else 0.0
-        
-        # Create overall bounding box from all regions
         overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
         
-        # Return single OCRResult with preserved layout
         return OCRResult(
             text=formatted_text,
             confidence=overall_confidence,
