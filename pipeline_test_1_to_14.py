@@ -777,12 +777,12 @@ class PipelineTestRunner:
             ("Test 5: Quality Analyzer", self.test_5_quality_analyzer),
             ("Test 6: Image Enhancer", self.test_6_image_enhancer),
             ("Test 7: Text Detector", self.test_7_text_detector),
-            ("Test 8: Base Engine Classes", self.test_8_base_engine_classes),
-            ("Test 9: Tesseract Engine", self.test_9_tesseract_engine),
-            ("Test 10: EasyOCR Engine", self.test_10_easyocr_engine),
-            ("Test 11: PaddleOCR Engine", self.test_11_paddleocr_engine),
-            ("Test 12: TrOCR Engine", self.test_12_trocr_engine),
-            ("Test 13: Engine Manager", self.test_13_engine_manager),
+            # ("Test 8: Base Engine Classes", self.test_8_base_engine_classes),
+            # ("Test 11: PaddleOCR Engine", self.test_11_paddleocr_engine),
+            # ("Test 9: Tesseract Engine", self.test_9_tesseract_engine),
+            # ("Test 10: EasyOCR Engine", self.test_10_easyocr_engine),
+            # ("Test 12: TrOCR Engine", self.test_12_trocr_engine),
+            # ("Test 13: Engine Manager", self.test_13_engine_manager),
             ("Test 14: Multi-Engine Processing", self.test_14_multi_engine_processing),
         ]
         

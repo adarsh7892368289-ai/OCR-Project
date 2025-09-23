@@ -77,7 +77,7 @@ class PaddleOCREngine(BaseOCREngine):
         
     def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        Process preprocessed image with PaddleOCR - FIXED for new PaddleOCR format
+        FIXED: Process preprocessed image with PaddleOCR - Now uses proper layout reconstruction
         """
         start_time = time.time()
         
@@ -104,83 +104,23 @@ class PaddleOCREngine(BaseOCREngine):
                     self.logger.error(f"Both PaddleOCR calls failed: {e1}, {e2}")
                     raise e2
             
-            # FIXED: Handle the new PaddleOCR result format
-            if results and len(results) > 0 and isinstance(results[0], dict):
-                # New format - results is list of dicts with structured data
-                result_dict = results[0]  # First page
-                
-                # Extract text and scores from the structured format
-                rec_texts = result_dict.get('rec_texts', [])
-                rec_scores = result_dict.get('rec_scores', [])
-                rec_polys = result_dict.get('rec_polys', [])
-                
-                self.logger.info(f"New format: Found {len(rec_texts)} texts, {len(rec_scores)} scores, {len(rec_polys)} polys")
-                
-                # Combine all text with proper spacing and create regions
-                full_text = ""
-                all_confidences = []
-                regions = []
-                
-                for i, text in enumerate(rec_texts):
-                    if i < len(rec_scores):
-                        confidence = float(rec_scores[i])
-                    else:
-                        confidence = 0.5
-                    
-                    # Filter low confidence
-                    if confidence > 0.1 and text.strip():
-                        full_text += text.strip() + " "
-                        all_confidences.append(confidence)
-                        
-                        # Create region if we have polygon data
-                        if i < len(rec_polys):
-                            poly = rec_polys[i]
-                            # Convert polygon to bounding box
-                            x_coords = [p[0] for p in poly]
-                            y_coords = [p[1] for p in poly]
-                            
-                            bbox = BoundingBox(
-                                x=int(min(x_coords)),
-                                y=int(min(y_coords)),
-                                width=int(max(x_coords) - min(x_coords)),
-                                height=int(max(y_coords) - min(y_coords)),
-                                confidence=confidence
-                            )
-                            
-                            region = TextRegion(
-                                text=text.strip(),
-                                confidence=confidence,
-                                bbox=bbox,
-                                text_type=TextType.PRINTED
-                            )
-                            regions.append(region)
+            # FIXED: Parse results and use the same layout reconstruction as EasyOCR
+            paddle_detections = self._parse_paddleocr_results(results)
             
-            else:
-                # Fallback for other formats or empty results
-                self.logger.warning("Unexpected result format or empty results")
-                full_text = ""
-                all_confidences = []
-                regions = []
+            # Use the SAME layout reconstruction method as EasyOCR
+            result = self._combine_ocr_results_with_layout(paddle_detections)
             
-            # Clean up and create final result
-            full_text = full_text.strip()
-            overall_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
+            # Set processing time
             processing_time = time.time() - start_time
+            result.processing_time = processing_time
+            result.engine_name = self.name
             
-            result = OCRResult(
-                text=full_text,
-                confidence=overall_confidence,
-                processing_time=processing_time,
-                engine_name=self.name,
-                regions=regions,
-                metadata={
-                    "detection_count": len(all_confidences),
-                    "method": "fixed_paddleocr_new_format"
-                }
-            )
-            
-            if full_text:
-                self.logger.info(f"SUCCESS: PaddleOCR extracted {len(full_text)} chars (conf: {overall_confidence:.3f}) in {processing_time:.2f}s")
+            # Update stats
+            self.processing_stats['total_processed'] += 1
+            self.processing_stats['total_time'] += processing_time
+            if result.text.strip():
+                self.processing_stats['successful_extractions'] += 1
+                self.logger.info(f"SUCCESS: PaddleOCR extracted {len(result.text)} chars (conf: {result.confidence:.3f}) in {processing_time:.2f}s")
             else:
                 self.logger.warning(f"NO TEXT: PaddleOCR found no text in {processing_time:.2f}s")
             
@@ -189,6 +129,7 @@ class PaddleOCREngine(BaseOCREngine):
         except Exception as e:
             processing_time = time.time() - start_time
             self.logger.error(f"PaddleOCR failed: {e}")
+            self.processing_stats['errors'] += 1
             
             return OCRResult(
                 text="",
@@ -197,6 +138,69 @@ class PaddleOCREngine(BaseOCREngine):
                 engine_name=self.name,
                 metadata={"error": str(e)}
             )
+
+    def _parse_paddleocr_results(self, results) -> List:
+        """
+        FIXED: Parse PaddleOCR results into standard detection format
+        Returns format compatible with layout reconstruction: [bbox_points, text, confidence]
+        """
+        detections = []
+        
+        if not results or not results[0]:
+            return detections
+        
+        # Handle different PaddleOCR result formats
+        page_results = results[0]
+        
+        if isinstance(page_results, dict):
+            # New structured format
+            rec_texts = page_results.get('rec_texts', [])
+            rec_scores = page_results.get('rec_scores', [])
+            rec_polys = page_results.get('rec_polys', [])
+            
+            for i, text in enumerate(rec_texts):
+                if text and text.strip():
+                    confidence = float(rec_scores[i]) if i < len(rec_scores) else 0.5
+                    
+                    if confidence > 0.1:  # Filter low confidence
+                        if i < len(rec_polys):
+                            bbox_points = rec_polys[i]
+                        else:
+                            # Create dummy bbox if missing
+                            bbox_points = [[0, 0], [100, 0], [100, 30], [0, 30]]
+                        
+                        # Convert to standard detection format: [bbox_points, text, confidence]
+                        detection = [bbox_points, text.strip(), confidence]
+                        detections.append(detection)
+        
+        elif isinstance(page_results, list):
+            # Standard format: list of detections
+            for detection in page_results:
+                try:
+                    if isinstance(detection, (list, tuple)) and len(detection) >= 2:
+                        bbox_points = detection[0]
+                        text_info = detection[1]
+                        
+                        # Extract text and confidence
+                        if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                            text = str(text_info[0]) if text_info[0] else ""
+                            confidence = float(text_info[1]) if text_info[1] else 0.0
+                        else:
+                            text = str(text_info) if text_info else ""
+                            confidence = 0.5
+                        
+                        if text.strip() and confidence > 0.1:
+                            # Convert to standard format: [bbox_points, text, confidence]
+                            standard_detection = [bbox_points, text.strip(), confidence]
+                            detections.append(standard_detection)
+                            
+                except Exception as e:
+                    self.logger.warning(f"Skipping problematic detection: {detection}, error: {e}")
+                    continue
+        
+        self.logger.info(f"Parsed {len(detections)} valid detections from PaddleOCR")
+        return detections
+
     def _prepare_for_paddleocr(self, image: np.ndarray) -> np.ndarray:
         """
         Minimal conversion for PaddleOCR compatibility
@@ -213,15 +217,15 @@ class PaddleOCREngine(BaseOCREngine):
             # Convert grayscale to RGB
             return cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     
-    def _combine_ocr_results_with_layout(self, paddle_results: List) -> OCRResult:
+    def _combine_ocr_results_with_layout(self, paddle_detections: List) -> OCRResult:
         """
-        FIXED: Combine all PaddleOCR detections with preserved document layout
+        FIXED: Use the SAME layout reconstruction logic as EasyOCR
         """
         regions = []
         detection_count = 0
         
         # Handle empty results
-        if not paddle_results or not paddle_results[0]:
+        if not paddle_detections:
             return OCRResult(
                 text="",
                 confidence=0.0,
@@ -230,23 +234,11 @@ class PaddleOCREngine(BaseOCREngine):
                 metadata={"detection_count": 0}
             )
         
-        # Process each detection - FIXED unpacking
-        for detection in paddle_results[0]:
+        # Convert PaddleOCR detections to TextRegions (same as EasyOCR)
+        for detection in paddle_detections:
             try:
-                # FIXED: Handle different PaddleOCR result formats
-                if isinstance(detection, (list, tuple)) and len(detection) >= 2:
-                    # Standard format: [bbox_points, (text, confidence)]
-                    bbox_points = detection[0]
-                    text_info = detection[1]
-                    
-                    # Extract text and confidence safely
-                    if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
-                        text = str(text_info[0]) if text_info[0] else ""
-                        confidence = float(text_info[1]) if text_info[1] else 0.0
-                    else:
-                        # Fallback if text_info format is different
-                        text = str(text_info) if text_info else ""
-                        confidence = 0.5  # Default confidence
+                if len(detection) >= 3:
+                    bbox_points, text, confidence = detection
                     
                     # Filter very low confidence results
                     if not text.strip() or confidence <= 0.1:
@@ -272,14 +264,17 @@ class PaddleOCREngine(BaseOCREngine):
                     regions.append(region)
                     detection_count += 1
                     
-            except (ValueError, IndexError, TypeError) as e:
-                # Log the problematic detection for debugging
+            except Exception as e:
                 self.logger.warning(f"Skipping problematic detection: {detection}, error: {e}")
                 continue
         
-        # Rest of your method stays the same...
+        # Use the SAME layout reconstruction as EasyOCR
         formatted_text = self._reconstruct_document_layout(regions)
+        
+        # Calculate overall confidence
         overall_confidence = sum(r.confidence for r in regions) / len(regions) if regions else 0.0
+        
+        # Create overall bounding box from all regions
         overall_bbox = self._calculate_overall_bbox(regions) if regions else BoundingBox(0, 0, 100, 30)
         
         return OCRResult(
@@ -301,7 +296,7 @@ class PaddleOCREngine(BaseOCREngine):
     
     def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
         """
-        CORE FIX: Reconstruct document text with proper line breaks and formatting
+        IDENTICAL to EasyOCR: Reconstruct document text with proper line breaks and formatting
         """
         if not regions:
             return ""
@@ -423,7 +418,7 @@ class PaddleOCREngine(BaseOCREngine):
                 'multiple_languages': self.supports_multiple_languages,
                 'orientation_detection': self.supports_orientation_detection,
                 'structure_analysis': self.supports_structure_analysis,
-                'layout_preservation': True  # NEW: Added layout preservation capability
+                'layout_preservation': True
             },
             'optimal_for': ['printed_text', 'documents', 'receipts', 'forms', 'structured_text'],
             'performance_profile': {
@@ -445,7 +440,7 @@ class PaddleOCREngine(BaseOCREngine):
                 'returns_single_result': True,
                 'compatible_with_base_engine': True,
                 'works_with_engine_manager': True,
-                'preserves_document_layout': True  # NEW: Layout preservation feature
+                'preserves_document_layout': True
             }
         }
         
