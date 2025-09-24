@@ -51,6 +51,9 @@ class QualityMetrics:
     confidence: float = 0.8
     warnings: List[str] = field(default_factory=list)
 
+    # Enhancement recommendation
+    needs_enhancement: bool = False
+
 class IntelligentQualityAnalyzer:
     """
     Intelligent image quality analyzer for OCR preprocessing
@@ -157,6 +160,15 @@ class IntelligentQualityAnalyzer:
                 brightness_score, abs(skew_angle)
             )
             
+            # Determine if enhancement is needed
+            needs_enhancement = (
+                overall_score < 0.6 or  # Low overall quality
+                sharpness_score < 0.4 or  # Blurry image
+                noise_level > 0.3 or  # High noise
+                contrast_score < 0.3 or  # Low contrast
+                abs(skew_angle) > 3.0  # Significant skew
+            )
+
             # Create metrics object
             metrics = QualityMetrics(
                 overall_score=overall_score,
@@ -174,7 +186,8 @@ class IntelligentQualityAnalyzer:
                 edge_density=edge_density,
                 processing_time=time.time() - start_time,
                 confidence=0.8,
-                warnings=warnings
+                warnings=warnings,
+                needs_enhancement=needs_enhancement
             )
             
             # Cache results if enabled

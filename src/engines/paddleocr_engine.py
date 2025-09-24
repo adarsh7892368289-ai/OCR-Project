@@ -296,79 +296,132 @@ class PaddleOCREngine(BaseOCREngine):
     
     def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
         """
-        IDENTICAL to EasyOCR: Reconstruct document text with proper line breaks and formatting
+        IMPROVED: Enhanced layout reconstruction for complex documents like receipts
+        Handles multi-column layouts, preserves vertical spacing, and maintains text order
         """
         if not regions:
             return ""
         
-        # Sort regions by vertical position (top to bottom), then horizontal (left to right)
-        sorted_regions = sorted(regions, key=lambda r: (r.bbox.y, r.bbox.x))
+        # Sort regions primarily by vertical position, with more refined logic
+        sorted_regions = sorted(regions, key=lambda r: (
+            r.bbox.y + r.bbox.height // 2,  # Use center Y for better line grouping
+            r.bbox.x  # Then by X position
+        ))
         
-        # Group regions into lines based on Y-coordinate proximity
+        # IMPROVED: More sophisticated line grouping
         lines = []
         current_line = []
-        current_line_y = None
         
-        for region in sorted_regions:
+        for i, region in enumerate(sorted_regions):
             region_center_y = region.bbox.y + region.bbox.height // 2
             
-            if current_line_y is None:
+            if not current_line:
                 # First region
-                current_line_y = region_center_y
-                current_line.append(region)
+                current_line = [region]
             else:
-                # Check if this region is on the same line
-                y_distance = abs(region_center_y - current_line_y)
+                # Check if this region should be on the same line as previous regions
+                should_group = False
                 
-                if y_distance <= self.line_height_threshold:
-                    # Same line - add to current line
+                # Compare with all regions in current line, not just the first one
+                for line_region in current_line:
+                    line_center_y = line_region.bbox.y + line_region.bbox.height // 2
+                    y_distance = abs(region_center_y - line_center_y)
+                    
+                    # More conservative line height threshold for receipts
+                    adaptive_threshold = min(
+                        self.line_height_threshold,
+                        min(region.bbox.height, line_region.bbox.height) * 0.7
+                    )
+                    
+                    if y_distance <= adaptive_threshold:
+                        should_group = True
+                        break
+                
+                if should_group:
                     current_line.append(region)
                 else:
-                    # New line - finish current line and start new one
+                    # Finalize current line and start new one
                     if current_line:
                         lines.append(current_line)
                     current_line = [region]
-                    current_line_y = region_center_y
+            
+            # Handle the last region
+            if i == len(sorted_regions) - 1 and current_line:
+                lines.append(current_line)
         
-        # Add the last line
-        if current_line:
-            lines.append(current_line)
-        
-        # Build the formatted text
+        # IMPROVED: Better text assembly with column awareness
         formatted_lines = []
         
         for line_regions in lines:
-            # Sort regions in the line by X-coordinate (left to right)
+            if not line_regions:
+                continue
+                
+            # Sort regions in line by X coordinate
             line_regions.sort(key=lambda r: r.bbox.x)
             
-            # Combine text from regions in the line with appropriate spacing
-            line_text_parts = []
-            prev_region = None
+            # IMPROVED: Detect column breaks and handle spacing more intelligently
+            line_parts = []
             
-            for region in line_regions:
-                if prev_region is not None:
-                    # Calculate horizontal distance between regions
+            for i, region in enumerate(line_regions):
+                text = region.text.strip()
+                if not text:
+                    continue
+                    
+                if i > 0:
+                    prev_region = line_regions[i-1]
                     horizontal_gap = region.bbox.x - (prev_region.bbox.x + prev_region.bbox.width)
                     
-                    # Add extra spaces for large gaps (likely separate words/columns)
-                    if horizontal_gap > self.word_spacing_threshold:
-                        # Multiple spaces for large gaps
-                        spaces = " " * min(4, max(2, horizontal_gap // 10))
-                        line_text_parts.append(spaces)
+                    # More nuanced spacing logic for receipts
+                    if horizontal_gap > self.word_spacing_threshold * 2:
+                        # Large gap - likely different columns, use multiple spaces
+                        spaces = "    "  # 4 spaces for column separation
+                    elif horizontal_gap > self.word_spacing_threshold:
+                        # Medium gap - separate items/prices
+                        spaces = "  "  # 2 spaces
+                    elif horizontal_gap > 5:
+                        # Small gap - word separation
+                        spaces = " "
                     else:
-                        # Single space for normal word separation
-                        line_text_parts.append(" ")
+                        # Very small or no gap - might be continuous text
+                        spaces = " " if not prev_region.text.strip().endswith(' ') else ""
+                    
+                    line_parts.append(spaces)
                 
-                line_text_parts.append(region.text)
-                prev_region = region
+                line_parts.append(text)
             
-            # Join the line parts and add to formatted lines
-            line_text = "".join(line_text_parts).strip()
-            if line_text:  # Only add non-empty lines
-                formatted_lines.append(line_text)
+            # Assemble the line
+            if line_parts:
+                line_text = "".join(line_parts).strip()
+                if line_text:
+                    formatted_lines.append(line_text)
         
-        # Join all lines with newlines to preserve document structure
-        return "\n".join(formatted_lines)
+        # IMPROVED: Handle vertical spacing between text blocks
+        final_text_lines = []
+        prev_line_bottom = None
+        
+        for i, (formatted_line, line_regions) in enumerate(zip(formatted_lines, lines)):
+            current_line_top = min(r.bbox.y for r in line_regions)
+            
+            # Add extra line break for significant vertical gaps (new sections)
+            if prev_line_bottom is not None:
+                vertical_gap = current_line_top - prev_line_bottom
+                avg_line_height = sum(r.bbox.height for r in line_regions) / len(line_regions)
+                
+                # If gap is significantly larger than typical line height, add extra spacing
+                if vertical_gap > avg_line_height * 1.5:
+                    final_text_lines.append("")  # Add blank line for section separation
+            
+            final_text_lines.append(formatted_line)
+            prev_line_bottom = max(r.bbox.y + r.bbox.height for r in line_regions)
+        
+        # Join with newlines, removing any excessive blank lines
+        result = "\n".join(final_text_lines)
+        
+        # Clean up multiple consecutive newlines (max 2 in a row)
+        import re
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        
+        return result.strip()
     
     def _polygon_to_bbox(self, points: List[List[float]]) -> Tuple[int, int, int, int]:
         """Convert polygon points to bounding box coordinates"""
