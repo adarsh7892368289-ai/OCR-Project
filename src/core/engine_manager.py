@@ -1,77 +1,46 @@
-import os
+# src/core/engine_manager.py - Clean Engine Manager
+
 import time
 import numpy as np
 import logging
-from typing import List, Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from .base_engine import BaseOCREngine, OCRResult, BoundingBox, TextRegion, DocumentResult
+from .base_engine import BaseOCREngine, OCRResult
 
 @dataclass
 class EnginePerformance:
-    """Track engine performance metrics"""
+    """Simple performance tracking per engine"""
     engine_name: str
     total_processed: int = 0
     successful_processes: int = 0
     total_time: float = 0.0
-    total_confidence: float = 0.0
-    success_rate: float = 0.0
     avg_confidence: float = 0.0
-    avg_processing_time: float = 0.0
-    
-    def update(self, processing_time: float, confidence: float, success: bool):
-        """Update performance metrics"""
-        self.total_processed += 1
-        self.total_time += processing_time
-        
-        if success:
-            self.successful_processes += 1
-            self.total_confidence += confidence
-        
-        # Recalculate averages
-        self.success_rate = self.successful_processes / self.total_processed
-        if self.successful_processes > 0:
-            self.avg_confidence = self.total_confidence / self.successful_processes
-        self.avg_processing_time = self.total_time / self.total_processed
 
 class EngineManager:
     """
-    Modern Engine Manager - Multi-Engine Coordination
+    Clean Engine Manager - Just manages engines, no complex logic
     
-    Clean architecture for managing multiple OCR engines:
-    - Engine registration and initialization
-    - Intelligent engine selection
-    - Multi-engine processing and comparison
-    - Performance tracking and optimization
+    Responsibilities:
+    1. Register and initialize engines
+    2. Provide available engines to pipeline
+    3. Simple engine selection logic
+    4. Basic performance tracking
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """Initialize engine manager with optional configuration"""
+        """Initialize engine manager"""
         self.config = config or {}
         self.engines: Dict[str, BaseOCREngine] = {}
         self.performance: Dict[str, EnginePerformance] = {}
         self.logger = logging.getLogger(__name__)
         
-        # Configuration with defaults
-        self.max_workers = self.config.get('max_workers', 3)
-        self.timeout = self.config.get('timeout', 300)
-        self.enable_parallel = self.config.get('enable_parallel', True)
-        
-        # Engine selection strategy
-        self.selection_strategy = self.config.get('selection_strategy', 'adaptive')
-        
-        # Engine priorities for different content types
-        self.engine_priorities = {
-            'printed': ['tesseract', 'paddleocr', 'easyocr', 'trocr'],
-            'handwritten': ['trocr', 'easyocr', 'paddleocr', 'tesseract'],
-            'mixed': ['paddleocr', 'easyocr', 'trocr', 'tesseract'],
-            'document': ['paddleocr', 'tesseract', 'easyocr', 'trocr'],
-            'default': ['paddleocr', 'easyocr', 'tesseract', 'trocr']
-        }
+        # Simple engine priority (based on your test results)
+        self.engine_priority = ['paddleocr', 'easyocr', 'tesseract', 'trocr']
         
     def register_engine(self, engine_name: str, engine: BaseOCREngine) -> bool:
-        """Register and initialize an OCR engine"""
+        """Register an OCR engine"""
         try:
             if engine_name in self.engines:
                 self.logger.warning(f"Engine {engine_name} already registered, overwriting")
@@ -79,15 +48,7 @@ class EngineManager:
             self.engines[engine_name] = engine
             self.performance[engine_name] = EnginePerformance(engine_name=engine_name)
             
-            # Auto-initialize the engine
-            try:
-                if engine.initialize():
-                    self.logger.info(f"Registered and initialized engine: {engine_name}")
-                else:
-                    self.logger.warning(f"Registered engine {engine_name} but initialization failed")
-            except Exception as init_error:
-                self.logger.warning(f"Engine {engine_name} registered but initialization failed: {init_error}")
-            
+            self.logger.info(f"Registered engine: {engine_name}")
             return True
             
         except Exception as e:
@@ -100,251 +61,161 @@ class EngineManager:
     
     def get_initialized_engines(self) -> Dict[str, BaseOCREngine]:
         """Get only initialized engines"""
-        return {name: engine for name, engine in self.engines.items() 
-                if engine.is_initialized}
+        initialized = {}
+        for name, engine in self.engines.items():
+            try:
+                if engine.is_available():  # This calls initialize() internally
+                    initialized[name] = engine
+            except Exception as e:
+                self.logger.warning(f"Engine {name} not available: {e}")
+        return initialized
     
-    def select_best_engine(self, image: np.ndarray, content_type: str = 'default') -> str:
-        """Select best engine based on content type and performance"""
-        initialized_engines = self.get_initialized_engines()
+    def extract_with_engine(self, image: np.ndarray, engine_name: str) -> OCRResult:
+        """Extract text using specific engine - main interface for pipeline"""
+        if engine_name not in self.engines:
+            raise ValueError(f"Engine {engine_name} not registered")
         
-        if not initialized_engines:
-            raise RuntimeError("No initialized engines available")
+        engine = self.engines[engine_name]
+        start_time = time.time()
         
-        # Get priority list for content type
-        priority_list = self.engine_priorities.get(content_type, 
-                                                  self.engine_priorities['default'])
-        
-        # Find first available engine from priority list
-        for engine_name in priority_list:
-            if engine_name in initialized_engines:
-                return engine_name
-        
-        # Fallback to first available engine
-        return list(initialized_engines.keys())[0]
+        try:
+            # Use the engine's extract_text method (from base_engine.py)
+            result = engine.extract_text(image)
+            processing_time = time.time() - start_time
+            
+            # Update simple stats
+            perf = self.performance[engine_name]
+            perf.total_processed += 1
+            perf.total_time += processing_time
+            
+            if result and result.text.strip():
+                perf.successful_processes += 1
+                # Update average confidence
+                if perf.successful_processes == 1:
+                    perf.avg_confidence = result.confidence
+                else:
+                    total_conf = perf.avg_confidence * (perf.successful_processes - 1)
+                    perf.avg_confidence = (total_conf + result.confidence) / perf.successful_processes
+            
+            return result
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            self.performance[engine_name].total_time += processing_time
+            self.logger.error(f"Engine {engine_name} failed: {e}")
+            
+            # Return empty result instead of raising
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                processing_time=processing_time,
+                engine_name=engine_name,
+                metadata={"error": str(e)}
+            )
     
-    def process_with_multiple_engines(self, image: np.ndarray, 
-                                    engine_names: Optional[List[str]] = None) -> Dict[str, List[OCRResult]]:
-        """Process image with multiple engines for comparison"""
-        if engine_names is None:
-            engine_names = list(self.get_initialized_engines().keys())
-        
+    def extract_with_multiple_engines(self, image: np.ndarray, 
+                                     engine_names: List[str],
+                                     use_parallel: bool = True) -> Dict[str, OCRResult]:
+        """Extract with multiple engines - returns results from each"""
         results = {}
+        available_engines = self.get_initialized_engines()
         
-        if self.enable_parallel and len(engine_names) > 1:
+        # Filter to available engines
+        engines_to_use = [name for name in engine_names if name in available_engines]
+        
+        if not engines_to_use:
+            self.logger.error("No engines available for multi-engine processing")
+            return results
+        
+        if use_parallel and len(engines_to_use) > 1:
             # Parallel processing
-            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(engine_names))) as executor:
+            with ThreadPoolExecutor(max_workers=min(3, len(engines_to_use))) as executor:
                 future_to_engine = {
-                    executor.submit(self._process_single_engine, engine_name, image): engine_name
-                    for engine_name in engine_names
-                    if engine_name in self.engines and self.engines[engine_name].is_initialized
+                    executor.submit(self.extract_with_engine, image, engine_name): engine_name
+                    for engine_name in engines_to_use
                 }
                 
-                for future in as_completed(future_to_engine, timeout=self.timeout):
+                for future in as_completed(future_to_engine, timeout=300):
                     engine_name = future_to_engine[future]
                     try:
                         result = future.result()
                         results[engine_name] = result
                     except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed: {e}")
-                        results[engine_name] = []
+                        self.logger.error(f"Engine {engine_name} failed in parallel: {e}")
+                        results[engine_name] = OCRResult("", 0.0, engine_name=engine_name)
         else:
             # Sequential processing
-            for engine_name in engine_names:
-                if engine_name in self.engines and self.engines[engine_name].is_initialized:
-                    try:
-                        result = self._process_single_engine(engine_name, image)
-                        results[engine_name] = result
-                    except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed: {e}")
-                        results[engine_name] = []
+            for engine_name in engines_to_use:
+                try:
+                    result = self.extract_with_engine(image, engine_name)
+                    results[engine_name] = result
+                except Exception as e:
+                    self.logger.error(f"Engine {engine_name} failed: {e}")
+                    results[engine_name] = OCRResult("", 0.0, engine_name=engine_name)
         
         return results
     
-    def _process_single_engine(self, engine_name: str, image: np.ndarray) -> List[OCRResult]:
-        """Process image with a single engine"""
-        start_time = time.time()
-        engine = self.engines[engine_name]
+    def select_best_engine(self, content_type: str = 'default') -> Optional[str]:
+        """Select best engine based on priority and availability"""
+        available_engines = self.get_initialized_engines()
         
-        try:
-            # Process image
-            ocr_results = engine.process_image(image)
-            processing_time = time.time() - start_time
-            
-            # Handle different return types
-            if isinstance(ocr_results, list):
-                results = ocr_results
-            else:
-                # Single result - convert to list
-                results = [ocr_results] if ocr_results else []
-            
-            # Update performance
-            if results:
-                avg_confidence = sum(r.confidence for r in results) / len(results)
-                self.performance[engine_name].update(processing_time, avg_confidence, True)
-            else:
-                self.performance[engine_name].update(processing_time, 0.0, False)
-            
-            return results
-            
-        except Exception as e:
-            processing_time = time.time() - start_time
-            self.performance[engine_name].update(processing_time, 0.0, False)
-            raise e
+        if not available_engines:
+            return None
+        
+        # Content-specific priorities
+        if content_type == 'handwritten':
+            priority_list = ['trocr', 'easyocr', 'paddleocr', 'tesseract']
+        elif content_type == 'table':
+            priority_list = ['paddleocr', 'tesseract', 'easyocr', 'trocr']
+        else:
+            priority_list = self.engine_priority
+        
+        # Find first available engine from priority list
+        for engine_name in priority_list:
+            if engine_name in available_engines:
+                return engine_name
+        
+        # Fallback to any available engine
+        return list(available_engines.keys())[0]
     
-    def compare_results(self, results: Dict[str, List[OCRResult]]) -> Dict[str, Any]:
-        """Compare results from multiple engines"""
-        if not results:
-            return {}
-        
-        comparison = {
-            'engine_count': len(results),
-            'total_detections': {},
-            'confidence_scores': {},
-            'processing_quality': {},
-            'best_engine': None,
-            'consensus_text': None
-        }
-        
-        # Calculate metrics for each engine
-        best_score = 0.0
-        best_engine = None
-        
-        for engine_name, ocr_results in results.items():
-            if not ocr_results:
-                comparison['total_detections'][engine_name] = 0
-                comparison['confidence_scores'][engine_name] = 0.0
-                comparison['processing_quality'][engine_name] = 'failed'
-                continue
-            
-            # Calculate metrics
-            total_detections = len(ocr_results)
-            avg_confidence = sum(r.confidence for r in ocr_results) / total_detections
-            total_text_length = sum(len(r.text) for r in ocr_results)
-            
-            # Quality score (combination of confidence and text length)
-            quality_score = (avg_confidence * 0.7) + (min(total_text_length / 100, 1.0) * 0.3)
-            
-            comparison['total_detections'][engine_name] = total_detections
-            comparison['confidence_scores'][engine_name] = avg_confidence
-            comparison['processing_quality'][engine_name] = 'excellent' if quality_score > 0.8 else 'good' if quality_score > 0.6 else 'fair'
-            
-            if quality_score > best_score:
-                best_score = quality_score
-                best_engine = engine_name
-        
-        comparison['best_engine'] = best_engine
-        
-        # Generate consensus text from best engine
-        if best_engine and results[best_engine]:
-            comparison['consensus_text'] = ' '.join(r.text for r in results[best_engine])
-        
-        return comparison
-    
-    def select_best_result(self, results: Dict[str, List[OCRResult]]) -> Optional[OCRResult]:
-        """Select the best result from multiple engine outputs"""
+    def select_best_result(self, results: Dict[str, OCRResult]) -> Optional[OCRResult]:
+        """Select best result from multiple engine results"""
         if not results:
             return None
         
         best_result = None
         best_score = 0.0
         
-        for engine_name, ocr_results in results.items():
-            if not ocr_results:
+        for engine_name, result in results.items():
+            if not result or not result.text.strip():
                 continue
             
-            for result in ocr_results:
-                # Score based on confidence and text length
-                text_length_score = min(len(result.text) / 50, 1.0)  # Normalize to 0-1
-                combined_score = (result.confidence * 0.8) + (text_length_score * 0.2)
-                
-                if combined_score > best_score:
-                    best_score = combined_score
-                    best_result = result
+            # Simple scoring: confidence (80%) + text length factor (20%)
+            text_length_score = min(len(result.text) / 100, 1.0)  # Normalize to 0-1
+            combined_score = (result.confidence * 0.8) + (text_length_score * 0.2)
+            
+            if combined_score > best_score:
+                best_score = combined_score
+                best_result = result
         
         return best_result
     
-    def batch_process(self, images: List[np.ndarray], 
-                     engine_name: Optional[str] = None) -> List[List[OCRResult]]:
-        """Process multiple images with specified or best engine"""
-        if not images:
-            return []
-        
-        # Select engine if not specified
-        if engine_name is None:
-            engine_name = self.select_best_engine(images[0])
-        
-        if engine_name not in self.engines or not self.engines[engine_name].is_initialized:
-            raise ValueError(f"Engine {engine_name} not available")
-        
-        engine = self.engines[engine_name]
-        
-        # Use engine's batch processing if available
-        if hasattr(engine, 'batch_process'):
-            return engine.batch_process(images)
-        else:
-            # Manual batch processing
-            results = []
-            for image in images:
-                try:
-                    result = engine.process_image(image)
-                    if isinstance(result, list):
-                        results.append(result)
-                    else:
-                        results.append([result] if result else [])
-                except Exception as e:
-                    self.logger.error(f"Batch processing failed for image: {e}")
-                    results.append([])
-            return results
-    
-    def process_with_best_engine(self, image: np.ndarray, 
-                               content_type: str = 'default') -> List[OCRResult]:
-        """Process image with automatically selected best engine"""
-        if image is None or image.size == 0:
-            return []
-        
-        try:
-            best_engine = self.select_best_engine(image, content_type)
-            return self._process_single_engine(best_engine, image)
-        except Exception as e:
-            self.logger.error(f"Best engine processing failed: {e}")
-            return []
-    
-    def get_performance_stats(self) -> Dict[str, Any]:
-        """Get performance statistics for all engines"""
-        stats = {
-            'total_engines': len(self.engines),
-            'initialized_engines': len(self.get_initialized_engines()),
-            'engine_performance': {},
-            'system_stats': {
-                'max_workers': self.max_workers,
-                'parallel_enabled': self.enable_parallel,
-                'timeout': self.timeout
-            }
-        }
-        
-        # Add individual engine stats
-        total_processed = 0
-        total_time = 0.0
-        
-        for engine_name, perf in self.performance.items():
-            stats['engine_performance'][engine_name] = {
+    def get_engine_info(self) -> Dict[str, Dict[str, Any]]:
+        """Get information about all engines"""
+        info = {}
+        for name, engine in self.engines.items():
+            perf = self.performance[name]
+            info[name] = {
+                'available': engine.is_available(),
+                'initialized': name in self.get_initialized_engines(),
                 'total_processed': perf.total_processed,
-                'success_rate': perf.success_rate,
+                'success_rate': (perf.successful_processes / perf.total_processed 
+                                if perf.total_processed > 0 else 0.0),
                 'avg_confidence': perf.avg_confidence,
-                'avg_processing_time': perf.avg_processing_time,
-                'status': 'initialized' if self.engines[engine_name].is_initialized else 'not_initialized'
+                'avg_time': (perf.total_time / perf.total_processed 
+                           if perf.total_processed > 0 else 0.0)
             }
-            
-            total_processed += perf.total_processed
-            total_time += perf.total_time
-        
-        # System-wide stats
-        stats['system_stats']['total_processed'] = total_processed
-        stats['system_stats']['total_time'] = total_time
-        if total_processed > 0:
-            stats['system_stats']['average_time'] = total_time / total_processed
-        
-        return stats
+        return info
     
     def cleanup(self):
         """Cleanup all engines"""
@@ -358,38 +229,6 @@ class EngineManager:
         
         self.engines.clear()
         self.performance.clear()
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-    def process_with_best_engine_single(self, image: np.ndarray, 
-                                   content_type: str = 'default') -> Optional[OCRResult]:
-        """Process image with best engine and return single best result"""
-        if image is None or image.size == 0:
-            return None
-        
-        try:
-            # Get all results from best engine
-            results_list = self.process_with_best_engine(image, content_type)
-            
-            # Return single best result
-            if results_list:
-                # Find result with highest confidence
-                return max(results_list, key=lambda x: x.confidence)
-            else:
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Best engine single processing failed: {e}")
-            return None
+
 # Alias for backward compatibility
 OCREngineManager = EngineManager
-
-# Export main classes
-__all__ = [
-    'EngineManager',
-    'OCREngineManager', 
-    'EnginePerformance'
-]

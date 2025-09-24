@@ -3,19 +3,17 @@ from typing import List, Dict, Optional, Union
 from enum import Enum
 import numpy as np
 
+# Import the comprehensive QualityMetrics from quality_analyzer
+try:
+    from .preprocessing.quality_analyzer import QualityMetrics, ImageType, ImageQuality
+except ImportError:
+    # Fallback for when running from different directories
+    from preprocessing.quality_analyzer import QualityMetrics, ImageType, ImageQuality
+
 class ProcessingStrategy(Enum):
     MINIMAL = "minimal"      # High quality - minimal processing
     BALANCED = "balanced"    # Standard processing
     ENHANCED = "enhanced"    # Poor quality - heavy enhancement
-
-@dataclass
-class QualityMetrics:
-    overall_score: float
-    sharpness_score: float
-    contrast_score: float
-    brightness_score: float
-    quality_level: str
-    needs_enhancement: bool
 
 @dataclass
 class ProcessingOptions:

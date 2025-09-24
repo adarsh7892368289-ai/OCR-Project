@@ -111,13 +111,26 @@ class BatchProcessor:
     def _create_error_result(self, file_path: Union[str, Path], error: str) -> OCRResult:
         """Create an error result for failed processing"""
         from .types import QualityMetrics, ProcessingStrategy
-        
+        from .preprocessing.quality_analyzer import ImageQuality
+
         return OCRResult(
             text="",
             confidence=0.0,
             processing_time=0.0,
             engine_used="none",
-            quality_metrics=QualityMetrics(0,0,0,0,"error",False),
+            quality_metrics=QualityMetrics(
+                overall_score=0.0,
+                sharpness_score=0.0,
+                contrast_score=0.0,
+                brightness_score=0.0,
+                noise_level=0.0,
+                blur_score=0.0,
+                quality_level="error",
+                needs_enhancement=False,
+                image_quality=ImageQuality.POOR,
+                enhancement_recommendations=[],
+                processing_time=0.0
+            ),
             strategy_used=ProcessingStrategy.MINIMAL,
             metadata={'error': error, 'file_path': str(file_path)}
         )

@@ -2,7 +2,7 @@
 from src import OCRLibrary
 
 ocr = OCRLibrary()
-result = ocr.extract_text("data\sample_images\img1.jpg")
+result = ocr.extract_text("data\sample_images\img3.jpg")
 print(f"Text: {result.text}")
 print(f"Confidence: {result.confidence}")
-print(f"Engine used: {result.engine_used}")
+print(f"Engine used: {result.engine_name}")
