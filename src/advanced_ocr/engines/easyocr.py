@@ -14,7 +14,7 @@ from ..core.base_engine import (
     TextType
 )
 
-class EasyOCREngine(BaseOCREngine):
+class EasyOCR(BaseOCREngine):
     """
     Modern EasyOCR Engine - Aligned with Pipeline
     

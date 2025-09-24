@@ -40,7 +40,7 @@ def find_tesseract():
             continue
     return None
 
-class TesseractEngine(BaseOCREngine):
+class Tesseract(BaseOCREngine):
     """
     Modern Tesseract OCR Engine - Aligned with Pipeline
     

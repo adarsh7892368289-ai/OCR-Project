@@ -1,8 +1,9 @@
-# Simple text extraction
-from src import OCRLibrary
+import os
+from src.advanced_ocr import OCRLibrary
 
 ocr = OCRLibrary()
-result = ocr.extract_text("data\sample_images\img3.jpg")
+image_path = os.path.join("tests", "fixtures", "images", "img3.jpg")
+result = ocr.extract_text(image_path)
 print(f"Text: {result.text}")
 print(f"Confidence: {result.confidence}")
 print(f"Engine used: {result.engine_name}")

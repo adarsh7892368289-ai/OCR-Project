@@ -19,7 +19,7 @@ from ..core.base_engine import (
     TextType
 )
 
-class TrOCREngine(BaseOCREngine):
+class TrOCR(BaseOCREngine):
     """
     FIXED TrOCR Engine - Returns single OCRResult compatible with base engine
     

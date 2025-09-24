@@ -1,0 +1,64 @@
+[project]
+name = "advanced-ocr-system"
+dynamic = ["version"]
+description = "Advanced OCR library with multiple engines and smart preprocessing"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+
+# Core dependencies from base.txt
+dependencies = [
+    "numpy>=1.24.0,<2.0.0",
+    "opencv-python>=4.6.0,<5.0.0",
+    "pillow>=10.0.0,<11.0.0",
+    "pyyaml>=6.0.0,<7.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "scikit-image>=0.21.0,<0.23.0",
+    "python-Levenshtein>=0.21.0,<1.0.0",
+    "textdistance>=4.6.0,<5.0.0",
+    "tqdm>=4.66.0,<5.0.0",
+    "colorlog>=6.7.0,<7.0.0",
+    "pypdf>=3.0.0,<4.0.0",
+    "pdf2image>=1.16.0,<2.0.0",
+    "psutil>=5.9.0,<6.0.0",
+]
+
+# Optional engine dependencies
+[project.optional-dependencies]
+tesseract = ["pytesseract>=0.3.10,<1.0.0"]
+easyocr = ["easyocr>=1.7.0,<2.0.0"]
+paddleocr = [
+    "paddlepaddle>=2.5.0,<3.0.0",
+    "paddleocr>=2.7.0,<3.0.0"
+]
+trocr = [
+    "torch>=2.0.0,<3.0.0",
+    "torchvision>=0.15.0,<1.0.0",
+    "transformers>=4.30.0,<5.0.0",
+    "timm>=0.9.0,<1.0.0"
+]
+nlp = [
+    "spacy>=3.6.0,<4.0.0",
+    "nltk>=3.8.0,<4.0.0",
+    "spellchecker>=0.4,<1.0.0"
+]
+all-engines = [
+    "advanced-ocr-system[tesseract,easyocr,paddleocr,trocr,nlp]"
+]
+
+# Development dependencies
+dev = [
+    "black>=23.0.0,<24.0.0",
+    "isort>=5.12.0,<6.0.0",
+    "flake8>=6.0.0,<7.0.0",
+    "mypy>=1.5.0,<2.0.0",
+    "pre-commit>=3.4.0,<4.0.0",
+]
+
+# Testing dependencies  
+test = [
+    "pytest>=7.4.0,<8.0.0",
+    "pytest-cov>=4.1.0,<5.0.0",
+    "pytest-asyncio>=0.21.0,<1.0.0",
+    "coverage>=7.3.0,<8.0.0",
+]

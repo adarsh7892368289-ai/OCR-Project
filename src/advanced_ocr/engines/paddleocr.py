@@ -18,7 +18,7 @@ from ..core.base_engine import (
     TextType
 )
 
-class PaddleOCREngine(BaseOCREngine):
+class PaddleOCR(BaseOCREngine):
     """
     Modern PaddleOCR Engine - Aligned with Pipeline Architecture
     

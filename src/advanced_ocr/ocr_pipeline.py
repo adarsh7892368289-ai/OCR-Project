@@ -153,16 +153,16 @@ class OCRLibrary:
     
     def _initialize_engines(self):
         """Initialize and register OCR engines"""
-        from .engines.paddleocr_engine import PaddleOCREngine
-        from .engines.easyocr_engine import EasyOCREngine  
-        from .engines.tesseract_engine import TesseractEngine
-        from .engines.trocr_engine import TrOCREngine
+        from .engines.paddleocr import PaddleOCR
+        from .engines.easyocr import EasyOCR
+        from .engines.tesseract import Tesseract
+        from .engines.trocr import TrOCR
         
         engine_classes = {
-            'paddleocr': PaddleOCREngine,
-            'easyocr': EasyOCREngine,
-            'tesseract': TesseractEngine,
-            'trocr': TrOCREngine
+            'paddleocr': PaddleOCR,
+            'easyocr': EasyOCR,
+            'tesseract': Tesseract,
+            'trocr': TrOCR
         }
         
         for name, engine_class in engine_classes.items():

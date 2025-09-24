@@ -1,0 +1,24 @@
+# OCR Engine Dependencies (Optional - Install as needed)
+# Install specific engines: pip install -r requirements/base.txt -r requirements/engines.txt
+
+# Basic OCR
+pytesseract>=0.3.10,<1.0.0
+
+# EasyOCR (Lightweight)
+easyocr>=1.7.0,<2.0.0
+
+# PaddleOCR (Most Accurate)
+# Note: PaddlePaddle can be CPU or GPU version
+paddlepaddle>=2.5.0,<3.0.0
+paddleocr>=2.7.0,<3.0.0
+
+# TrOCR (Transformer-based)
+torch>=2.0.0,<3.0.0
+torchvision>=0.15.0,<1.0.0
+transformers>=4.30.0,<5.0.0
+timm>=0.9.0,<1.0.0
+
+# NLP for Post-processing
+spacy>=3.6.0,<4.0.0
+nltk>=3.8.0,<4.0.0
+spellchecker>=0.4,<1.0.0
