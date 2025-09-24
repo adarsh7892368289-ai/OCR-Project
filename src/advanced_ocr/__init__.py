@@ -2,8 +2,7 @@
 OCR Library - Multi-engine text extraction with intelligent preprocessing
 """
 
-from .ocr_pipeline import OCRLibrary, ProcessingOptions
-from .batch_processor import BatchProcessor
+from .pipeline import OCRLibrary, ProcessingOptions
 from .types import OCRResult, QualityMetrics, ProcessingStrategy
 from .exceptions import OCRLibraryError, EngineNotAvailableError
 

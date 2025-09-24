@@ -256,3 +256,44 @@ class ImageUtils:
                 contrast_score > 20  # Sufficient contrast
             )
         }
+
+    @staticmethod
+    def detect_text_orientation(image: np.ndarray) -> float:
+        """Detect the orientation angle of text in the image using Hough transform for lines."""
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        # Apply edge detection
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        
+        # Use Hough transform to detect lines
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, 100)
+        
+        if lines is None:
+            return 0.0  # No rotation detected
+        
+        angles = []
+        for line in lines:
+            rho, theta = line[0]
+            angle = theta * 180 / np.pi
+            angles.append(angle)
+        
+        # Calculate the most common angle (likely text orientation)
+        if angles:
+            angle = np.median(angles)
+            # Round to nearest 90 degrees for common orientations
+            return round(angle / 90) * 90
+        return 0.0
+
+    @staticmethod
+    def correct_image_rotation(image: np.ndarray, angle: float) -> np.ndarray:
+        """Rotate the image by the given angle."""
+        if angle == 0:
+            return image
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(image, M, (w, h))
+        return rotated

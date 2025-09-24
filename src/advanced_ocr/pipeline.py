@@ -10,8 +10,8 @@ from .core.engine_manager import EngineManager
 from .preprocessing.quality_analyzer import IntelligentQualityAnalyzer
 from .preprocessing.image_enhancer import AIImageEnhancer
 from .utils.config import load_config
-from .utils.logger import setup_logger
-from .utils.image_utils import ImageUtils
+from .utils.logging import setup_logger
+from .utils.images import ImageUtils
 
 class OCRLibrary:
     """Main OCR Library class - primary interface for users"""
@@ -207,6 +207,12 @@ class OCRLibrary:
                         strategy: ProcessingStrategy, options: ProcessingOptions) -> np.ndarray:
         """Apply preprocessing based on strategy and options"""
         processed_image = image.copy()
+        
+        # NEW: Detect and correct rotation
+        rotation_angle = ImageUtils.detect_text_orientation(processed_image)
+        if rotation_angle != 0:
+            processed_image = ImageUtils.correct_image_rotation(processed_image, rotation_angle)
+            self.logger.debug(f"Corrected image rotation by {rotation_angle} degrees")
         
         if options.enhance_image and quality_metrics.needs_enhancement:
             if strategy in [ProcessingStrategy.BALANCED, ProcessingStrategy.ENHANCED]:
