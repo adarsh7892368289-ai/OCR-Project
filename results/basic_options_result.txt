@@ -1,0 +1,48 @@
+OCR Result - 2025-09-25 13:39:50
+==================================================
+
+Success: True
+Engine: PaddleOCR
+Confidence: 97.8%
+Time: 43.35s
+Text Length: 1215 characters
+Word Count: 179
+Line Count: 35
+
+EXTRACTED TEXT:
+--------------------
+Kona Big Wave 12oz bt1    10.00    CVM    :SIGN
+thleticMexicanCooper    Invoice    : 1501571011
+/A 12oz can    9.00    Response  : APPROVED
+lue Moon 12oz bt1    20.00    Auth Code : 117493
+lodelo Especial14oz draft    AID    :A0000000041010
+22.00    TVR    :0000008000
+Golden Road 10 Hop Hazy    IAD    :
+[PA 14oz draft    55.00    0110A0400124000000000000000000000OFF
+Golden Road 10 Hop Hazy    TSI    : E800
+[PA 14oz draft    11.00    ARC    : Z3
+Owens Ginger Beer Can    6.00
+Amount    : USD $184.23
+Subtotal    $170.00
+ax    $14.23    AMRISH THAKKAR    /
+57 PM
+*** MERCHANT COPY ***
+Tota1 Due $184.23
+Suggested Gratuity
+ulatedon Total Before Discounts are
+Applied    TIP_    30.00
+Tip    Total    Round Up For Charity:
+18% of sale:  $30.60    $214.83
+20% of sale:  $34.00    $218.23
+22% of sale:  $37.40  =  $221.63    Total:    214.23
+Music Forward prepares youth for
+essful and careers beyond! Thank in the e music industr you!    Signature:    C
+www.hobmusicforward.org
+RETAIN ONE COPY FOR YOUR RECORDS
+Thanks sand come again!    Suggested Gratuity
+Calculated on Total Before Discounts are
+Applied
+Tip    Total
+18% of sale:  $30.60  =  $214.83
+20% of sale:  $34.00  =  $218.23
+22% of sale:  $37.40    $221.63

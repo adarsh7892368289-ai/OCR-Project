@@ -6,7 +6,7 @@ This module provides access to all OCR engine implementations.
 Each engine handles its own initialization and text extraction.
 """
 
-from .paddleocr import PaddleOCREngine
+from .paddleocr import PaddleOCR
 from .easyocr import EasyOCREngine
 
 # Add these imports when you have the other engine files
@@ -15,12 +15,8 @@ from .easyocr import EasyOCREngine
 
 # Export the engines for easy import
 __all__ = [
-    'PaddleOCREngine',
+    'PaddleOCR',
     'EasyOCREngine',
-    # 'TesseractEngine',
-    # 'TrOCREngine'
+    'TesseractEngine',
+    'TrOCREngine'
 ]
-
-# Optional: Create aliases for backward compatibility if needed
-PaddleOCR = PaddleOCREngine
-EasyOCR = EasyOCREngine

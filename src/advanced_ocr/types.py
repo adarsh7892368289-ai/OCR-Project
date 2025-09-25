@@ -1,4 +1,5 @@
-# src/advanced_ocr/types.py
+# Data structures and type definitions for the Advanced OCR Library
+
 """
 Data structures and type definitions for the Advanced OCR Library.
 This module contains all data classes, enums, and type definitions used throughout the library.
@@ -17,7 +18,7 @@ class ProcessingStrategy(Enum):
     MINIMAL = "minimal"      # High quality - minimal processing
     BALANCED = "balanced"    # Standard processing
     ENHANCED = "enhanced"    # Poor quality - heavy enhancement
-
+    MULTI_ENGINE = "multi_engine"
 
 class ImageType(Enum):
     """Image content type classification"""

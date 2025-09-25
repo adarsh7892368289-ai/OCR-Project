@@ -9,11 +9,6 @@ Responsibility: Define standardized interface for OCR engines ONLY
 - Define required methods all engines must implement
 - Basic validation and logging support
 
-Does NOT contain:
-- Image enhancement logic (handled by ImageEnhancer)
-- Layout reconstruction (handled by pipeline)
-- Engine management logic (handled by EngineManager)
-- Quality analysis (handled by QualityAnalyzer)
 """
 
 from abc import ABC, abstractmethod

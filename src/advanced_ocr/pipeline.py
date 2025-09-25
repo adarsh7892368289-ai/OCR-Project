@@ -1,8 +1,10 @@
+# Main OCR Pipeline - Orchestrates the entire OCR process
+
 """
 Main OCR Pipeline - Orchestrates the entire OCR process.
 
 This module coordinates between components without doing their actual work.
-CLEAN IMPLEMENTATION - Only orchestration and coordination logic.
+It uses the EngineManager with smart selection and result combination.
 """
 
 import time
@@ -26,24 +28,23 @@ from .utils.images import load_image, validate_image, detect_rotation, correct_r
 class OCRLibrary:
     """
     Main OCR Library class - coordinates the entire OCR pipeline.
-    
-    CLEAN IMPLEMENTATION - Pure orchestration:
+
     - Coordinates workflow between components
     - Loads and validates images using utils
-    - Makes simple strategy decisions
+    - Uses EngineManager's intelligent selection and combination
     - Packages final results
     - Provides clean public API
-    
+
     Does NOT:
     - Perform image analysis (QualityAnalyzer's job)
     - Enhance images (ImageEnhancer's job)
-    - Register engines (EngineManager's job)
-    - Run OCR engines (EngineManager's job)
+    - Select engines manually (EngineManager's job now)
+    - Combine results manually (EngineManager's job now)
     - Implement algorithms (components' jobs)
     """
     
     def __init__(self, config_path: Optional[str] = None):
-        """Initialize OCR Library with configuration"""
+        """Initialize OCR Library with enhanced configuration"""
         self.logger = setup_logger(self.__class__.__name__)
         
         # Load configuration
@@ -56,25 +57,24 @@ class OCRLibrary:
         self.image_enhancer = ImageEnhancer(
             self.config.get("image_enhancer", {})
         )
+        # Pass full config to EngineManager for engine configuration
         self.engine_manager = EngineManager(self.config)
         
-        # Let EngineManager handle all engine setup
+        # Let EngineManager handle all engine setup with enhanced capabilities
         self._initialize_engines()
         
-        self.logger.info("OCR Library initialized successfully")
+        self.logger.info("OCR Library initialized successfully with enhanced engine management")
     
-    def process_image(self, 
-                     image_input: Union[str, Path, np.ndarray], 
+    def process_image(self,
+                     image_input: Union[str, Path, np.ndarray],
                      options: Optional[ProcessingOptions] = None) -> OCRResult:
         """
         Process a single image through the OCR pipeline.
-        
-        CLEAN ORCHESTRATION: Each step delegates to appropriate component.
-        
+
         Args:
             image_input: Image file path or numpy array
             options: Processing options
-            
+
         Returns:
             OCR result with extracted text and metadata
         """
@@ -91,14 +91,14 @@ class OCRLibrary:
             # Step 2: Analyze image quality (delegate to QualityAnalyzer)
             quality_metrics = self.quality_analyzer.analyze_image(image)
             
-            # Step 3: Determine processing strategy (simple pipeline logic)
+            # Step 3: Determine processing strategy (enhanced logic)
             strategy = self._determine_strategy(quality_metrics, options)
             
             # Step 4: Preprocess image (delegate to components)
             processed_image = self._preprocess_image(image, quality_metrics, strategy, options)
             
-            # Step 5: Extract text (delegate to EngineManager) 
-            ocr_result = self._extract_text(processed_image, options)
+            # Step 5: Extract text (UPDATED - delegate to EngineManager's intelligence) 
+            ocr_result = self._extract_text(processed_image, options, quality_metrics, strategy)
             
             # Step 6: Package final result (coordination only)
             final_result = self._package_result(
@@ -111,18 +111,16 @@ class OCRLibrary:
             self.logger.error(f"OCR processing failed: {e}")
             raise OCRLibraryError(f"Failed to process image: {str(e)}") from e
     
-    def process_batch(self, 
-                     image_paths: List[Union[str, Path]], 
+    def process_batch(self,
+                     image_paths: List[Union[str, Path]],
                      options: Optional[ProcessingOptions] = None) -> BatchResult:
         """
         Process multiple images in batch.
-        
-        CLEAN IMPLEMENTATION: Simple iteration with result aggregation.
-        
+
         Args:
             image_paths: List of image file paths
             options: Processing options
-            
+
         Returns:
             Batch processing results
         """
@@ -159,7 +157,8 @@ class OCRLibrary:
             average_confidence=avg_confidence,
             metadata={
                 'total_images': len(image_paths),
-                'options_used': options.__dict__ if options else {}
+                'options_used': options.__dict__ if options else {},
+                'enhanced_engine_management': True
             }
         )
     
@@ -171,32 +170,28 @@ class OCRLibrary:
         """Get detailed information about engines (delegate to EngineManager)"""
         return self.engine_manager.get_engine_info()
     
-    # Private helper methods (CLEAN - only coordination logic)
-    
+    # Private helper methods
+
     def _initialize_engines(self) -> None:
         """
-        Initialize engines through EngineManager.
-        
-        CLEAN: No engine instantiation, just tell EngineManager to handle it.
+        Initialize engines through enhanced EngineManager.
         """
         try:
-            # Let EngineManager handle everything
+            # Let EngineManager handle everything with enhanced capabilities
             init_results = self.engine_manager.initialize_available_engines()
             
             successful = [name for name, success in init_results.items() if success]
             if successful:
-                self.logger.info(f"Initialized engines: {successful}")
+                self.logger.info(f"Initialized engines with smart selection: {successful}")
             else:
                 self.logger.warning("No engines initialized successfully")
                 
         except Exception as e:
-            self.logger.error(f"Engine initialization failed: {e}")
+            self.logger.error(f"Enhanced engine initialization failed: {e}")
     
     def _load_and_validate_image(self, image_input: Union[str, Path, np.ndarray]) -> np.ndarray:
         """
         Load and validate image input.
-        
-        CLEAN: Only uses utils.images, no processing logic.
         """
         if isinstance(image_input, np.ndarray):
             if not validate_image(image_input):
@@ -212,32 +207,34 @@ class OCRLibrary:
         else:
             raise OCRLibraryError(f"Unsupported image input type: {type(image_input)}")
     
-    def _determine_strategy(self, quality_metrics: QualityMetrics, 
+    def _determine_strategy(self, quality_metrics: QualityMetrics,
                           options: ProcessingOptions) -> ProcessingStrategy:
         """
-        Determine processing strategy based on quality and options.
-        
-        CLEAN: Simple decision logic, no complex algorithms.
+        Determine processing strategy with MULTI_ENGINE support.
         """
         # Use explicit strategy if provided
         if options.strategy:
             return options.strategy
         
-        # Auto-determine based on quality metrics (simple thresholds)
+        # Auto-determine based on quality metrics (enhanced thresholds)
         if quality_metrics.overall_score >= 0.8:
             return ProcessingStrategy.MINIMAL
         elif quality_metrics.overall_score >= 0.5:
             return ProcessingStrategy.BALANCED
-        else:
+        elif quality_metrics.overall_score >= 0.2:
             return ProcessingStrategy.ENHANCED
+        else:
+            # Very poor quality - use multiple engines for best chance
+            self.logger.info(f"Very poor image quality ({quality_metrics.overall_score:.3f}), using MULTI_ENGINE strategy")
+            return ProcessingStrategy.MULTI_ENGINE
     
-    def _preprocess_image(self, image: np.ndarray, 
+    def _preprocess_image(self, image: np.ndarray,
                          quality_metrics: QualityMetrics,
-                         strategy: ProcessingStrategy, 
+                         strategy: ProcessingStrategy,
                          options: ProcessingOptions) -> np.ndarray:
         """
         Apply preprocessing by delegating to appropriate components.
-        
+
         CLEAN: Pure delegation, no processing algorithms.
         """
         processed_image = image.copy()
@@ -257,7 +254,7 @@ class OCRLibrary:
     def _handle_rotation_correction(self, image: np.ndarray) -> np.ndarray:
         """
         Handle rotation correction using utils.images.
-        
+
         CLEAN: Only coordination, actual work done by utils.
         """
         try:
@@ -271,12 +268,12 @@ class OCRLibrary:
             self.logger.warning(f"Rotation correction failed: {e}")
             return image
     
-    def _handle_image_enhancement(self, image: np.ndarray, 
+    def _handle_image_enhancement(self, image: np.ndarray,
                                  quality_metrics: QualityMetrics,
                                  strategy: ProcessingStrategy) -> np.ndarray:
         """
         Handle image enhancement using ImageEnhancer.
-        
+
         CLEAN: Only coordination, actual work done by ImageEnhancer.
         """
         try:
@@ -294,70 +291,127 @@ class OCRLibrary:
             self.logger.warning(f"Image enhancement failed: {e}")
             return image
     
-    def _extract_text(self, image: np.ndarray, options: ProcessingOptions) -> OCRResult:
+    def _extract_text(self, image: np.ndarray, options: ProcessingOptions,
+                     quality_metrics: Optional[QualityMetrics] = None,
+                     strategy: Optional[ProcessingStrategy] = None) -> OCRResult:
         """
-        Extract text by delegating everything to EngineManager.
-        
-        CLEAN: All engine logic handled by EngineManager.
+        Extract text using EngineManager's smart selection and combination.
+
+        UPDATED: Now uses EngineManager's intelligence instead of manual selection.
         """
         available_engines = self.engine_manager.get_available_engines()
         
         if not available_engines:
             raise EngineNotAvailableError("No engines are available")
         
-        # Determine engines to use (simple logic)
-        engines_to_use = options.engines or available_engines[:1]  # Default to first available
-        engines_to_use = [eng for eng in engines_to_use if eng in available_engines]
+        # Use determined strategy or default
+        processing_strategy = strategy or options.strategy or ProcessingStrategy.BALANCED
         
-        if not engines_to_use:
-            raise EngineNotAvailableError("No requested engines are available")
-        
-        # Single engine case
-        if len(engines_to_use) == 1:
-            result = self.engine_manager.execute_engine(engines_to_use[0], image, options)
-            
-            if result.confidence >= options.min_confidence:
-                return result
-            else:
-                raise OCRLibraryError(
-                    f"Result confidence ({result.confidence:.3f}) below threshold ({options.min_confidence})"
-                )
-        
-        # Multi-engine case - delegate to EngineManager
-        else:
-            results = self.engine_manager.execute_multiple_engines(
-                engines_to_use, image, options, use_parallel=options.use_parallel_processing
-            )
-            
-            # Simple result selection (just pick highest confidence)
-            if not results:
-                raise OCRLibraryError("No engines produced results")
+        try:
+            # Use EngineManager's smart selection based on strategy
+            if processing_strategy == ProcessingStrategy.MULTI_ENGINE:
+                # Multi-engine processing with intelligent result combination
+                self.logger.info("Using MULTI_ENGINE strategy for consensus-based OCR")
                 
-            best_result = max(results.values(), key=lambda r: r.confidence)
-            
-            if best_result.confidence < options.min_confidence:
-                raise OCRLibraryError("No engine produced acceptable results")
-            
-            return best_result
+                selected_engines = self.engine_manager.select_engines_for_multi_engine(
+                    preferred_engines=options.engines,
+                    languages=options.languages,
+                    max_engines=3  # Limit to 3 engines for performance
+                )
+                
+                self.logger.debug(f"Selected engines for multi-engine: {selected_engines}")
+                
+                results = self.engine_manager.execute_multiple_engines(
+                    selected_engines, 
+                    image, 
+                    options, 
+                    use_parallel=options.use_parallel_processing
+                )
+                
+                # Let EngineManager intelligently combine results
+                combined_result = self.engine_manager.combine_results(results)
+                
+                if combined_result.confidence < options.min_confidence:
+                    self.logger.warning(
+                        f"Multi-engine result confidence ({combined_result.confidence:.3f}) "
+                        f"below threshold ({options.min_confidence}), but proceeding"
+                    )
+                
+                self.logger.info(f"Multi-engine processing complete: {combined_result.engine_used}, "
+                               f"confidence: {combined_result.confidence:.3f}")
+                return combined_result
+                
+            else:
+                # Single engine selection (MINIMAL/BALANCED/ENHANCED)
+                self.logger.debug(f"Using single engine strategy: {processing_strategy.value}")
+                
+                best_engine = self.engine_manager.select_best_engine(
+                    strategy=processing_strategy,
+                    preferred_engines=options.engines,
+                    languages=options.languages,
+                    quality_metrics=quality_metrics
+                )
+                
+                self.logger.debug(f"Selected best engine: {best_engine}")
+                
+                result = self.engine_manager.execute_engine(best_engine, image, options)
+                
+                if result.confidence < options.min_confidence:
+                    # For single engine, we can try fallback to multi-engine if confidence is too low
+                    if processing_strategy != ProcessingStrategy.ENHANCED:
+                        self.logger.info(
+                            f"Single engine confidence ({result.confidence:.3f}) below threshold "
+                            f"({options.min_confidence}), attempting multi-engine fallback"
+                        )
+                        
+                        # Fallback to multi-engine
+                        fallback_engines = self.engine_manager.select_engines_for_multi_engine(
+                            preferred_engines=options.engines,
+                            languages=options.languages,
+                            max_engines=2
+                        )
+                        
+                        fallback_results = self.engine_manager.execute_multiple_engines(
+                            fallback_engines, image, options, use_parallel=True
+                        )
+                        
+                        fallback_result = self.engine_manager.combine_results(fallback_results)
+                        
+                        if fallback_result.confidence > result.confidence:
+                            self.logger.info(f"Fallback improved confidence: {fallback_result.confidence:.3f}")
+                            fallback_result.metadata["fallback_used"] = True
+                            return fallback_result
+                
+                self.logger.info(f"Single engine processing complete: {result.engine_used}, "
+                               f"confidence: {result.confidence:.3f}")
+                return result
+                
+        except EngineNotAvailableError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Enhanced text extraction failed: {e}")
+            raise OCRLibraryError(f"Text extraction failed: {str(e)}") from e
     
     def _package_result(self, ocr_result: OCRResult, quality_metrics: QualityMetrics,
                        strategy: ProcessingStrategy, total_time: float) -> OCRResult:
         """
-        Package final result with metadata.
+        Package final result with enhanced metadata.
         
-        CLEAN: Simple result packaging, no processing logic.
+        UPDATED: Includes enhanced engine management metadata.
         """
         # Update the result with pipeline metadata
         ocr_result.processing_time = total_time
         ocr_result.quality_metrics = quality_metrics
         ocr_result.strategy_used = strategy
         
-        # Add pipeline metadata
+        # Add enhanced pipeline metadata
         ocr_result.metadata.update({
-            'pipeline_version': '1.0',
+            'pipeline_version': '2.0',  # Updated version with enhanced engine management
             'strategy_used': strategy.value,
             'total_processing_time': total_time,
             'quality_score': quality_metrics.overall_score,
+            'enhanced_engine_management': True,
+            'smart_selection_used': True
         })
         
         return ocr_result
@@ -387,6 +441,7 @@ class OCRLibrary:
             metadata={
                 'error': error_message,
                 'image_path': image_path,
-                'failed': True
+                'failed': True,
+                'enhanced_engine_management': True
             }
         )

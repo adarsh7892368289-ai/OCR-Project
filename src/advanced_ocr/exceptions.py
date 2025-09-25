@@ -1,4 +1,5 @@
-# src/advanced_ocr/exceptions.py
+# Custom exception classes for the Advanced OCR Library
+
 """
 Custom exception classes for the Advanced OCR Library.
 Provides specific error types for different failure scenarios.

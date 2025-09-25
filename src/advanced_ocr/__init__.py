@@ -1,3 +1,5 @@
+# Main package initialization and public API for advanced_ocr
+
 """
 Advanced OCR Library - Multi-engine text extraction with intelligent preprocessing
 
@@ -9,10 +11,10 @@ This package provides a modern, modular OCR solution that:
 
 Quick Start:
     >>> from advanced_ocr import OCRLibrary, extract_text
-    >>> 
+    >>>
     >>> # Simple usage
     >>> text = extract_text("document.jpg")
-    >>> 
+    >>>
     >>> # Advanced usage
     >>> ocr = OCRLibrary()
     >>> result = ocr.process_image("document.jpg")
@@ -20,7 +22,6 @@ Quick Start:
     >>> print(f"Confidence: {result.confidence}")
 """
 
-# Import main classes from their modules
 from .pipeline import OCRLibrary
 from .types import (
     ProcessingOptions, 
@@ -36,7 +37,6 @@ from .exceptions import (
     EngineInitializationError
 )
 
-# Define public API - what users can import
 __all__ = [
     # Main library class
     'OCRLibrary',
@@ -59,7 +59,6 @@ __all__ = [
     'process_images',
 ]
 
-# Convenience functions for quick usage
 def extract_text(image_path: str, **kwargs) -> str:
     """
     Quick text extraction with default settings.
@@ -105,7 +104,6 @@ def process_images(image_paths: list, **kwargs) -> list:
     return batch_result.results
 
 
-# Module-level configuration (optional)
 def configure_logging(level="INFO", log_file=None):
     """
     Configure logging for the entire library.
@@ -121,7 +119,6 @@ def configure_logging(level="INFO", log_file=None):
     from .utils.logging import setup_logging
     setup_logging(level=level, log_file=log_file)
 
-# Optional: Auto-configure basic logging when package is imported
 try:
     from .utils.logging import setup_logging
     setup_logging(level="WARNING")  # Only warnings and errors by default

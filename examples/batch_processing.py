@@ -18,7 +18,7 @@ MIN_CONFIDENCE = 0.6                       # Minimum confidence threshold
 MAX_IMAGES = 10                           # Maximum number of images to process (None for all)
 
 # Add OCR library to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 def collect_images(folder_path):
     """Find all image files in the specified folder"""

@@ -209,8 +209,8 @@ class PaddleOCREngine(BaseOCREngine):
 
     def _prepare_for_paddleocr(self, image: np.ndarray) -> np.ndarray:
         """
-        Minimal conversion for PaddleOCR compatibility
-        Only format conversion - YOUR preprocessing pipeline handles enhancement
+        Prepare image for PaddleOCR by converting color format.
+        PaddleOCR needs RGB images, so we convert from BGR or grayscale if needed.
         """
         # PaddleOCR expects RGB format
         if len(image.shape) == 3:
@@ -225,7 +225,8 @@ class PaddleOCREngine(BaseOCREngine):
     
     def _combine_ocr_results_with_layout(self, paddle_detections: List) -> OCRResult:
         """
-        Use layout reconstruction logic to combine detections
+        Combine PaddleOCR detections into a final OCR result with proper layout.
+        This takes the raw detections and organizes them into readable text.
         """
         regions = []
         detection_count = 0
@@ -299,7 +300,8 @@ class PaddleOCREngine(BaseOCREngine):
     
     def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
         """
-        Enhanced layout reconstruction for complex documents like receipts
+        Reconstruct the document layout by grouping text regions into lines and adding proper spacing.
+        This makes the extracted text readable by preserving the original document structure.
         """
         if not regions:
             return ""

@@ -1,0 +1,28 @@
+OCR Result - 2025-09-25 13:38:32
+==================================================
+
+Success: True
+Engine: EasyOCR
+Confidence: 39.8%
+Time: 81.86s
+Text Length: 117 characters
+Word Count: 30
+Line Count: 15
+
+EXTRACTED TEXT:
+--------------------
+383
+833
+43
+83    :88
+333
+Mj
+Ikxazalzg ] {
+I4  333
+0 9 8 % 3
+Ha    ik
+833
+89 1i
+883  149    333    31
+i #81
+12    #883
