@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "advanced-ocr-system"
 dynamic = ["version"]
@@ -5,8 +9,24 @@ description = "Advanced OCR library with multiple engines and smart preprocessin
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.9"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["ocr", "text-recognition", "computer-vision", "image-processing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10", 
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Text Processing :: Linguistic",
+]
 
-# Core dependencies from base.txt
+# Core dependencies
 dependencies = [
     "numpy>=1.24.0,<2.0.0",
     "opencv-python>=4.6.0,<5.0.0",
@@ -48,17 +68,68 @@ all-engines = [
 
 # Development dependencies
 dev = [
-    "black>=23.0.0,<24.0.0",
+    "black>=23.0.0,<25.0.0",
     "isort>=5.12.0,<6.0.0",
-    "flake8>=6.0.0,<7.0.0",
+    "flake8>=6.0.0,<8.0.0",
     "mypy>=1.5.0,<2.0.0",
     "pre-commit>=3.4.0,<4.0.0",
 ]
 
 # Testing dependencies  
 test = [
-    "pytest>=7.4.0,<8.0.0",
-    "pytest-cov>=4.1.0,<5.0.0",
+    "pytest>=7.4.0,<9.0.0",
+    "pytest-cov>=4.1.0,<6.0.0",
     "pytest-asyncio>=0.21.0,<1.0.0",
     "coverage>=7.3.0,<8.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/advanced-ocr-system"
+Repository = "https://github.com/yourusername/advanced-ocr-system"
+"Bug Tracker" = "https://github.com/yourusername/advanced-ocr-system/issues"
+
+# Package configuration
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "advanced_ocr._version.__version__"}
+
+[tool.setuptools.package-data]
+"advanced_ocr.resources" = ["*.yaml", "*.yml"]
+
+# Tool configurations
+[tool.black]
+line-length = 88
+target-version = ['py39']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+src_paths = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+mypy_path = "src"
+packages = ["advanced_ocr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "cv2.*",
+    "paddle.*", 
+    "paddleocr.*",
+    "easyocr.*",
+    "pytesseract.*",
+    "transformers.*",
+    "torch.*",
+    "torchvision.*"
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--cov=advanced_ocr", "--cov-report=term-missing"]

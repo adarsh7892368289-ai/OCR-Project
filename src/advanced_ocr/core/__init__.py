@@ -1,36 +1,16 @@
-
+# src/advanced_ocr/core/__init__.py
 """
-OCR Core Module
-Provides base classes and engine management for OCR operations
+Core OCR components.
+
+Exports:
+- BaseOCREngine: Abstract base class for all OCR engines
+- EngineManager: Manages OCR engines and coordinates their use
 """
 
-from .base_engine import (
-    BaseOCREngine, 
-    OCRResult, 
-    DocumentResult, 
-    TextRegion, 
-    BoundingBox,
-    DocumentStructure,
-    TextType,
-    DetectionMethod
-)
-
-from .engine_manager import OCREngineManager
-
-# Create aliases for backward compatibility
-OCREngine = BaseOCREngine  # This fixes the "cannot import OCREngine" error
-EngineManager = OCREngineManager  # This fixes the "cannot import EngineManager" error
+from .base_engine import BaseEngine
+from .engine_manager import EngineManager
 
 __all__ = [
-    'BaseOCREngine',
-    'OCREngine',  # Alias
-    'OCREngineManager', 
-    'EngineManager',  # Alias
-    'OCRResult',
-    'DocumentResult',
-    'TextRegion',
-    'BoundingBox', 
-    'DocumentStructure',
-    'TextType',
-    'DetectionMethod'
+    'BaseEngine',
+    'EngineManager'
 ]

@@ -1,3 +1,4 @@
+# src/advanced_ocr/engines/paddleocr.py
 import os
 import cv2
 import numpy as np
@@ -9,16 +10,16 @@ from typing import List, Dict, Any, Tuple, Optional
 warnings.filterwarnings('ignore', category=UserWarning, module='paddle')
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-from ..core.base_engine import (
-    BaseOCREngine, 
+# FIXED IMPORTS: Import from correct locations
+from ..core.base_engine import BaseOCREngine
+from ..types import (
     OCRResult, 
     BoundingBox, 
     TextRegion, 
-    DocumentResult, 
     TextType
 )
 
-class PaddleOCR(BaseOCREngine):
+class PaddleOCREngine(BaseOCREngine):
     """
     Modern PaddleOCR Engine - Aligned with Pipeline Architecture
     
@@ -58,12 +59,19 @@ class PaddleOCR(BaseOCREngine):
             )
             
             self.is_initialized = True
-            self.model_loaded = True
             self.logger.info("PaddleOCR initialized successfully")
             return True
             
         except Exception as e:
             self.logger.error(f"PaddleOCR initialization failed: {e}")
+            return False
+
+    def is_available(self) -> bool:
+        """Check if PaddleOCR is available"""
+        try:
+            import paddleocr
+            return self.is_initialized and self.ocr is not None
+        except ImportError:
             return False
             
     def get_supported_languages(self) -> List[str]:
@@ -75,9 +83,9 @@ class PaddleOCR(BaseOCREngine):
             'sv', 'fi', 'fr', 'de', 'es', 'pt', 'it', 'nl', 'ca', 'eu', 'gl'
         ]
         
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
+    def extract_text(self, image: np.ndarray) -> OCRResult:
         """
-        FIXED: Process preprocessed image with PaddleOCR - Now uses proper layout reconstruction
+        FIXED: Extract text from preprocessed image - matches base_engine interface
         """
         start_time = time.time()
         
@@ -88,11 +96,11 @@ class PaddleOCR(BaseOCREngine):
                     raise RuntimeError("PaddleOCR engine not initialized")
             
             # Validate preprocessed input
-            if not self.validate_image(preprocessed_image):
+            if not self.validate_image(image):
                 raise ValueError("Invalid preprocessed image")
             
             # Convert image for PaddleOCR
-            paddle_image = self._prepare_for_paddleocr(preprocessed_image)
+            paddle_image = self._prepare_for_paddleocr(image)
             
             # Call PaddleOCR
             try:
@@ -104,16 +112,14 @@ class PaddleOCR(BaseOCREngine):
                     self.logger.error(f"Both PaddleOCR calls failed: {e1}, {e2}")
                     raise e2
             
-            # FIXED: Parse results and use the same layout reconstruction as EasyOCR
+            # Parse results and reconstruct layout
             paddle_detections = self._parse_paddleocr_results(results)
-            
-            # Use the SAME layout reconstruction method as EasyOCR
             result = self._combine_ocr_results_with_layout(paddle_detections)
             
-            # Set processing time
+            # Set processing time and engine name
             processing_time = time.time() - start_time
             result.processing_time = processing_time
-            result.engine_name = self.name
+            result.engine_used = self.name  # Use engine_used instead of engine_name
             
             # Update stats
             self.processing_stats['total_processed'] += 1
@@ -135,13 +141,13 @@ class PaddleOCR(BaseOCREngine):
                 text="",
                 confidence=0.0,
                 processing_time=processing_time,
-                engine_name=self.name,
+                engine_used=self.name,
                 metadata={"error": str(e)}
             )
 
     def _parse_paddleocr_results(self, results) -> List:
         """
-        FIXED: Parse PaddleOCR results into standard detection format
+        Parse PaddleOCR results into standard detection format
         Returns format compatible with layout reconstruction: [bbox_points, text, confidence]
         """
         detections = []
@@ -219,7 +225,7 @@ class PaddleOCR(BaseOCREngine):
     
     def _combine_ocr_results_with_layout(self, paddle_detections: List) -> OCRResult:
         """
-        FIXED: Use the SAME layout reconstruction logic as EasyOCR
+        Use layout reconstruction logic to combine detections
         """
         regions = []
         detection_count = 0
@@ -230,11 +236,11 @@ class PaddleOCR(BaseOCREngine):
                 text="",
                 confidence=0.0,
                 regions=[],
-                engine_name=self.name,
+                engine_used=self.name,
                 metadata={"detection_count": 0}
             )
         
-        # Convert PaddleOCR detections to TextRegions (same as EasyOCR)
+        # Convert PaddleOCR detections to TextRegions
         for detection in paddle_detections:
             try:
                 if len(detection) >= 3:
@@ -248,8 +254,7 @@ class PaddleOCR(BaseOCREngine):
                     x, y, w, h = self._polygon_to_bbox(bbox_points)
                     bbox = BoundingBox(
                         x=x, y=y, width=w, height=h, 
-                        confidence=confidence,
-                        text_type=TextType.PRINTED
+                        confidence=confidence
                     )
                     
                     # Create text region with spatial information
@@ -268,7 +273,7 @@ class PaddleOCR(BaseOCREngine):
                 self.logger.warning(f"Skipping problematic detection: {detection}, error: {e}")
                 continue
         
-        # Use the SAME layout reconstruction as EasyOCR
+        # Use layout reconstruction
         formatted_text = self._reconstruct_document_layout(regions)
         
         # Calculate overall confidence
@@ -282,9 +287,7 @@ class PaddleOCR(BaseOCREngine):
             confidence=overall_confidence,
             regions=regions,
             bbox=overall_bbox,
-            level="page",
-            engine_name=self.name,
-            text_type=TextType.PRINTED,
+            engine_used=self.name,
             metadata={
                 'detection_method': 'paddleocr',
                 'detection_count': detection_count,
@@ -296,19 +299,18 @@ class PaddleOCR(BaseOCREngine):
     
     def _reconstruct_document_layout(self, regions: List[TextRegion]) -> str:
         """
-        IMPROVED: Enhanced layout reconstruction for complex documents like receipts
-        Handles multi-column layouts, preserves vertical spacing, and maintains text order
+        Enhanced layout reconstruction for complex documents like receipts
         """
         if not regions:
             return ""
         
-        # Sort regions primarily by vertical position, with more refined logic
+        # Sort regions primarily by vertical position
         sorted_regions = sorted(regions, key=lambda r: (
             r.bbox.y + r.bbox.height // 2,  # Use center Y for better line grouping
             r.bbox.x  # Then by X position
         ))
         
-        # IMPROVED: More sophisticated line grouping
+        # Group regions into lines
         lines = []
         current_line = []
         
@@ -319,15 +321,13 @@ class PaddleOCR(BaseOCREngine):
                 # First region
                 current_line = [region]
             else:
-                # Check if this region should be on the same line as previous regions
+                # Check if this region should be on the same line
                 should_group = False
                 
-                # Compare with all regions in current line, not just the first one
                 for line_region in current_line:
                     line_center_y = line_region.bbox.y + line_region.bbox.height // 2
                     y_distance = abs(region_center_y - line_center_y)
                     
-                    # More conservative line height threshold for receipts
                     adaptive_threshold = min(
                         self.line_height_threshold,
                         min(region.bbox.height, line_region.bbox.height) * 0.7
@@ -340,7 +340,6 @@ class PaddleOCR(BaseOCREngine):
                 if should_group:
                     current_line.append(region)
                 else:
-                    # Finalize current line and start new one
                     if current_line:
                         lines.append(current_line)
                     current_line = [region]
@@ -349,7 +348,7 @@ class PaddleOCR(BaseOCREngine):
             if i == len(sorted_regions) - 1 and current_line:
                 lines.append(current_line)
         
-        # IMPROVED: Better text assembly with column awareness
+        # Assemble text with proper spacing
         formatted_lines = []
         
         for line_regions in lines:
@@ -359,7 +358,6 @@ class PaddleOCR(BaseOCREngine):
             # Sort regions in line by X coordinate
             line_regions.sort(key=lambda r: r.bbox.x)
             
-            # IMPROVED: Detect column breaks and handle spacing more intelligently
             line_parts = []
             
             for i, region in enumerate(line_regions):
@@ -371,18 +369,14 @@ class PaddleOCR(BaseOCREngine):
                     prev_region = line_regions[i-1]
                     horizontal_gap = region.bbox.x - (prev_region.bbox.x + prev_region.bbox.width)
                     
-                    # More nuanced spacing logic for receipts
+                    # Intelligent spacing based on gap size
                     if horizontal_gap > self.word_spacing_threshold * 2:
-                        # Large gap - likely different columns, use multiple spaces
-                        spaces = "    "  # 4 spaces for column separation
+                        spaces = "    "  # Large gap - column separation
                     elif horizontal_gap > self.word_spacing_threshold:
-                        # Medium gap - separate items/prices
-                        spaces = "  "  # 2 spaces
+                        spaces = "  "   # Medium gap - item/price separation
                     elif horizontal_gap > 5:
-                        # Small gap - word separation
-                        spaces = " "
+                        spaces = " "    # Small gap - word separation
                     else:
-                        # Very small or no gap - might be continuous text
                         spaces = " " if not prev_region.text.strip().endswith(' ') else ""
                     
                     line_parts.append(spaces)
@@ -395,26 +389,25 @@ class PaddleOCR(BaseOCREngine):
                 if line_text:
                     formatted_lines.append(line_text)
         
-        # IMPROVED: Handle vertical spacing between text blocks
+        # Handle vertical spacing between text blocks
         final_text_lines = []
         prev_line_bottom = None
         
         for i, (formatted_line, line_regions) in enumerate(zip(formatted_lines, lines)):
             current_line_top = min(r.bbox.y for r in line_regions)
             
-            # Add extra line break for significant vertical gaps (new sections)
+            # Add extra line break for significant vertical gaps
             if prev_line_bottom is not None:
                 vertical_gap = current_line_top - prev_line_bottom
                 avg_line_height = sum(r.bbox.height for r in line_regions) / len(line_regions)
                 
-                # If gap is significantly larger than typical line height, add extra spacing
                 if vertical_gap > avg_line_height * 1.5:
                     final_text_lines.append("")  # Add blank line for section separation
             
             final_text_lines.append(formatted_line)
             prev_line_bottom = max(r.bbox.y + r.bbox.height for r in line_regions)
         
-        # Join with newlines, removing any excessive blank lines
+        # Join with newlines and clean up
         result = "\n".join(final_text_lines)
         
         # Clean up multiple consecutive newlines (max 2 in a row)
@@ -450,58 +443,4 @@ class PaddleOCR(BaseOCREngine):
             height=max_y - min_y,
             confidence=sum(r.confidence for r in regions) / len(regions)
         )
-    
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
-        """Process multiple images - returns single result per image"""
-        results = []
-        for image in images:
-            result = self.process_image(image, **kwargs)
-            results.append(result)
-        return results
-    
-    def get_engine_info(self) -> Dict[str, Any]:
-        """Get comprehensive engine information"""
-        info = {
-            'name': self.name,
-            'version': None,
-            'type': 'deep_learning_ocr',
-            'supported_languages': self.get_supported_languages(),
-            'capabilities': {
-                'handwriting': self.supports_handwriting,
-                'multiple_languages': self.supports_multiple_languages,
-                'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis,
-                'layout_preservation': True
-            },
-            'optimal_for': ['printed_text', 'documents', 'receipts', 'forms', 'structured_text'],
-            'performance_profile': {
-                'accuracy': 'high',
-                'speed': 'fast',
-                'memory_usage': 'high' if self.gpu else 'medium',
-                'gpu_required': False,
-                'gpu_recommended': True
-            },
-            'model_info': {
-                'detection_model': 'DB',
-                'recognition_model': 'CRNN', 
-                'angle_classification': True,
-                'languages_loaded': self.languages,
-                'gpu_enabled': self.gpu
-            },
-            'pipeline_integration': {
-                'uses_preprocessing_pipeline': True,
-                'returns_single_result': True,
-                'compatible_with_base_engine': True,
-                'works_with_engine_manager': True,
-                'preserves_document_layout': True
-            }
-        }
-        
-        try:
-            # Try to get PaddleOCR version if available
-            import paddle
-            info['version'] = getattr(paddle, '__version__', 'unknown')
-        except:
-            info['version'] = 'unknown'
-            
-        return info
+PaddleOCR = PaddleOCREngine

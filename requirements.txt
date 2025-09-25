@@ -1,0 +1,29 @@
+# Advanced OCR System - Essential Requirements Only
+
+# Core OCR Engines
+paddlepaddle  # No version pinning to avoid build issues
+paddleocr
+easyocr
+pytesseract
+
+# Deep Learning Framework (for TrOCR)
+torch
+torchvision  
+transformers
+
+# Image Processing
+opencv-python
+Pillow
+numpy
+
+# Configuration
+PyYAML
+
+# Testing
+pytest
+pytest-cov
+
+# Development Tools
+black
+flake8
+mypy

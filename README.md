@@ -1,128 +1,172 @@
-# File: README_USAGE.md
-# Comprehensive usage documentation
+# Advanced OCR System
 
-"""
-# Advanced OCR System - Usage Guide
+A modern, multi-engine OCR library with intelligent preprocessing and quality analysis for Python.
+
+## Features
+
+- **Multiple OCR Engines**: PaddleOCR, EasyOCR, Tesseract, TrOCR
+- **Intelligent Preprocessing**: Automatic quality analysis and image enhancement
+- **Flexible Processing**: Minimal, balanced, or enhanced processing strategies
+- **Batch Processing**: Process multiple images efficiently
+- **Type Safety**: Full type hints and Pydantic validation
+- **Easy Integration**: Simple API with sensible defaults
+
+## Installation
+
+### Basic Installation
+```bash
+pip install advanced-ocr-system
+```
+
+### With Specific OCR Engines
+```bash
+# Lightweight engines (Tesseract + EasyOCR)
+pip install advanced-ocr-system[tesseract,easyocr]
+
+# AI-powered engines (PaddleOCR + TrOCR)  
+pip install advanced-ocr-system[paddleocr,trocr]
+
+# All engines
+pip install advanced-ocr-system[all-engines]
+```
 
 ## Quick Start
 
-### 1. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Simple Usage
 ```python
-from advanced_ocr import AdvancedOCR
+from advanced_ocr import OCRLibrary, extract_text
 
-# Initialize OCR system
-with AdvancedOCR() as ocr:
-    result = ocr.extract_text("path/to/your/image.jpg")
-    print(f"Text: {result.text}")
-    print(f"Confidence: {result.confidence}")
-```
-
-### 3. Command Line Usage
-```bash
-# Basic usage
-python run_ocr.py path/to/your/image.jpg
+# Simple usage
+text = extract_text("document.jpg")
+print(text)
 
 # Advanced usage
-python examples/command_line_usage.py --image document.jpg --mode accurate --output result.json
+ocr = OCRLibrary()
+result = ocr.extract_text("document.jpg")
+
+print(f"Text: {result.text}")
+print(f"Confidence: {result.confidence}")
+print(f"Engine used: {result.engine_used}")
 ```
 
-## Input Formats Supported
+## Processing Options
 
-- **File paths**: `"image.jpg"`, `"/full/path/to/image.png"`
-- **PIL Images**: `Image.open("image.jpg")`
-- **NumPy arrays**: `np.array(image)`
-- **Bytes**: Raw image bytes from files or web requests
-
-## Processing Modes
-
-- **FAST**: Single engine (Tesseract), minimal preprocessing
-- **BALANCED**: Two engines with fusion, good speed/accuracy balance
-- **ACCURATE**: All engines, maximum preprocessing, best quality
-
-## Configuration Examples
-
-### Development Configuration
 ```python
-config = OCRConfig.create_development_config()
-# Fast processing, single engine, minimal resources
-```
+from advanced_ocr import OCRLibrary, ProcessingOptions, ProcessingStrategy
 
-### Production Configuration
-```python
-config = OCRConfig.create_production_config() 
-# Multiple engines, full preprocessing, high accuracy
-```
-
-### Custom Configuration
-```python
-config = OCRConfig(
-    mode=ProcessingMode.ACCURATE,
-    engines=[EngineType.TESSERACT, EngineType.PADDLEOCR],
-    confidence_threshold=0.7,
-    enable_preprocessing=True,
-    use_gpu=True
+ocr = OCRLibrary()
+options = ProcessingOptions(
+    engines=['paddleocr', 'easyocr'],      # Specific engines
+    strategy=ProcessingStrategy.ENHANCED,   # Processing level
+    enhance_image=True,                     # Apply enhancement
+    min_confidence=0.8,                     # Quality threshold
+    early_termination=True                  # Stop on high confidence
 )
-```
 
-## Environment Variables
-
-Create a `.env` file in your project root:
-
-```
-OCR_USE_GPU=true
-OCR_MAX_WORKERS=4
-OCR_CONFIDENCE_THRESHOLD=0.5
-TESSERACT_LANG=eng
-PADDLEOCR_LANG=en
-```
-
-## Error Handling
-
-```python
-try:
-    with AdvancedOCR() as ocr:
-        result = ocr.extract_text("image.jpg")
-        if result.confidence < 0.5:
-            print("Warning: Low confidence result")
-        print(result.text)
-except Exception as e:
-    print(f"OCR failed: {e}")
+result = ocr.extract_text("image.jpg", options)
 ```
 
 ## Batch Processing
 
 ```python
-image_paths = ["img1.jpg", "img2.jpg", "img3.jpg"]
-with AdvancedOCR() as ocr:
-    results = ocr.extract_text_batch(image_paths)
-    for i, result in enumerate(results):
-        print(f"Image {i+1}: {result.text[:50]}...")
+from pathlib import Path
+
+# Process multiple images
+image_paths = list(Path("images/").glob("*.jpg"))
+results = ocr.extract_text_batch(image_paths)
+
+for result in results:
+    if result.success:
+        print(f"Extracted: {result.text[:100]}...")
+    else:
+        print(f"Failed: {result.metadata.get('error', 'Unknown error')}")
 ```
 
-## Tips for Best Results
+## Engine Information
 
-1. **Image Quality**: Use high-resolution, well-lit images
-2. **Preprocessing**: Enable preprocessing for poor quality images
-3. **Engine Selection**: Use multiple engines for better accuracy
-4. **Language Settings**: Set correct language in engine configs
-5. **GPU Usage**: Enable GPU for faster processing with neural engines
+```python
+# Check available engines
+engines = ocr.get_available_engines()
+print(f"Available: {engines}")
 
-## Troubleshooting
+# Get detailed engine info
+engine_info = ocr.get_engine_info()
+for name, info in engine_info.items():
+    print(f"{name}: {info['success_rate']:.1%} success rate")
+```
 
-### Common Issues:
-- **ModuleNotFoundError**: Check if all dependencies are installed
-- **Tesseract not found**: Install tesseract binary and set path
-- **GPU errors**: Disable GPU with `OCR_USE_GPU=false`
-- **Memory errors**: Reduce image size or disable some engines
+## Configuration
 
-### Performance Optimization:
-- Use FAST mode for quick processing
-- Enable GPU for neural engines
-- Adjust max_image_size for your hardware
-- Use appropriate number of workers
-"""
+Create a YAML config file:
+
+```yaml
+engines:
+  paddleocr:
+    enabled: true
+    priority: 1
+    confidence_threshold: 0.7
+  easyocr:
+    enabled: true  
+    priority: 2
+    confidence_threshold: 0.6
+
+preprocessing:
+  quality_analysis: true
+  enhancement: true
+```
+
+Load with custom config:
+```python
+ocr = OCRLibrary(config_path="config.yaml")
+```
+
+## Requirements
+
+- Python 3.9+
+- OpenCV 4.6+
+- NumPy 1.24+
+- PIL/Pillow 10.0+
+
+### Optional Engine Dependencies
+
+- **Tesseract**: `pytesseract`
+- **EasyOCR**: `easyocr` 
+- **PaddleOCR**: `paddlepaddle`, `paddleocr`
+- **TrOCR**: `torch`, `transformers`, `timm`
+
+## Engine Comparison
+
+| Engine | Speed | Accuracy | Languages | Handwriting |
+|--------|-------|----------|-----------|-------------|
+| Tesseract | Fast | Good | 100+ | Limited |
+| EasyOCR | Medium | Good | 80+ | Fair |
+| PaddleOCR | Fast | Excellent | 80+ | Good |
+| TrOCR | Slow | Excellent | Limited | Excellent |
+
+## Development
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/advanced-ocr-system.git
+cd advanced-ocr-system
+
+# Install development dependencies
+pip install -e ".[dev,test]"
+
+# Run tests
+pytest
+
+# Format code
+black src/ tests/
+isort src/ tests/
+
+# Type checking
+mypy src/
+```
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Contributing
+
+Contributions welcome! Please read our contributing guidelines and submit pull requests to our GitHub repository.

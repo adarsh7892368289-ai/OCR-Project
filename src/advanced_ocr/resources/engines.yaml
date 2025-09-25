@@ -1,0 +1,59 @@
+# src/advanced_ocr/resources/engines.yaml
+# Engine-specific configurations for OCR engines
+
+engines:
+  trocr:
+    enabled: true
+    model_name: "microsoft/trocr-base-printed"
+    device: "auto"  # auto, cpu, cuda
+    max_length: 384
+    num_beams: 5
+    early_stopping: true
+    confidence_threshold: 0.3
+    min_text_height: 15
+    max_text_height: 200
+    text_detection_method: "contours"
+    region_padding: 5
+    min_region_area: 100
+
+  paddleocr:
+    enabled: true
+    languages: ["en"]
+    use_gpu: true
+    use_angle_cls: true
+    det_db_thresh: 0.3
+    det_db_box_thresh: 0.6
+    det_db_unclip_ratio: 1.5
+    rec_batch_num: 6
+
+  easyocr:
+    enabled: true
+    languages: ["en"]
+    gpu: true
+    batch_size: 1
+    workers: 0
+    allowlist: null
+    blocklist: null
+    detail: 1
+    paragraph: false
+
+  tesseract:
+    enabled: true
+    lang: "eng"
+    config: "--oem 3 --psm 6"
+    nice: 0
+    timeout: 120
+
+# Priority order for engine selection
+engine_priority:
+  - "paddleocr"
+  - "easyocr" 
+  - "trocr"
+  - "tesseract"
+
+# Multi-engine settings
+multi_engine:
+  consensus_threshold: 0.8
+  max_engines_per_image: 2
+  confidence_weight: 0.7
+  similarity_weight: 0.3

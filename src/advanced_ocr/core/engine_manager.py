@@ -1,234 +1,413 @@
-# src/core/engine_manager.py - Clean Engine Manager
+# src/advanced_ocr/core/engine_manager.py
+"""
+OCR Engine Manager - Manages OCR engines and coordinates their execution.
 
-import time
-import numpy as np
+This module handles engine registration, initialization, and execution coordination.
+It does NOT implement OCR algorithms, image preprocessing, or decision logic.
+"""
+
 import logging
-from typing import Dict, Any, Optional, List
+import time
+from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import numpy as np
 
-from .base_engine import BaseOCREngine, OCRResult
+from .base_engine import BaseEngine
+from ..types import OCRResult, ProcessingOptions
+from ..exceptions import (
+    EngineNotAvailableError, 
+    EngineInitializationError,
+    ProcessingTimeoutError
+)
 
 @dataclass
-class EnginePerformance:
-    """Simple performance tracking per engine"""
+class EngineStats:
+    """Simple performance statistics for engines"""
     engine_name: str
-    total_processed: int = 0
-    successful_processes: int = 0
+    total_calls: int = 0
+    successful_calls: int = 0
     total_time: float = 0.0
     avg_confidence: float = 0.0
+    
+    @property
+    def success_rate(self) -> float:
+        return (self.successful_calls / self.total_calls * 100) if self.total_calls > 0 else 0.0
+    
+    @property 
+    def avg_time(self) -> float:
+        return self.total_time / self.total_calls if self.total_calls > 0 else 0.0
+
 
 class EngineManager:
     """
-    Clean Engine Manager - Just manages engines, no complex logic
+    Manages OCR engines and coordinates their execution.
     
     Responsibilities:
-    1. Register and initialize engines
-    2. Provide available engines to pipeline
-    3. Simple engine selection logic
-    4. Basic performance tracking
+    - Register and initialize OCR engines
+    - Provide engine availability information
+    - Execute engines with proper error handling
+    - Track basic performance statistics
+    
+    Does NOT:
+    - Decide which engine to use (pipeline's job)
+    - Enhance images (preprocessor's job) 
+    - Analyze quality (analyzer's job)
+    - Make "best result" decisions (pipeline's job)
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """Initialize engine manager"""
+        """Initialize engine manager with optional configuration"""
         self.config = config or {}
-        self.engines: Dict[str, BaseOCREngine] = {}
-        self.performance: Dict[str, EnginePerformance] = {}
+        self.engines: Dict[str, BaseEngine] = {}
+        self.stats: Dict[str, EngineStats] = {}
         self.logger = logging.getLogger(__name__)
-        
-        # Simple engine priority (based on your test results)
-        self.engine_priority = ['paddleocr', 'easyocr', 'tesseract', 'trocr']
-        
-    def register_engine(self, engine_name: str, engine: BaseOCREngine) -> bool:
-        """Register an OCR engine"""
-        try:
-            if engine_name in self.engines:
-                self.logger.warning(f"Engine {engine_name} already registered, overwriting")
-            
-            self.engines[engine_name] = engine
-            self.performance[engine_name] = EnginePerformance(engine_name=engine_name)
-            
-            self.logger.info(f"Registered engine: {engine_name}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to register engine {engine_name}: {e}")
-            return False
     
-    def get_available_engines(self) -> Dict[str, BaseOCREngine]:
-        """Get all registered engines"""
-        return self.engines.copy()
+    def register_engine(self, engine_name: str, engine: BaseEngine) -> None:
+        """
+        Register an OCR engine.
+        
+        Args:
+            engine_name: Unique identifier for the engine
+            engine: Engine instance implementing BaseOCREngine
+            
+        Raises:
+            ValueError: If engine is invalid
+        """
+        if not isinstance(engine, BaseEngine):
+            raise ValueError(f"Engine must inherit from BaseOCREngine, got {type(engine)}")
+        
+        if engine_name in self.engines:
+            self.logger.warning(f"Overwriting existing engine: {engine_name}")
+        
+        self.engines[engine_name] = engine
+        self.stats[engine_name] = EngineStats(engine_name=engine_name)
+        self.logger.info(f"Registered engine: {engine_name}")
     
-    def get_initialized_engines(self) -> Dict[str, BaseOCREngine]:
-        """Get only initialized engines"""
-        initialized = {}
+    def initialize_engines(self) -> Dict[str, bool]:
+        """
+        Initialize all registered engines.
+        
+        Returns:
+            Dict mapping engine names to initialization success status
+        """
+        results = {}
+        
         for name, engine in self.engines.items():
             try:
-                if engine.is_available():  # This calls initialize() internally
-                    initialized[name] = engine
+                success = engine.initialize()
+                results[name] = success
+                
+                if success:
+                    self.logger.info(f"Initialized engine: {name}")
+                else:
+                    self.logger.warning(f"Failed to initialize engine: {name}")
+                    
             except Exception as e:
-                self.logger.warning(f"Engine {name} not available: {e}")
-        return initialized
+                results[name] = False
+                self.logger.error(f"Engine {name} initialization error: {e}")
+        
+        return results
     
-    def extract_with_engine(self, image: np.ndarray, engine_name: str) -> OCRResult:
-        """Extract text using specific engine - main interface for pipeline"""
+    def get_available_engines(self) -> List[str]:
+        """
+        Get names of engines that are available for use.
+        
+        Returns:
+            List of available engine names
+        """
+        available = []
+        
+        for name, engine in self.engines.items():
+            try:
+                if engine.is_available():
+                    available.append(name)
+            except Exception as e:
+                self.logger.debug(f"Engine {name} availability check failed: {e}")
+        
+        return available
+    
+    def get_engine_info(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get information about all engines including availability and stats.
+        
+        Returns:
+            Dict with engine info including availability and performance stats
+        """
+        info = {}
+        
+        for name, engine in self.engines.items():
+            stats = self.stats[name]
+            
+            try:
+                available = engine.is_available()
+                languages = engine.get_supported_languages() if available else []
+            except Exception as e:
+                available = False
+                languages = []
+                self.logger.debug(f"Error getting engine {name} info: {e}")
+            
+            info[name] = {
+                'available': available,
+                'supported_languages': languages,
+                'total_calls': stats.total_calls,
+                'success_rate': stats.success_rate,
+                'avg_confidence': stats.avg_confidence,
+                'avg_processing_time': stats.avg_time
+            }
+        
+        return info
+    
+    def execute_engine(self, engine_name: str, image: np.ndarray, 
+                      options: Optional[ProcessingOptions] = None) -> OCRResult:
+        """
+        Execute a specific engine on an image.
+        
+        Args:
+            engine_name: Name of engine to execute
+            image: Input image as numpy array
+            options: Processing options to pass to engine
+            
+        Returns:
+            OCRResult from the engine
+            
+        Raises:
+            EngineNotAvailableError: If engine is not available
+        """
         if engine_name not in self.engines:
-            raise ValueError(f"Engine {engine_name} not registered")
+            raise EngineNotAvailableError(
+                engine_name, 
+                f"Engine not registered. Available: {list(self.engines.keys())}"
+            )
         
         engine = self.engines[engine_name]
+        
+        if not engine.is_available():
+            raise EngineNotAvailableError(engine_name, "Engine not initialized or unavailable")
+        
         start_time = time.time()
+        stats = self.stats[engine_name]
         
         try:
-            # Use the engine's extract_text method (from base_engine.py)
+            # Execute the engine
             result = engine.extract_text(image)
             processing_time = time.time() - start_time
             
-            # Update simple stats
-            perf = self.performance[engine_name]
-            perf.total_processed += 1
-            perf.total_time += processing_time
+            # Ensure result has required metadata
+            if not result.engine_used:
+                result.engine_used = engine_name
+            if not result.processing_time:
+                result.processing_time = processing_time
             
-            if result and result.text.strip():
-                perf.successful_processes += 1
-                # Update average confidence
-                if perf.successful_processes == 1:
-                    perf.avg_confidence = result.confidence
+            # Update statistics
+            stats.total_calls += 1
+            stats.total_time += processing_time
+            
+            # Track success if we got meaningful text
+            if result.text and result.text.strip() and result.confidence > 0:
+                stats.successful_calls += 1
+                # Update running average confidence
+                if stats.successful_calls == 1:
+                    stats.avg_confidence = result.confidence
                 else:
-                    total_conf = perf.avg_confidence * (perf.successful_processes - 1)
-                    perf.avg_confidence = (total_conf + result.confidence) / perf.successful_processes
+                    n = stats.successful_calls
+                    stats.avg_confidence = ((n-1) * stats.avg_confidence + result.confidence) / n
             
             return result
             
         except Exception as e:
             processing_time = time.time() - start_time
-            self.performance[engine_name].total_time += processing_time
-            self.logger.error(f"Engine {engine_name} failed: {e}")
+            stats.total_calls += 1
+            stats.total_time += processing_time
             
-            # Return empty result instead of raising
+            self.logger.error(f"Engine {engine_name} execution failed: {e}")
+            
+            # Return empty result rather than raising - let pipeline handle
             return OCRResult(
                 text="",
                 confidence=0.0,
                 processing_time=processing_time,
-                engine_name=engine_name,
-                metadata={"error": str(e)}
+                engine_used=engine_name,
+                metadata={"error": str(e), "error_type": type(e).__name__}
             )
     
-    def extract_with_multiple_engines(self, image: np.ndarray, 
-                                     engine_names: List[str],
-                                     use_parallel: bool = True) -> Dict[str, OCRResult]:
-        """Extract with multiple engines - returns results from each"""
+    def execute_multiple_engines(self, engine_names: List[str], image: np.ndarray,
+                                options: Optional[ProcessingOptions] = None,
+                                use_parallel: bool = True) -> Dict[str, OCRResult]:
+        """
+        Execute multiple engines on the same image.
+        
+        Args:
+            engine_names: List of engine names to execute
+            image: Input image as numpy array  
+            options: Processing options
+            use_parallel: Whether to run engines in parallel
+            
+        Returns:
+            Dict mapping engine names to their OCRResults
+        """
         results = {}
-        available_engines = self.get_initialized_engines()
+        available_engines = self.get_available_engines()
         
-        # Filter to available engines
-        engines_to_use = [name for name in engine_names if name in available_engines]
+        # Filter to only available engines
+        engines_to_run = [name for name in engine_names if name in available_engines]
         
-        if not engines_to_use:
-            self.logger.error("No engines available for multi-engine processing")
+        if not engines_to_run:
+            self.logger.warning("No requested engines are available")
             return results
         
-        if use_parallel and len(engines_to_use) > 1:
-            # Parallel processing
-            with ThreadPoolExecutor(max_workers=min(3, len(engines_to_use))) as executor:
+        # Handle early termination if enabled
+        early_termination = (options and options.early_termination) or False
+        early_threshold = (options and options.early_termination_threshold) or 0.95
+        
+        if use_parallel and len(engines_to_run) > 1:
+            # Parallel execution
+            max_workers = min(4, len(engines_to_run))
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
                 future_to_engine = {
-                    executor.submit(self.extract_with_engine, image, engine_name): engine_name
-                    for engine_name in engines_to_use
+                    executor.submit(self.execute_engine, name, image, options): name
+                    for name in engines_to_run
                 }
                 
-                for future in as_completed(future_to_engine, timeout=300):
+                # Collect results as they complete
+                for future in as_completed(future_to_engine):
                     engine_name = future_to_engine[future]
                     try:
                         result = future.result()
                         results[engine_name] = result
+                        
+                        # Early termination check
+                        if (early_termination and result.confidence >= early_threshold):
+                            self.logger.info(f"Early termination triggered by {engine_name} "
+                                           f"(confidence: {result.confidence:.3f})")
+                            # Cancel remaining futures
+                            for remaining_future in future_to_engine:
+                                if remaining_future != future:
+                                    remaining_future.cancel()
+                            break
+                            
                     except Exception as e:
-                        self.logger.error(f"Engine {engine_name} failed in parallel: {e}")
-                        results[engine_name] = OCRResult("", 0.0, engine_name=engine_name)
+                        self.logger.error(f"Parallel execution error for {engine_name}: {e}")
+                        results[engine_name] = OCRResult("", 0.0, engine_used=engine_name)
         else:
-            # Sequential processing
-            for engine_name in engines_to_use:
+            # Sequential execution
+            for engine_name in engines_to_run:
                 try:
-                    result = self.extract_with_engine(image, engine_name)
+                    result = self.execute_engine(engine_name, image, options)
                     results[engine_name] = result
+                    
+                    # Early termination check
+                    if (early_termination and result.confidence >= early_threshold):
+                        self.logger.info(f"Early termination after {engine_name} "
+                                       f"(confidence: {result.confidence:.3f})")
+                        break
+                        
                 except Exception as e:
-                    self.logger.error(f"Engine {engine_name} failed: {e}")
-                    results[engine_name] = OCRResult("", 0.0, engine_name=engine_name)
+                    self.logger.error(f"Sequential execution error for {engine_name}: {e}")
+                    results[engine_name] = OCRResult("", 0.0, engine_used=engine_name)
         
         return results
     
-    def select_best_engine(self, content_type: str = 'default') -> Optional[str]:
-        """Select best engine based on priority and availability"""
-        available_engines = self.get_initialized_engines()
-        
-        if not available_engines:
-            return None
-        
-        # Content-specific priorities
-        if content_type == 'handwritten':
-            priority_list = ['trocr', 'easyocr', 'paddleocr', 'tesseract']
-        elif content_type == 'table':
-            priority_list = ['paddleocr', 'tesseract', 'easyocr', 'trocr']
-        else:
-            priority_list = self.engine_priority
-        
-        # Find first available engine from priority list
-        for engine_name in priority_list:
-            if engine_name in available_engines:
-                return engine_name
-        
-        # Fallback to any available engine
-        return list(available_engines.keys())[0]
-    
-    def select_best_result(self, results: Dict[str, OCRResult]) -> Optional[OCRResult]:
-        """Select best result from multiple engine results"""
-        if not results:
-            return None
-        
-        best_result = None
-        best_score = 0.0
-        
-        for engine_name, result in results.items():
-            if not result or not result.text.strip():
-                continue
-            
-            # Simple scoring: confidence (80%) + text length factor (20%)
-            text_length_score = min(len(result.text) / 100, 1.0)  # Normalize to 0-1
-            combined_score = (result.confidence * 0.8) + (text_length_score * 0.2)
-            
-            if combined_score > best_score:
-                best_score = combined_score
-                best_result = result
-        
-        return best_result
-    
-    def get_engine_info(self) -> Dict[str, Dict[str, Any]]:
-        """Get information about all engines"""
-        info = {}
+    def cleanup(self) -> None:
+        """Clean up all registered engines and reset state"""
         for name, engine in self.engines.items():
-            perf = self.performance[name]
-            info[name] = {
-                'available': engine.is_available(),
-                'initialized': name in self.get_initialized_engines(),
-                'total_processed': perf.total_processed,
-                'success_rate': (perf.successful_processes / perf.total_processed 
-                                if perf.total_processed > 0 else 0.0),
-                'avg_confidence': perf.avg_confidence,
-                'avg_time': (perf.total_time / perf.total_processed 
-                           if perf.total_processed > 0 else 0.0)
-            }
-        return info
-    
-    def cleanup(self):
-        """Cleanup all engines"""
-        for engine_name, engine in self.engines.items():
             try:
                 if hasattr(engine, 'cleanup'):
                     engine.cleanup()
-                self.logger.info(f"Cleaned up engine: {engine_name}")
+                self.logger.info(f"Cleaned up engine: {name}")
             except Exception as e:
-                self.logger.error(f"Failed to cleanup engine {engine_name}: {e}")
+                self.logger.error(f"Error cleaning up engine {name}: {e}")
         
         self.engines.clear()
-        self.performance.clear()
+        self.stats.clear()
+        self.logger.info("Engine manager cleanup complete")
+        
+    def initialize_available_engines(self) -> Dict[str, bool]:
+        """
+        Auto-discover, register, and initialize available engines based on config.
+        
+        This method handles the complete engine setup process that the pipeline expects.
+        
+        Returns:
+            Dict mapping engine names to initialization success status
+        """
+        results = {}
+        
+        # Get engine configurations from config
+        engine_configs = self.config.get("engines", {})
+        
+        if not engine_configs:
+            self.logger.warning("No engine configurations found")
+            return results
+        
+        # Import and register each enabled engine
+        for engine_name, engine_config in engine_configs.items():
+            if not engine_config.get("enabled", False):
+                self.logger.debug(f"Engine {engine_name} is disabled in config")
+                continue
+            
+            try:
+                # Import the appropriate engine class
+                engine_instance = self._create_engine_instance(engine_name, engine_config)
+                
+                if engine_instance:
+                    # Register the engine
+                    self.register_engine(engine_name, engine_instance)
+                    self.logger.info(f"Registered engine: {engine_name}")
+                else:
+                    results[engine_name] = False
+                    self.logger.error(f"Failed to create {engine_name} instance")
+                    
+            except Exception as e:
+                results[engine_name] = False
+                self.logger.error(f"Failed to setup {engine_name}: {e}")
+        
+        # Initialize all registered engines
+        init_results = self.initialize_engines()
+        results.update(init_results)
+        
+        successful_engines = [name for name, success in results.items() if success]
+        self.logger.info(f"Successfully initialized {len(successful_engines)} engines: {successful_engines}")
+        
+        return results
 
-# Alias for backward compatibility
-OCREngineManager = EngineManager
+    def _create_engine_instance(self, engine_name: str, engine_config: Dict[str, Any]) -> Optional[BaseEngine]:
+        """
+        Create an engine instance based on engine name and configuration.
+        
+        Args:
+            engine_name: Name of the engine to create
+            engine_config: Configuration for the engine
+            
+        Returns:
+            Engine instance or None if creation failed
+        """
+        try:
+            if engine_name == "paddleocr":
+                from ..engines.paddleocr import PaddleOCR
+                return PaddleOCR(engine_config)
+                
+            elif engine_name == "easyocr":
+                from ..engines.easyocr import EasyOCR
+                return EasyOCR(engine_config)
+                
+            elif engine_name == "tesseract":
+                from ..engines.tesseract import Tesseract
+                return Tesseract(engine_config)
+                
+            elif engine_name == "trocr":
+                from ..engines.trocr import TrOCR
+                return TrOCR(engine_config)
+                
+            else:
+                self.logger.warning(f"Unknown engine type: {engine_name}")
+                return None
+                
+        except ImportError as e:
+            self.logger.error(f"Engine {engine_name} dependencies not available: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error creating {engine_name} instance: {e}")
+            return None

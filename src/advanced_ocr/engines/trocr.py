@@ -1,495 +1,479 @@
-import os
-import cv2
-import numpy as np
+"""
+TrOCR Engine Implementation
+
+This module implements the TrOCR (Transformer-based OCR) engine for the advanced OCR library.
+TrOCR is particularly effective for handwritten text and complex document layouts.
+
+Responsibilities:
+- Implement TrOCR-specific text extraction
+- Handle TrOCR model initialization and configuration
+- Convert TrOCR results to standard OCRResult format
+- Manage TrOCR model loading and inference
+
+Does NOT handle:
+- Image enhancement or preprocessing (handled by ImageEnhancer)
+- Quality analysis (handled by QualityAnalyzer)
+- Engine management or selection (handled by EngineManager)
+- Layout reconstruction (handled by pipeline)
+"""
+
+import logging
 import time
-import warnings
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Optional, Dict, Any, List, Tuple
+import numpy as np
 from PIL import Image
+import torch
+import cv2
 
-# Suppress warnings
-warnings.filterwarnings('ignore', category=UserWarning)
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+# Check for transformers availability
+try:
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    TrOCRProcessor = None
+    VisionEncoderDecoderModel = None
 
-from ..core.base_engine import (
-    BaseOCREngine, 
-    OCRResult, 
-    BoundingBox, 
-    TextRegion, 
-    DocumentResult, 
-    TextType
-)
+from ..core.base_engine import BaseOCREngine
+from ..types import OCRResult, BoundingBox, TextRegion, TextType
+from ..exceptions import EngineNotAvailableError, EngineInitializationError, ImageProcessingError
 
-class TrOCR(BaseOCREngine):
+
+logger = logging.getLogger(__name__)
+
+
+class TrOCREngine(BaseOCREngine):
     """
-    FIXED TrOCR Engine - Returns single OCRResult compatible with base engine
+    TrOCR (Transformer-based OCR) engine implementation.
     
-    Key Optimizations:
-    - Intelligent image resizing before processing
-    - Early stopping for sufficient text extraction
-    - Reduced segmentation overhead
-    - FIXED: Returns single OCRResult (not List[OCRResult])
+    TrOCR uses vision transformers for text recognition and is particularly
+    effective for handwritten text, mathematical expressions, and complex layouts.
+    
+    Integrates with pipeline architecture:
+    - Receives preprocessed images from pipeline
+    - Returns raw OCR results to pipeline
+    - Pipeline handles layout reconstruction
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        super().__init__("TrOCR", config)
-        self.model = None
-        self.processor = None
-        self.device = self.config.get("device", "cpu")
-        self.model_name = self.config.get("model_name", "microsoft/trocr-base-printed")
-        
-        # Performance optimization settings
-        self.max_image_dimension = self.config.get("max_dimension", 800)
-        self.enable_segmentation = self.config.get("enable_segmentation", True)
-        self.max_strips = self.config.get("max_strips", 3)
-        self.min_confidence = self.config.get("min_confidence", 0.4)
-        
-        # Modern engine capabilities
-        self.supports_handwriting = True
-        self.supports_multiple_languages = True
-        self.supports_orientation_detection = False
-        self.supports_structure_analysis = True
-        
-    def initialize(self) -> bool:
-        """Initialize TrOCR with robust error handling"""
-        try:
-            self.logger.info(f"Initializing TrOCR with model: {self.model_name}")
-            
-            # Import TrOCR components
-            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-            import torch
-            
-            # Initialize processor and model
-            self.processor = TrOCRProcessor.from_pretrained(self.model_name)
-            self.model = VisionEncoderDecoderModel.from_pretrained(self.model_name)
-            
-            # Set device
-            if self.device == "cuda" and torch.cuda.is_available():
-                self.model = self.model.to("cuda")
-                self.logger.info("TrOCR using CUDA")
-            else:
-                self.model = self.model.to("cpu")
-                self.device = "cpu"
-                self.logger.info("TrOCR using CPU")
-            
-            self.model.eval()  # Set to evaluation mode
-            
-            self.supported_languages = self.get_supported_languages()
-            self.is_initialized = True
-            self.model_loaded = True
-            
-            self.logger.info(f"TrOCR initialized (max_dim: {self.max_image_dimension}, max_strips: {self.max_strips})")
-            return True
-            
-        except ImportError as e:
-            self.logger.error(f"TrOCR dependencies not installed: {e}")
-            self.logger.info("Install with: pip install transformers torch torchvision")
-            self.is_initialized = False
-            self.model_loaded = False
-            return False
-        except Exception as e:
-            self.logger.error(f"TrOCR initialization failed: {e}")
-            self.model = None
-            self.processor = None
-            self.is_initialized = False
-            self.model_loaded = False
-            return False
-            
-    def get_supported_languages(self) -> List[str]:
-        """Get supported languages based on model"""
-        if "multilingual" in self.model_name.lower():
-            return ['en', 'de', 'fr', 'it', 'pt', 'es', 'nl', 'ru', 'ja', 'ko', 'zh', 'ar']
-        else:
-            return ['en', 'de', 'fr', 'it', 'pt']
-        
-    def process_image(self, preprocessed_image: np.ndarray, **kwargs) -> OCRResult:
         """
-        FIXED: Process preprocessed image with TrOCR - Returns single OCRResult
+        Initialize TrOCR engine.
         
         Args:
-            preprocessed_image: Preprocessed image from image enhancement
-            **kwargs: Additional parameters
+            config: Engine configuration dictionary
+        """
+        super().__init__("TrOCR", config)
+        
+        # Default configuration
+        self._default_config = {
+            'model_name': 'microsoft/trocr-base-printed',  # or 'microsoft/trocr-base-handwritten'
+            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+            'max_length': 384,
+            'num_beams': 5,
+            'early_stopping': True,
+            'confidence_threshold': 0.3,
+            'min_text_height': 15,
+            'max_text_height': 200,
+            'text_detection_method': 'contours',  # 'contours' or 'sliding_window'
+            'region_padding': 5,
+            'min_region_area': 100
+        }
+        
+        # Merge with provided config
+        self.config.update(self._default_config)
+        if config:
+            self.config.update(config)
+        
+        self._processor = None
+        self._model = None
+        self._device = self.config['device']
+        
+        # Engine capabilities
+        self.supports_handwriting = True
+        self.supports_multiple_languages = False  # TrOCR is typically English-focused
+        self.supports_orientation_detection = False
+        
+        logger.info(f"TrOCR engine initialized with device: {self._device}")
+
+    def is_available(self) -> bool:
+        """Check if TrOCR dependencies are available"""
+        if not TRANSFORMERS_AVAILABLE:
+            return False
+        
+        try:
+            import torch
+            return True
+        except ImportError:
+            return False
+
+    def initialize(self) -> bool:
+        """
+        Initialize TrOCR model and processor.
+        
+        Returns:
+            bool: True if initialization successful
+            
+        Raises:
+            EngineInitializationError: If model loading fails
+        """
+        if self.is_initialized:
+            return True
+        
+        if not self.is_available():
+            raise EngineNotAvailableError(
+                "TrOCR", 
+                "transformers library not installed. Install with: pip install transformers torch"
+            )
+            
+        try:
+            logger.info(f"Loading TrOCR model: {self.config['model_name']}")
+            start_time = time.time()
+            
+            # Load processor and model
+            self._processor = TrOCRProcessor.from_pretrained(
+                self.config['model_name']
+            )
+            self._model = VisionEncoderDecoderModel.from_pretrained(
+                self.config['model_name']
+            )
+            
+            # Move model to appropriate device
+            self._model.to(self._device)
+            self._model.eval()
+            
+            load_time = time.time() - start_time
+            logger.info(f"TrOCR model loaded successfully in {load_time:.2f}s")
+            
+            self.is_initialized = True
+            return True
+            
+        except Exception as e:
+            error_msg = f"Failed to initialize TrOCR model: {str(e)}"
+            logger.error(error_msg)
+            raise EngineInitializationError(error_msg, "TrOCR", e) from e
+
+    def extract_text(self, image: np.ndarray) -> OCRResult:
+        """
+        Extract text from image using TrOCR - ONLY OCR processing.
+        
+        Args:
+            image: Preprocessed image from pipeline (BGR format from OpenCV)
             
         Returns:
-            OCRResult: Single OCR result compatible with base engine
+            OCRResult: Raw OCR results with text regions
         """
         start_time = time.time()
         
         try:
             # Validate initialization
-            if not self.is_initialized or self.model is None:
+            if not self.is_initialized:
                 if not self.initialize():
-                    raise RuntimeError("TrOCR engine failed to initialize")
+                    raise RuntimeError("TrOCR engine not initialized")
             
-            # Validate preprocessed input from pipeline
-            if not self.validate_image(preprocessed_image):
-                raise ValueError("Invalid preprocessed image from pipeline")
+            # Validate input
+            if not self.validate_image(image):
+                raise ValueError("Invalid input image")
             
-            original_shape = preprocessed_image.shape
-            self.logger.info(f"Processing preprocessed image: {original_shape}")
+            # Convert image format for TrOCR
+            pil_image = self._prepare_image_for_trocr(image)
             
-            # OPTIMIZATION 1: Resize if too large (major speedup)
-            optimized_image = self._optimize_for_speed(preprocessed_image)
+            # Detect text regions first
+            text_regions = self._detect_text_regions(image)
             
-            # OPTIMIZATION 2: Try fast full-image extraction first
-            text, confidence = self._fast_extract_text(optimized_image)
+            if not text_regions:
+                # If no regions detected, process entire image
+                text_regions = [(0, 0, image.shape[1], image.shape[0])]
             
-            # OPTIMIZATION 3: Only use segmentation if needed and enabled
-            if (not text.strip() or len(text.strip()) < 10 or confidence < self.min_confidence) and self.enable_segmentation:
-                self.logger.info("Full image extraction insufficient, using limited segmentation")
-                text, confidence = self._limited_segmentation(optimized_image)
+            # Process each detected text region
+            regions = []
+            for region_coords in text_regions:
+                try:
+                    x, y, w, h = region_coords
+                    
+                    # Skip regions that are too small
+                    if (w < self.config['min_text_height'] or 
+                        h < self.config['min_text_height'] or
+                        w * h < self.config['min_region_area']):
+                        continue
+                    
+                    # Crop region from PIL image
+                    region_image = pil_image.crop((x, y, x + w, y + h))
+                    
+                    # Extract text from region using TrOCR
+                    region_text, confidence = self._extract_text_from_region(region_image)
+                    
+                    if region_text.strip() and confidence >= self.config['confidence_threshold']:
+                        # Create text region
+                        bbox = BoundingBox(
+                            x=x, 
+                            y=y, 
+                            width=w, 
+                            height=h,
+                            confidence=0.9  # High confidence for bounding box detection
+                        )
+                        
+                        text_region = TextRegion(
+                            text=region_text.strip(),
+                            confidence=confidence,
+                            bbox=bbox,
+                            text_type=TextType.HANDWRITTEN if 'handwritten' in self.config['model_name'].lower() else TextType.PRINTED,
+                            language="en"
+                        )
+                        regions.append(text_region)
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to process text region {region_coords}: {e}")
+                    continue
             
-            # Create single OCRResult - FIXED!
-            result = self._create_pipeline_result(text, confidence, original_shape)
+            # Create OCRResult - simple concatenation, no layout logic
+            text = self._simple_text_concatenation(regions)
+            confidence = self._calculate_average_confidence(regions)
             
-            # Update processing stats
             processing_time = time.time() - start_time
-            if result:
-                result.processing_time = processing_time
-                result.engine_name = self.name
-                
-                self.processing_stats['total_processed'] += 1
-                self.processing_stats['total_time'] += processing_time
-                
-                if result.text.strip():
-                    self.processing_stats['successful_extractions'] += 1
-                
-                self.logger.info(f"TrOCR extracted {len(text)} chars (conf: {confidence:.3f}) in {processing_time:.2f}s")
-            else:
-                # Return empty result instead of None
-                result = OCRResult(
-                    text="",
-                    confidence=0.0,
-                    processing_time=processing_time,
-                    engine_name=self.name,
-                    metadata={"no_text_found": True}
-                )
-                self.logger.warning(f"TrOCR: No meaningful text extracted in {processing_time:.2f}s")
             
+            result = OCRResult(
+                text=text,
+                confidence=confidence,
+                processing_time=processing_time,
+                engine_used=self.name,
+                regions=regions,
+                metadata={
+                    'detection_count': len(regions),
+                    'model_name': self.config['model_name'],
+                    'device': self._device,
+                    'total_regions_detected': len(text_regions)
+                }
+            )
+            
+            # Update statistics
+            self.processing_stats['total_processed'] += 1
+            self.processing_stats['total_time'] += processing_time
+            if result.success:
+                self.processing_stats['successful_extractions'] += 1
+            else:
+                self.processing_stats['errors'] += 1
+            
+            logger.info(f"TrOCR extracted {len(text)} chars, {len(regions)} regions in {processing_time:.2f}s")
             return result
             
         except Exception as e:
             processing_time = time.time() - start_time
-            self.logger.error(f"TrOCR extraction failed after {processing_time:.2f}s: {e}")
+            logger.error(f"TrOCR failed: {e}")
+            
+            self.processing_stats['total_processed'] += 1
+            self.processing_stats['total_time'] += processing_time
             self.processing_stats['errors'] += 1
             
-            # Return empty result instead of raising
             return OCRResult(
                 text="",
                 confidence=0.0,
                 processing_time=processing_time,
-                engine_name=self.name,
+                engine_used=self.name,
                 metadata={"error": str(e)}
             )
-    
-    def _optimize_for_speed(self, preprocessed_image: np.ndarray) -> np.ndarray:
+
+    def get_supported_languages(self) -> List[str]:
+        """Get TrOCR supported languages"""
+        # TrOCR models are typically English-focused
+        # Handwritten models may support some multilingual text
+        if 'multilingual' in self.config['model_name'].lower():
+            return ['en', 'de', 'fr', 'it', 'pt', 'es']
+        return ['en']
+
+    def _prepare_image_for_trocr(self, image: np.ndarray) -> Image.Image:
         """
-        CRITICAL OPTIMIZATION: Resize large images for 5-10x speedup
+        Convert image format for TrOCR compatibility.
+        ONLY format conversion - no enhancement.
         """
-        h, w = preprocessed_image.shape[:2]
-        max_dim = max(h, w)
+        # Convert BGR to RGB for PIL
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        elif len(image.shape) == 2:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        else:
+            image_rgb = image
+            
+        return Image.fromarray(image_rgb)
+
+    def _detect_text_regions(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """
+        Detect text regions in image for TrOCR processing.
+        ONLY detection - no enhancement or analysis.
         
-        # Only resize if significantly larger than target
-        if max_dim > self.max_image_dimension:
-            scale = self.max_image_dimension / max_dim
-            new_h, new_w = int(h * scale), int(w * scale)
-            
-            # Use INTER_AREA for downscaling (better quality)
-            optimized = cv2.resize(preprocessed_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            
-            self.logger.info(f"Resized {w}x{h} → {new_w}x{new_h} for {scale:.2f}x speedup")
-            return optimized
+        Returns:
+            List of (x, y, width, height) tuples
+        """
+        try:
+            if self.config['text_detection_method'] == 'contours':
+                return self._detect_regions_by_contours(image)
+            else:
+                return self._detect_regions_by_sliding_window(image)
+        except Exception as e:
+            logger.warning(f"Text region detection failed: {e}")
+            return []
+
+    def _detect_regions_by_contours(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Detect text regions using contour analysis"""
+        # Convert to grayscale for processing
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
         
-        return preprocessed_image
-    
-    def _fast_extract_text(self, image: np.ndarray) -> Tuple[str, float]:
+        # Simple thresholding to find text regions
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        regions = []
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            # Filter regions by size
+            if (w >= self.config['min_text_height'] and 
+                h >= self.config['min_text_height'] and
+                w <= self.config['max_text_height'] * 10 and  # reasonable width limit
+                h <= self.config['max_text_height'] and
+                w * h >= self.config['min_region_area']):
+                
+                # Add padding
+                padding = self.config['region_padding']
+                x = max(0, x - padding)
+                y = max(0, y - padding)
+                w = min(image.shape[1] - x, w + 2 * padding)
+                h = min(image.shape[0] - y, h + 2 * padding)
+                
+                regions.append((x, y, w, h))
+        
+        return regions
+
+    def _detect_regions_by_sliding_window(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Detect text regions using sliding window approach"""
+        regions = []
+        height, width = image.shape[:2]
+        
+        # Define window sizes based on expected text height
+        window_heights = [
+            self.config['min_text_height'] * 2,
+            self.config['min_text_height'] * 4,
+            self.config['max_text_height']
+        ]
+        
+        for win_h in window_heights:
+            for y in range(0, height - win_h, win_h // 2):
+                for x in range(0, width - win_h, win_h):
+                    w = min(win_h * 4, width - x)  # Aspect ratio consideration
+                    h = win_h
+                    
+                    if w * h >= self.config['min_region_area']:
+                        regions.append((x, y, w, h))
+        
+        return regions
+
+    def _extract_text_from_region(self, region_image: Image.Image) -> Tuple[str, float]:
         """
-        Fast single-pass text extraction
+        Extract text from a single image region using TrOCR.
+        
+        Returns:
+            Tuple of (extracted_text, confidence_score)
         """
         try:
-            # Convert to PIL for TrOCR
-            pil_image = self._prepare_for_trocr(image)
-            
-            # Extract text with optimized settings
-            return self._extract_text_with_confidence(pil_image, fast_mode=True)
-            
-        except Exception as e:
-            self.logger.error(f"Fast text extraction failed: {e}")
-            return "", 0.0
-    
-    def _limited_segmentation(self, image: np.ndarray) -> Tuple[str, float]:
-        """
-        OPTIMIZED: Limited segmentation for speed
-        """
-        try:
-            h, w = image.shape[:2]
-            
-            # OPTIMIZATION: Use larger strips, fewer iterations
-            strip_height = h // self.max_strips
-            if strip_height < 50:
-                strip_height = h // 2  # Fallback to half-image strips
-            
-            all_text = []
-            all_confidences = []
-            strips_processed = 0
-            
-            for y in range(0, h, strip_height):
-                if strips_processed >= self.max_strips:
-                    break
-                
-                y_end = min(y + strip_height, h)
-                strip = image[y:y_end, :]
-                
-                # Skip tiny strips
-                if strip.shape[0] < 30 or strip.shape[1] < 50:
-                    continue
-                
-                # Quick content check
-                if self._has_text_content(strip):
-                    try:
-                        pil_strip = self._prepare_for_trocr(strip)
-                        text, conf = self._extract_text_with_confidence(pil_strip, fast_mode=True)
-                        
-                        if text.strip() and len(text.strip()) > 2 and conf > self.min_confidence:
-                            all_text.append(text.strip())
-                            all_confidences.append(conf)
-                            strips_processed += 1
-                            
-                            # OPTIMIZATION: Early stopping if we have enough text
-                            if len(" ".join(all_text)) > 100:
-                                break
-                                
-                    except Exception as e:
-                        self.logger.debug(f"Strip processing failed: {e}")
-                        continue
-            
-            # Combine results
-            if all_text:
-                combined_text = " ".join(all_text)
-                avg_confidence = sum(all_confidences) / len(all_confidences)
-                
-                self.logger.info(f"Limited segmentation: {len(all_text)} strips, {len(combined_text)} chars")
-                return combined_text, avg_confidence
-            else:
-                return "", 0.0
-                
-        except Exception as e:
-            self.logger.error(f"Limited segmentation failed: {e}")
-            return "", 0.0
-    
-    def _prepare_for_trocr(self, image: np.ndarray) -> Image.Image:
-        """Convert preprocessed image to PIL format for TrOCR"""
-        try:
-            # Convert to PIL Image (preprocessed image should be RGB already)
-            if len(image.shape) == 3:
-                if image.shape[2] == 3:
-                    # Preprocessed images are typically RGB
-                    return Image.fromarray(image)
-                else:
-                    return Image.fromarray(image)
-            else:
-                # Convert grayscale to RGB
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-                return Image.fromarray(rgb_image)
-        except Exception as e:
-            self.logger.error(f"Image preparation for TrOCR failed: {e}")
-            raise
-    
-    def _extract_text_with_confidence(self, pil_image: Image.Image, fast_mode: bool = False) -> Tuple[str, float]:
-        """Extract text with TrOCR - optimized for speed"""
-        try:
-            import torch
-            
             # Process image with TrOCR processor
-            inputs = self.processor(images=pil_image, return_tensors="pt")
-            pixel_values = inputs.pixel_values.to(self.device)
+            pixel_values = self._processor(region_image, return_tensors="pt").pixel_values
+            pixel_values = pixel_values.to(self._device)
             
-            # OPTIMIZATION: Reduced beam search for speed
-            max_length = 200 if fast_mode else 384
-            num_beams = 2 if fast_mode else 4
-            
-            # Generate text
+            # Generate text with TrOCR model
             with torch.no_grad():
-                generated_ids = self.model.generate(
+                generated_ids = self._model.generate(
                     pixel_values,
-                    max_length=max_length,
-                    num_beams=num_beams,
-                    early_stopping=True,
-                    do_sample=False,
-                    return_dict_in_generate=True,
-                    output_scores=True
+                    max_length=self.config['max_length'],
+                    num_beams=self.config['num_beams'],
+                    early_stopping=self.config['early_stopping']
                 )
             
             # Decode generated text
-            text = self.processor.batch_decode(generated_ids.sequences, skip_special_tokens=True)[0]
+            generated_text = self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             
-            # Calculate confidence
-            confidence = self._calculate_confidence(generated_ids)
+            # Estimate confidence (TrOCR doesn't provide direct confidence scores)
+            confidence = self._estimate_confidence(generated_text, region_image)
             
-            return text.strip(), confidence
+            return generated_text, confidence
             
         except Exception as e:
-            self.logger.error(f"TrOCR text extraction failed: {e}")
+            logger.warning(f"TrOCR text extraction failed for region: {e}")
             return "", 0.0
-    
-    def _has_text_content(self, strip: np.ndarray) -> bool:
-        """Quick check if image strip likely contains text"""
-        try:
-            if len(strip.shape) == 3:
-                gray = cv2.cvtColor(strip, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = strip
-            
-            # Quick statistical checks
-            mean_val = np.mean(gray)
-            std_val = np.std(gray)
-            
-            # Skip if too uniform or extreme values
-            return not (mean_val > 250 or mean_val < 10 or std_val < 15)
-            
-        except Exception:
-            return True
-    
-    def _calculate_confidence(self, generated_output) -> float:
-        """Calculate confidence score from TrOCR generation output"""
-        try:
-            import torch
-            
-            if hasattr(generated_output, 'sequences_scores') and generated_output.sequences_scores is not None:
-                score = torch.softmax(generated_output.sequences_scores, dim=0)[0].item()
-                return min(score, 0.95)
-            
-            if hasattr(generated_output, 'scores') and generated_output.scores:
-                token_probs = []
-                for score in generated_output.scores[:5]:  # Only check first 5 tokens for speed
-                    if score.shape[0] > 0:
-                        token_prob = torch.softmax(score[0], dim=0).max().item()
-                        token_probs.append(token_prob)
-                
-                if token_probs:
-                    return min(sum(token_probs) / len(token_probs), 0.95)
-            
-            return 0.75  # Default confidence for TrOCR
-            
-        except Exception:
-            return 0.70
-    
-    def _create_pipeline_result(self, text: str, confidence: float, original_shape: Tuple) -> Optional[OCRResult]:
-        """Create OCRResult compatible with postprocessing pipeline"""
-        if not text.strip():
-            return None
+
+    def _estimate_confidence(self, text: str, image: Image.Image) -> float:
+        """
+        Estimate confidence score for extracted text.
+        TrOCR doesn't provide direct confidence, so we use heuristics.
+        """
+        if not text or not text.strip():
+            return 0.0
         
-        try:
-            # Create bounding box for original image dimensions
-            height, width = original_shape[:2]
-            bbox = BoundingBox(
-                x=0, y=0, width=width, height=height, 
-                confidence=confidence,
-                text_type=TextType.PRINTED
-            )
-            
-            # Create text region
-            region = TextRegion(
-                text=text.strip(),
-                confidence=confidence,
-                bbox=bbox,
-                text_type=TextType.PRINTED,
-                language="en"
-            )
-            
-            result = OCRResult(
-                text=text.strip(),
-                confidence=confidence,
-                regions=[region],
-                bbox=bbox,
-                level="page",
-                engine_name=self.name,
-                text_type=TextType.PRINTED,
-                metadata={
-                    'detection_method': 'trocr',
-                    'model_name': self.model_name,
-                    'device': self.device,
-                    'transformer_based': True,
-                    'supports_handwriting': self.supports_handwriting,
-                    'engine_name': 'TrOCR',
-                    'optimized': True,
-                    'max_dimension': self.max_image_dimension,
-                    'segmentation_used': self.enable_segmentation
-                }
-            )
-            
-            return result
-        except Exception as e:
-            self.logger.error(f"Pipeline result creation failed: {e}")
-            return None
-    
-    def batch_process(self, images: List[np.ndarray], **kwargs) -> List[OCRResult]:
-        """Process multiple preprocessed images efficiently"""
-        results = []
-        for i, image in enumerate(images):
-            self.logger.info(f"Processing image {i+1}/{len(images)} with optimized TrOCR")
-            image_result = self.process_image(image, **kwargs)
-            results.append(image_result)
-        return results
-    
-    def validate_image(self, image: np.ndarray) -> bool:
-        """Validate preprocessed image from pipeline"""
-        try:
-            if image is None or not isinstance(image, np.ndarray):
-                return False
-            if len(image.shape) not in [2, 3]:
-                return False
-            if image.shape[0] == 0 or image.shape[1] == 0:
-                return False
-            return True
-        except:
-            return False
-    
-    def get_engine_info(self) -> Dict[str, Any]:
-        """Get comprehensive engine information"""
-        info = {
-            'name': self.name,
-            'version': None,
-            'type': 'transformer_ocr',
-            'supported_languages': self.get_supported_languages(),
-            'capabilities': {
-                'handwriting': self.supports_handwriting,
-                'multiple_languages': self.supports_multiple_languages,
-                'orientation_detection': self.supports_orientation_detection,
-                'structure_analysis': self.supports_structure_analysis
-            },
-            'optimal_for': ['handwritten_text', 'printed_text', 'mixed_text', 'documents', 'forms'],
-            'performance_profile': {
-                'accuracy': 'very_high',
-                'speed': 'optimized',
-                'memory_usage': 'medium',
-                'gpu_required': False,
-                'gpu_recommended': True
-            },
-            'optimization_settings': {
-                'max_dimension': self.max_image_dimension,
-                'enable_segmentation': self.enable_segmentation,
-                'max_strips': self.max_strips,
-                'min_confidence': self.min_confidence
-            },
-            'model_info': {
-                'model_name': self.model_name,
-                'architecture': 'Vision Encoder-Decoder',
-                'transformer_based': True,
-                'device': self.device,
-                'supports_handwriting': self.supports_handwriting
-            },
-            'pipeline_integration': {
-                'uses_preprocessing_pipeline': True,
-                'returns_single_result': True,
-                'compatible_with_base_engine': True,
-                'works_with_engine_manager': True
-            }
-        }
+        confidence = 0.5  # Base confidence
         
-        try:
-            import transformers
-            info['version'] = transformers.__version__
-        except:
-            info['version'] = 'unknown'
+        # Increase confidence based on text characteristics
+        if len(text.strip()) > 3:
+            confidence += 0.1
+        
+        if any(char.isalnum() for char in text):
+            confidence += 0.1
+        
+        if len(text.split()) > 1:
+            confidence += 0.1
+        
+        # Decrease confidence for very short or suspicious text
+        if len(text.strip()) < 2:
+            confidence -= 0.2
+        
+        if text.count('?') / len(text) > 0.3:  # Many uncertain characters
+            confidence -= 0.2
+        
+        return max(0.0, min(1.0, confidence))
+
+    def _simple_text_concatenation(self, regions: List[TextRegion]) -> str:
+        """
+        Simple text concatenation - NO layout reconstruction.
+        Pipeline will handle proper layout reconstruction.
+        """
+        if not regions:
+            return ""
+        
+        # Sort by reading order (top to bottom, left to right) and concatenate
+        sorted_regions = sorted(regions, key=lambda r: (
+            r.bbox.y if r.bbox else 0,
+            r.bbox.x if r.bbox else 0
+        ))
+        
+        # Simple space-separated concatenation
+        return " ".join(region.text for region in sorted_regions if region.text.strip())
+
+    def _calculate_average_confidence(self, regions: List[TextRegion]) -> float:
+        """Calculate average confidence from regions"""
+        if not regions:
+            return 0.0
+        
+        confidences = [r.confidence for r in regions if r.confidence > 0]
+        return sum(confidences) / len(confidences) if confidences else 0.0
+
+    def cleanup(self):
+        """Clean up TrOCR resources"""
+        if self._model is not None:
+            del self._model
+            self._model = None
+        
+        if self._processor is not None:
+            del self._processor  
+            self._processor = None
             
-        return info
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        super().cleanup()
+        logger.debug("TrOCR engine resources cleaned up")
+
+
+# Export alias for consistency
+TrOCR = TrOCREngine
