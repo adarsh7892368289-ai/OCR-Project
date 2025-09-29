@@ -316,7 +316,7 @@ class OCRLibrary:
                 selected_engines = self.engine_manager.select_engines_for_multi_engine(
                     preferred_engines=options.engines,
                     languages=options.languages,
-                    max_engines=3  # Limit to 3 engines for performance
+                    max_engines=1  # Limit to 3 engines for performance
                 )
                 
                 self.logger.debug(f"Selected engines for multi-engine: {selected_engines}")

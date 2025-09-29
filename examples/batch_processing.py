@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-Batch Processing Example - Process multiple images at once
-Configure your folder paths below and run this script
+Batch processing example for processing multiple images at once.
 """
 
 import sys
 from pathlib import Path
 
-# === CONFIGURATION - EDIT THESE PATHS ===
-INPUT_FOLDER = "tests/images"              # Folder containing images to process
-OUTPUT_FOLDER = "batch_results"            # Folder to save results
-IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']  # File types to process
+INPUT_FOLDER = "tests/images"
+OUTPUT_FOLDER = "batch_results"
+IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 
-# Processing options
-USE_FAST_ENGINE = True                     # True = fast (easyocr), False = accurate (paddleocr)
-MIN_CONFIDENCE = 0.6                       # Minimum confidence threshold
-MAX_IMAGES = 10                           # Maximum number of images to process (None for all)
+USE_FAST_ENGINE = True
+MIN_CONFIDENCE = 0.6
+MAX_IMAGES = 10
 
-# Add OCR library to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 def collect_images(folder_path):
@@ -151,7 +147,7 @@ def main():
     print(f"Found {len(image_files)} images to process")
     print(f"Output folder: {output_folder}")
     print(f"Processing settings:")
-    print(f"  Engine: {'EasyOCR (fast)' if USE_FAST_ENGINE else 'PaddleOCR (accurate)'}")
+    print(f"  Engine: {'PaddleOCR'}")
     print(f"  Min confidence: {MIN_CONFIDENCE:.1%}")
     
     # Initialize OCR
@@ -162,7 +158,7 @@ def main():
         
         # Configure processing options
         options = ProcessingOptions(
-            engines=['easyocr'] if USE_FAST_ENGINE else ['paddleocr'],
+            engines=['paddleocr'],
             min_confidence=MIN_CONFIDENCE,
             enhance_image=True,
             detect_orientation=True

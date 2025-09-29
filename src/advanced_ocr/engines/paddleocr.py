@@ -119,7 +119,7 @@ class PaddleOCREngine(BaseOCREngine):
             # Set processing time and engine name
             processing_time = time.time() - start_time
             result.processing_time = processing_time
-            result.engine_used = self.name  # Use engine_used instead of engine_name
+            result.engine_used = self.name  
             
             # Update stats
             self.processing_stats['total_processed'] += 1

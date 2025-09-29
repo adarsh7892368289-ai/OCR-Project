@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Advanced OCR Usage Examples
-Demonstrates processing strategies, quality analysis, and advanced options
+Advanced OCR usage examples demonstrating strategies, quality analysis, and options.
 """
 
 import sys
 from pathlib import Path
 from datetime import datetime
 
-# === EDIT THESE PATHS ===
 IMAGE_PATH = "tests/images/img3.jpg"
 OUTPUT_DIR = "results"
 
-# Add your OCR library to Python path (adjust if needed)
 project_root = Path(__file__).parent.parent
 src_path = project_root / "src"
 sys.path.insert(0, str(src_path))

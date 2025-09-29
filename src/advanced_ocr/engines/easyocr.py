@@ -513,8 +513,7 @@ class EasyOCREngine(BaseOCREngine):
             y=int(y_min),
             width=int(x_max - x_min),
             height=int(y_max - y_min),
-            confidence=confidence,
-            text_type=TextType.MIXED
+            confidence=confidence
         )
     
     def _calculate_overall_bbox(self, regions: List[TextRegion]) -> BoundingBox:
@@ -534,8 +533,7 @@ class EasyOCREngine(BaseOCREngine):
             y=min_y,
             width=max_x - min_x,
             height=max_y - min_y,
-            confidence=avg_confidence,
-            text_type=TextType.MIXED
+            confidence=avg_confidence
         )
     
     def _update_stats(self, result: OCRResult, processing_time: float):

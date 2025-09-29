@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Basic OCR Usage Examples
-Demonstrates simple, everyday usage of the advanced-ocr library
+Basic OCR usage examples demonstrating simple operations with the library.
 """
 
 import sys
 from pathlib import Path
 from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-# === EDIT THESE PATHS ===
-IMAGE_PATH = "tests/images/img3.jpg"
+IMAGE_PATH = "tests/images/img5.jpg"
 OUTPUT_DIR = "results"
 
-# Add your OCR library to Python path (adjust if needed)
 project_root = Path(__file__).parent.parent
 src_path = project_root / "src"
 sys.path.insert(0, str(src_path))
@@ -183,9 +184,9 @@ def main():
     try:
         example_1_simple_ocr()
         example_2_check_available_engines()
-        example_3_basic_options()
-        example_4_language_options()
-        example_5_result_details()
+        # example_3_basic_options()
+        # example_4_language_options()
+        # example_5_result_details()
         
         print(f"\n" + "=" * 40)
         print("BASIC EXAMPLES COMPLETED!")

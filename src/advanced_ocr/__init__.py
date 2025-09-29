@@ -1,25 +1,16 @@
-# Main package initialization and public API for advanced_ocr
-
 """
-Advanced OCR Library - Multi-engine text extraction with intelligent preprocessing
+Advanced OCR Library - Multi-engine text extraction with intelligent preprocessing.
 
-This package provides a modern, modular OCR solution that:
-- Supports multiple OCR engines (PaddleOCR, EasyOCR, Tesseract, TrOCR)
-- Includes intelligent image preprocessing and quality analysis
-- Offers flexible processing strategies and batch processing
-- Provides consistent API across different OCR technologies
+This package provides a modern, modular OCR solution that supports multiple OCR engines
+(PaddleOCR, EasyOCR, Tesseract, TrOCR), includes intelligent image preprocessing and
+quality analysis, offers flexible processing strategies and batch processing, and provides
+a consistent API across different OCR technologies.
 
 Quick Start:
     >>> from advanced_ocr import OCRLibrary, extract_text
-    >>>
-    >>> # Simple usage
     >>> text = extract_text("document.jpg")
-    >>>
-    >>> # Advanced usage
     >>> ocr = OCRLibrary()
     >>> result = ocr.process_image("document.jpg")
-    >>> print(f"Text: {result.text}")
-    >>> print(f"Confidence: {result.confidence}")
 """
 
 from .pipeline import OCRLibrary
