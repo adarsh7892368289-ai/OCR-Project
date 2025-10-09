@@ -1,8 +1,24 @@
-# Data structures and type definitions for the Advanced OCR Library
+"""Data structures and type definitions for the OCR library.
 
-"""
-Data structures and type definitions for the Advanced OCR Library.
-This module contains all data classes, enums, and type definitions used throughout the library.
+Defines all enums, dataclasses, and type aliases used throughout the library
+for OCR results, configuration options, and quality metrics.
+
+Examples
+--------
+    from advanced_ocr import OCRResult, ProcessingOptions, ProcessingStrategy
+    
+    # Configure processing options
+    options = ProcessingOptions(
+        enhance_image=True,
+        strategy=ProcessingStrategy.MULTI_ENGINE,
+        languages=["en", "es"]
+    )
+    
+    # Access result data
+    result = ocr.process_image("doc.jpg", options)
+    print(f"Text: {result.text}")
+    print(f"Confidence: {result.confidence}")
+    print(f"Words: {result.word_count}")
 """
 
 from dataclasses import dataclass, field
@@ -11,17 +27,16 @@ from enum import Enum
 import numpy as np
 
 
-# === ENUMS ===
-
 class ProcessingStrategy(Enum):
-    """OCR processing strategy based on image quality"""
-    MINIMAL = "minimal"      # High quality - minimal processing
-    BALANCED = "balanced"    # Standard processing
-    ENHANCED = "enhanced"    # Poor quality - heavy enhancement
+    """OCR processing strategies based on image quality."""
+    MINIMAL = "minimal"
+    BALANCED = "balanced"
+    ENHANCED = "enhanced"
     MULTI_ENGINE = "multi_engine"
 
+
 class ImageType(Enum):
-    """Image content type classification"""
+    """Image content type classification."""
     DOCUMENT = "document"
     HANDWRITTEN = "handwritten"
     PRINTED = "printed"
@@ -32,16 +47,16 @@ class ImageType(Enum):
 
 
 class ImageQuality(Enum):
-    """Image quality levels"""
-    EXCELLENT = "excellent"  # > 0.8
-    GOOD = "good"           # 0.6 - 0.8
-    FAIR = "fair"           # 0.4 - 0.6
-    POOR = "poor"           # 0.2 - 0.4
-    UNUSABLE = "unusable"   # < 0.2
+    """Image quality levels."""
+    EXCELLENT = "excellent"
+    GOOD = "good"
+    FAIR = "fair"
+    POOR = "poor"
+    UNUSABLE = "unusable"
 
 
 class TextType(Enum):
-    """Text structure classification"""
+    """Text structure classification."""
     PARAGRAPH = "paragraph"
     LINE = "line"
     WORD = "word"
@@ -58,11 +73,9 @@ class TextType(Enum):
     UNKNOWN = "unknown"
 
 
-# === DATA STRUCTURES ===
-
 @dataclass
 class BoundingBox:
-    """Bounding box with coordinates and metadata"""
+    """Rectangular bounding box with coordinates and metadata."""
     x: int
     y: int
     width: int
@@ -72,17 +85,17 @@ class BoundingBox:
     
     @property
     def center(self) -> Tuple[int, int]:
-        """Get center coordinates"""
+        """Get center coordinates."""
         return (self.x + self.width // 2, self.y + self.height // 2)
     
     @property
     def area(self) -> int:
-        """Get bounding box area"""
+        """Get area in pixels."""
         return self.width * self.height
     
     @property
     def corners(self) -> List[Tuple[int, int]]:
-        """Get all four corner coordinates"""
+        """Get four corner coordinates."""
         return [
             (self.x, self.y),
             (self.x + self.width, self.y),
@@ -93,41 +106,39 @@ class BoundingBox:
 
 @dataclass
 class QualityMetrics:
-    """Image quality analysis results"""
-    overall_score: float                    # 0.0 - 1.0
-    sharpness_score: float                  # 0.0 - 1.0
-    noise_level: float                      # 0.0 - 1.0 (higher = more noise)
-    contrast_score: float                   # 0.0 - 1.0
-    brightness_score: float                 # 0.0 - 1.0
-    needs_enhancement: bool                 # Recommendation
+    """Image quality analysis results."""
+    overall_score: float
+    sharpness_score: float
+    noise_level: float
+    contrast_score: float
+    brightness_score: float
+    needs_enhancement: bool
     image_type: ImageType = ImageType.UNKNOWN
     quality_level: ImageQuality = ImageQuality.FAIR
     
-    # Detailed metrics
     blur_variance: float = 0.0
     edge_density: float = 0.0
     text_region_count: int = 0
     estimated_dpi: int = 150
     color_channels: int = 1
     
-    # Enhancement recommendations
     recommended_strategy: ProcessingStrategy = ProcessingStrategy.BALANCED
     enhancement_suggestions: List[str] = field(default_factory=list)
     
     @property
     def is_good_quality(self) -> bool:
-        """Check if image has good quality for OCR"""
+        """Check if image has sufficient quality for OCR."""
         return self.overall_score >= 0.6 and not self.needs_enhancement
     
     @property
     def quality_category(self) -> str:
-        """Get quality category as string"""
+        """Get quality level as string."""
         return self.quality_level.value
 
 
 @dataclass
 class TextRegion:
-    """Text region with content and metadata"""
+    """Text region with content, location, and metadata."""
     text: str = ""
     confidence: float = 0.0
     bbox: Optional[BoundingBox] = None
@@ -135,54 +146,46 @@ class TextRegion:
     language: str = "en"
     reading_order: int = -1
     
-    # Text formatting
     font_size: Optional[float] = None
     is_bold: bool = False
     is_italic: bool = False
     
-    # Alternative results
     alternatives: List[str] = field(default_factory=list)
     word_confidences: List[float] = field(default_factory=list)
     
     @property
     def is_valid(self) -> bool:
-        """Check if region contains valid text"""
+        """Check if region contains valid text data."""
         return (len(self.text.strip()) > 0 and 
                 self.confidence > 0.0 and 
                 self.bbox is not None)
     
     @property
     def word_count(self) -> int:
-        """Get word count"""
+        """Get number of words."""
         return len(self.text.split()) if self.text else 0
 
 
 @dataclass
 class ProcessingOptions:
-    """Configuration options for OCR processing"""
-    # Engine selection
-    engines: Optional[List[str]] = None  # ['paddleocr', 'easyocr', 'tesseract', 'trocr']
-    strategy: Optional[ProcessingStrategy] = None  # Auto-detect if None
+    """Configuration options for OCR processing."""
+    engines: Optional[List[str]] = None
+    strategy: Optional[ProcessingStrategy] = None
     
-    # Processing settings
     enhance_image: bool = True
     detect_orientation: bool = True
     correct_rotation: bool = True
     
-    # Quality thresholds
     min_confidence: float = 0.5
     early_termination: bool = True
     early_termination_threshold: float = 0.95
     
-    # Performance settings
-    max_processing_time: int = 120  # seconds
+    max_processing_time: int = 120
     use_parallel_processing: bool = True
     batch_size: int = 1
     
-    # Language settings
     languages: List[str] = field(default_factory=lambda: ['en'])
     
-    # Output settings
     include_regions: bool = False
     include_word_boxes: bool = False
     preserve_formatting: bool = False
@@ -190,7 +193,7 @@ class ProcessingOptions:
 
 @dataclass
 class EnhancementResult:
-    """Result from image enhancement process"""
+    """Result from image enhancement process."""
     enhanced_image: np.ndarray
     original_image: np.ndarray
     enhancement_applied: str
@@ -200,64 +203,61 @@ class EnhancementResult:
     
     @property
     def was_enhanced(self) -> bool:
-        """Check if enhancement was actually applied"""
+        """Check if enhancement was applied."""
         return self.enhancement_applied != "none"
 
 
 @dataclass
 class OCRResult:
-    """Final result from OCR processing - matches your pipeline expectations"""
+    """Complete OCR processing result."""
     text: str
     confidence: float
     processing_time: float = 0.0
-    engine_used: str = "unknown"  # This matches pipeline.py usage
+    engine_used: str = "unknown"
     
-    # Required by pipeline.py
     quality_metrics: Optional[QualityMetrics] = None
     strategy_used: ProcessingStrategy = ProcessingStrategy.BALANCED
     metadata: Dict[str, Any] = field(default_factory=dict)
     
-    # Optional detailed results
     regions: List[TextRegion] = field(default_factory=list)
     bbox: Optional[BoundingBox] = None
     language: str = "en"
     detected_languages: List[str] = field(default_factory=list)
     
-    # Engine compatibility (engine_name is alias for engine_used)
     @property
     def engine_name(self) -> str:
-        """Compatibility property for engine_manager.py"""
+        """Get engine name (compatibility)."""
         return self.engine_used
     
     @engine_name.setter
     def engine_name(self, value: str):
-        """Compatibility setter for engine_manager.py"""
+        """Set engine name (compatibility)."""
         self.engine_used = value
     
     @property
     def success(self) -> bool:
-        """Check if OCR was successful"""
+        """Check if OCR was successful."""
         return len(self.text.strip()) > 0 and self.confidence > 0.1
     
     @property
     def word_count(self) -> int:
-        """Get total word count"""
+        """Get total word count."""
         return len(self.text.split()) if self.text else 0
     
     @property
     def line_count(self) -> int:
-        """Get line count"""
+        """Get line count."""
         return len(self.text.split('\n')) if self.text else 0
     
     @property
     def has_regions(self) -> bool:
-        """Check if detailed region information is available"""
+        """Check if detailed region information is available."""
         return len(self.regions) > 0
 
 
 @dataclass
 class BatchResult:
-    """Result from batch processing"""
+    """Results from batch processing."""
     results: List[OCRResult]
     total_processing_time: float
     successful_count: int
@@ -267,44 +267,33 @@ class BatchResult:
     
     @property
     def success_rate(self) -> float:
-        """Get success rate as percentage"""
+        """Get success rate as percentage."""
         total = len(self.results)
         return (self.successful_count / total * 100) if total > 0 else 0.0
     
     @property
     def total_images(self) -> int:
-        """Get total number of images processed"""
+        """Get total number of images processed."""
         return len(self.results)
 
 
-# === TYPE ALIASES ===
-
-# Common type aliases for better readability
+# Type aliases
 ImageArray = np.ndarray
 ConfigDict = Dict[str, Any]
 EngineList = List[str]
 LanguageList = List[str]
-
-# Coordinate types
 Point = Tuple[int, int]
-Rectangle = Tuple[int, int, int, int]  # x, y, width, height
+Rectangle = Tuple[int, int, int, int]
 Polygon = List[Point]
-
-# Result types
 ResultList = List[OCRResult]
 RegionList = List[TextRegion]
 
 
-# === EXPORTED TYPES ===
-
 __all__ = [
-    # Enums
     'ProcessingStrategy',
     'ImageType', 
     'ImageQuality',
     'TextType',
-    
-    # Data structures
     'BoundingBox',
     'QualityMetrics',
     'TextRegion',
@@ -312,8 +301,6 @@ __all__ = [
     'EnhancementResult',
     'OCRResult',
     'BatchResult',
-    
-    # Type aliases
     'ImageArray',
     'ConfigDict',
     'EngineList',

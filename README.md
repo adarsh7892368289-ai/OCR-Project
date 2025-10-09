@@ -142,31 +142,3 @@ ocr = OCRLibrary(config_path="config.yaml")
 | PaddleOCR | Fast | Excellent | 80+ | Good |
 | TrOCR | Slow | Excellent | Limited | Excellent |
 
-## Development
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/advanced-ocr-system.git
-cd advanced-ocr-system
-
-# Install development dependencies
-pip install -e ".[dev,test]"
-
-# Run tests
-pytest
-
-# Format code
-black src/ tests/
-isort src/ tests/
-
-# Type checking
-mypy src/
-```
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions welcome! Please read our contributing guidelines and submit pull requests to our GitHub repository.

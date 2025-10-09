@@ -1,8 +1,19 @@
-"""
-Basic image utilities for the Advanced OCR Library.
+"""Basic image utilities for loading, validation, and simple operations.
 
-This module handles ONLY basic image I/O, format conversion, and simple operations.
-It does NOT perform enhancement, quality analysis, or complex processing.
+Provides fundamental image I/O operations, format conversions, and basic
+transformations. Does NOT perform enhancement, quality analysis, or complex
+image processing - those belong in preprocessing modules.
+
+Examples
+--------
+    from advanced_ocr.utils.images import load_image, validate_image
+    from advanced_ocr.utils.images import detect_rotation, correct_rotation
+    
+    image = load_image("document.jpg")
+    if validate_image(image):
+        angle = detect_rotation(image)
+        if abs(angle) > 1:
+            corrected = correct_rotation(image, angle)
 """
 
 import cv2
@@ -16,15 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_image(image_path: Union[str, Path]) -> Optional[np.ndarray]:
-    """
-    Load image from file path.
-    
-    Args:
-        image_path: Path to image file
-        
-    Returns:
-        Image as numpy array or None if loading failed
-    """
+    """Load an image from file."""
     try:
         image_path = str(image_path)
         image = cv2.imread(image_path)
@@ -42,17 +45,7 @@ def load_image(image_path: Union[str, Path]) -> Optional[np.ndarray]:
 
 def save_image(image: np.ndarray, output_path: Union[str, Path], 
                quality: int = 95) -> bool:
-    """
-    Save image to file.
-    
-    Args:
-        image: Image as numpy array
-        output_path: Path to save image
-        quality: JPEG quality (0-100)
-        
-    Returns:
-        True if successful, False otherwise
-    """
+    """Save an image to file."""
     try:
         output_path = str(output_path)
         
@@ -77,18 +70,9 @@ def save_image(image: np.ndarray, output_path: Union[str, Path],
 
 
 def validate_image(image: Union[np.ndarray, str, Path]) -> bool:
-    """
-    Validate that image is usable.
-    
-    Args:
-        image: Image array or path to image
-        
-    Returns:
-        True if image is valid, False otherwise
-    """
+    """Validate that an image is usable."""
     try:
         if isinstance(image, (str, Path)):
-            # Load and validate file
             img_array = load_image(image)
             if img_array is None:
                 return False
@@ -97,14 +81,12 @@ def validate_image(image: Union[np.ndarray, str, Path]) -> bool:
         if not isinstance(image, np.ndarray):
             return False
             
-        # Check basic properties
         if len(image.shape) < 2:
             return False
             
         if image.shape[0] < 1 or image.shape[1] < 1:
             return False
             
-        # Check for valid data type
         if image.dtype not in [np.uint8, np.uint16, np.float32, np.float64]:
             return False
             
@@ -116,16 +98,7 @@ def validate_image(image: Union[np.ndarray, str, Path]) -> bool:
 
 
 def convert_color_space(image: np.ndarray, conversion: str) -> Optional[np.ndarray]:
-    """
-    Convert image between color spaces.
-    
-    Args:
-        image: Input image
-        conversion: Conversion type (e.g., 'BGR2RGB', 'RGB2GRAY')
-        
-    Returns:
-        Converted image or None if conversion failed
-    """
+    """Convert image between color spaces (e.g., 'BGR2RGB', 'BGR2GRAY')."""
     try:
         conversions = {
             "BGR2RGB": cv2.COLOR_BGR2RGB,
@@ -151,17 +124,7 @@ def convert_color_space(image: np.ndarray, conversion: str) -> Optional[np.ndarr
 def resize_image(image: np.ndarray, 
                 target_size: Tuple[int, int], 
                 interpolation: int = cv2.INTER_LANCZOS4) -> Optional[np.ndarray]:
-    """
-    Resize image to target dimensions.
-    
-    Args:
-        image: Input image
-        target_size: (width, height) tuple
-        interpolation: OpenCV interpolation method
-        
-    Returns:
-        Resized image or None if failed
-    """
+    """Resize image to target dimensions (width, height)."""
     try:
         width, height = target_size
         resized = cv2.resize(image, (width, height), interpolation=interpolation)
@@ -173,15 +136,7 @@ def resize_image(image: np.ndarray,
 
 
 def detect_rotation(image: np.ndarray) -> float:
-    """
-    Detect rotation angle of text in image using simple Hough line detection.
-    
-    Args:
-        image: Input image
-        
-    Returns:
-        Detected rotation angle in degrees (0, 90, 180, 270)
-    """
+    """Detect rotation angle of text using Hough line detection."""
     try:
         # Convert to grayscale if needed
         if len(image.shape) == 3:
@@ -208,10 +163,8 @@ def detect_rotation(image: np.ndarray) -> float:
         if not angles:
             return 0.0
         
-        # Find most common angle (rounded to nearest 90 degrees)
-        median_angle = np.median(angles)
-        
         # Round to nearest 90-degree increment
+        median_angle = np.median(angles)
         normalized_angle = round(median_angle / 90) * 90
         return normalized_angle % 360
         
@@ -221,27 +174,15 @@ def detect_rotation(image: np.ndarray) -> float:
 
 
 def correct_rotation(image: np.ndarray, angle: float) -> np.ndarray:
-    """
-    Rotate image by specified angle.
-    
-    Args:
-        image: Input image
-        angle: Rotation angle in degrees
-        
-    Returns:
-        Rotated image (returns original if rotation fails)
-    """
+    """Rotate image by specified angle in degrees."""
     try:
-        if abs(angle) < 0.1:  # No rotation needed
+        if abs(angle) < 0.1:
             return image
         
         height, width = image.shape[:2]
         center = (width // 2, height // 2)
         
-        # Calculate rotation matrix
         rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-        
-        # Apply rotation
         rotated = cv2.warpAffine(image, rotation_matrix, (width, height))
         return rotated
         
@@ -251,15 +192,7 @@ def correct_rotation(image: np.ndarray, angle: float) -> np.ndarray:
 
 
 def get_image_info(image: np.ndarray) -> dict:
-    """
-    Get basic information about an image.
-    
-    Args:
-        image: Input image
-        
-    Returns:
-        Dictionary with image information
-    """
+    """Get basic information about an image (width, height, channels, dtype, size)."""
     try:
         info = {
             'width': image.shape[1],
@@ -282,29 +215,24 @@ def get_image_info(image: np.ndarray) -> dict:
 
 
 class ImageUtils:
-    """
-    Utility class providing static methods for basic image operations.
-    
-    This maintains compatibility with your existing pipeline code.
-    """
+    """Utility class for basic image operations (backwards compatibility wrapper)."""
     
     @staticmethod
     def load_image(image_path: Union[str, Path]) -> Optional[np.ndarray]:
-        """Load image from file path"""
+        """Load image from file path."""
         return load_image(image_path)
     
     @staticmethod
     def detect_text_orientation(image: np.ndarray) -> float:
-        """Detect text orientation (compatibility method)"""
+        """Detect text orientation."""
         return detect_rotation(image)
     
     @staticmethod
     def correct_image_rotation(image: np.ndarray, angle: float) -> np.ndarray:
-        """Correct image rotation (compatibility method)"""
+        """Correct image rotation."""
         return correct_rotation(image, angle)
 
 
-# Export public functions
 __all__ = [
     'load_image',
     'save_image', 
@@ -314,4 +242,5 @@ __all__ = [
     'detect_rotation',
     'correct_rotation',
     'get_image_info',
+    'ImageUtils',
 ]

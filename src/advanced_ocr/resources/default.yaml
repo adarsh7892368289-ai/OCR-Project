@@ -1,14 +1,5 @@
-# src/advanced_ocr/resources/default.yaml
-# Default configuration for Advanced OCR Library
+# Settings actually used by the library
 
-# Global settings
-library:
-  name: "Advanced OCR Library"
-  version: "1.0.0"
-  log_level: "INFO"
-  max_processing_time: 120
-
-# Quality analyzer settings
 quality_analyzer:
   sharpness_threshold: 0.1
   noise_threshold: 0.3
@@ -18,66 +9,28 @@ quality_analyzer:
   edge_detection_kernel_size: 3
   blur_kernel_size: 15
 
-# Image enhancer settings  
 image_enhancer:
   noise_reduction:
     enabled: true
-    method: "gaussian"  # gaussian, median, bilateral
+    method: "gaussian"
     kernel_size: 5
-    
   contrast_enhancement:
     enabled: true
-    method: "clahe"  # clahe, histogram_eq, adaptive
+    method: "clahe"
     clip_limit: 2.0
     tile_grid_size: [8, 8]
-    
   sharpening:
     enabled: true
-    method: "unsharp_mask"  # unsharp_mask, kernel
+    method: "unsharp_mask"
     radius: 1.0
     amount: 1.5
-    threshold: 0
-    
   denoising:
     enabled: true
     h: 10
     template_window_size: 7
     search_window_size: 21
 
-# Engine manager settings
 engine_manager:
-  auto_initialize: true
-  fallback_enabled: true
   parallel_processing: true
   max_workers: 4
   timeout_per_engine: 30
-  retry_attempts: 2
-  cache_models: true
-
-# Processing defaults
-processing:
-  default_strategy: "balanced"  # minimal, balanced, enhanced
-  min_confidence: 0.5
-  early_termination: true
-  early_termination_threshold: 0.95
-  enhance_image: true
-  detect_orientation: true
-  correct_rotation: true
-  languages: ["en"]
-  
-# Logging settings
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file_enabled: false
-  file_path: "logs/ocr_library.log"
-  max_file_size: 10485760  # 10MB
-  backup_count: 5
-
-# Performance settings
-performance:
-  batch_size: 1
-  max_image_size: [4000, 4000]
-  image_resize_quality: "high"  # low, medium, high
-  memory_limit_mb: 2048
-  gpu_memory_fraction: 0.8

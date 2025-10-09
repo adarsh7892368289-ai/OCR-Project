@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""
-Basic example for OCR text extraction from an image.
-Edit IMAGE_PATH to specify the input image.
-"""
+"""Example script demonstrating basic OCR usage."""
 
 import sys
 from pathlib import Path
 
-# Configuration: set input image and optional output file
 IMAGE_PATH = "tests/images/img1.jpg"
 OUTPUT_FILE = "extracted_text.txt"
 
-# Add OCR library to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 def main():
-    """Run OCR on the specified image and print results."""
+    """Extract text from an image using OCR."""
     try:
         from advanced_ocr import OCRLibrary
         

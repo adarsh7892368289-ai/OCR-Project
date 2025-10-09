@@ -30,12 +30,27 @@ engines:
     enabled: true
     languages: ["en"]
     gpu: true
+    model_dir: null
+    download_enabled: true
+    
+    # Detection parameters
+    width_ths: 0.5
+    height_ths: 0.5
+    decoder: "greedy"
+    beamwidth: 5
+    
+    # Processing settings
     batch_size: 1
     workers: 0
-    allowlist: null
-    blocklist: null
     detail: 1
     paragraph: false
+    
+    # Layout preservation
+    line_height_threshold: 15
+    word_spacing_threshold: 20
+    
+    # Quality thresholds
+    min_confidence: 0.1
 
   tesseract:
     enabled: true

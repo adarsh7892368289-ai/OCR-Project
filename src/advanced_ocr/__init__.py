@@ -1,16 +1,23 @@
-"""
-Advanced OCR Library - Multi-engine text extraction with intelligent preprocessing.
+"""Advanced OCR library with multi-engine support and intelligent preprocessing.
 
-This package provides a modern, modular OCR solution that supports multiple OCR engines
-(PaddleOCR, EasyOCR, Tesseract, TrOCR), includes intelligent image preprocessing and
-quality analysis, offers flexible processing strategies and batch processing, and provides
-a consistent API across different OCR technologies.
+Provides a unified interface for multiple OCR engines (PaddleOCR, EasyOCR, 
+Tesseract, TrOCR) with automatic quality analysis and image enhancement.
 
-Quick Start:
-    >>> from advanced_ocr import OCRLibrary, extract_text
-    >>> text = extract_text("document.jpg")
-    >>> ocr = OCRLibrary()
-    >>> result = ocr.process_image("document.jpg")
+Examples
+--------
+    from advanced_ocr import extract_text, OCRLibrary, ProcessingOptions
+    
+    # Quick text extraction
+    text = extract_text("document.jpg")
+    
+    # Advanced usage with options
+    ocr = OCRLibrary()
+    options = ProcessingOptions(enhance_image=True, engines=["paddleocr"])
+    result = ocr.process_image("document.jpg", options)
+    
+    # Batch processing
+    from advanced_ocr import process_images
+    results = process_images(["doc1.jpg", "doc2.png", "doc3.jpg"])
 """
 
 from .pipeline import OCRLibrary
@@ -29,42 +36,27 @@ from .exceptions import (
 )
 
 __all__ = [
-    # Main library class
     'OCRLibrary',
-    
-    # Core data types
     'ProcessingOptions', 
     'OCRResult', 
     'QualityMetrics', 
     'ProcessingStrategy',
     'BatchResult',
-    
-    # Exceptions
     'OCRLibraryError', 
     'EngineNotAvailableError',
     'ProcessingTimeoutError',
     'EngineInitializationError',
-    
-    # Convenience functions
     'extract_text',
     'process_images',
+    'configure_logging',
 ]
 
+
 def extract_text(image_path: str, **kwargs) -> str:
-    """
-    Quick text extraction with default settings.
+    """Extract text from an image using default settings.
     
-    Args:
-        image_path: Path to image file
-        **kwargs: Additional options passed to ProcessingOptions
-        
-    Returns:
-        Extracted text as string
-        
-    Examples:
-        >>> text = extract_text("document.jpg")
-        >>> text = extract_text("receipt.png", enhance_image=True)
-        >>> text = extract_text("form.pdf", engines=["tesseract"])
+    Convenience function for simple text extraction. For more control,
+    use OCRLibrary class directly.
     """
     ocr = OCRLibrary()
     options = ProcessingOptions(**kwargs) if kwargs else None
@@ -73,45 +65,22 @@ def extract_text(image_path: str, **kwargs) -> str:
 
 
 def process_images(image_paths: list, **kwargs) -> list:
-    """
-    Process multiple images and return results.
-    
-    Args:
-        image_paths: List of image file paths
-        **kwargs: Additional options passed to ProcessingOptions
-        
-    Returns:
-        List of OCRResult objects
-        
-    Examples:
-        >>> results = process_images(["doc1.jpg", "doc2.png"])
-        >>> for result in results:
-        ...     print(f"File: {result.metadata.get('image_path')}")
-        ...     print(f"Text: {result.text}")
-    """
+    """Process multiple images in batch and return results."""
     ocr = OCRLibrary()
     options = ProcessingOptions(**kwargs) if kwargs else None
     batch_result = ocr.process_batch(image_paths, options)
     return batch_result.results
 
 
-def configure_logging(level="INFO", log_file=None):
-    """
-    Configure logging for the entire library.
-    
-    Args:
-        level: Logging level (DEBUG, INFO, WARNING, ERROR)
-        log_file: Optional path to log file
-        
-    Examples:
-        >>> import advanced_ocr
-        >>> advanced_ocr.configure_logging("DEBUG", "ocr.log")
-    """
+def configure_logging(level: str = "INFO", log_file: str = None) -> None:
+    """Configure logging level and output destination for the library."""
     from .utils.logging import setup_logging
     setup_logging(level=level, log_file=log_file)
 
+
+# Initialize default logging
 try:
     from .utils.logging import setup_logging
-    setup_logging(level="WARNING")  # Only warnings and errors by default
+    setup_logging(level="WARNING")
 except ImportError:
-    pass  # Logging setup not critical for package functionali
+    pass

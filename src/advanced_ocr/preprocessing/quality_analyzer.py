@@ -1,16 +1,30 @@
-# src/advanced_ocr/preprocessing/quality_analyzer.py
-"""
-Image quality analyzer for OCR preprocessing.
-Analyzes image characteristics and determines if enhancement is needed.
+"""Image quality analyzer for OCR preprocessing.
+
+Analyzes image characteristics to determine quality metrics and whether
+enhancement is needed before OCR processing.
+
+Examples
+--------
+    from advanced_ocr.preprocessing import QualityAnalyzer
+    
+    # Create analyzer with config
+    analyzer = QualityAnalyzer(config)
+    
+    # Analyze image quality
+    metrics = analyzer.analyze_image(image)
+    
+    # Check results
+    print(f"Overall score: {metrics.overall_score}")
+    print(f"Needs enhancement: {metrics.needs_enhancement}")
+    print(f"Recommended strategy: {metrics.recommended_strategy}")
 """
 
 import cv2
 import numpy as np
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 import time
 
-# Import from our centralized types and config
 from ..types import QualityMetrics, ImageType, ImageQuality, ProcessingStrategy
 from ..utils.config import get_config_value
 
@@ -18,21 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 class QualityAnalyzer:
-    """
-    Analyzes image quality characteristics for OCR processing.
-    Determines if image needs enhancement and recommends processing strategy.
-    """
+    """Analyzes image quality characteristics for OCR processing."""
     
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize quality analyzer with configuration.
-        
-        Args:
-            config: Configuration dictionary from config system
-        """
+        """Initialize quality analyzer with configuration thresholds."""
         self.config = config
         
-        # Extract quality thresholds from config
         self.thresholds = {
             'sharpness_min': get_config_value(config, 'quality_analyzer.sharpness_threshold', 100.0),
             'noise_max': get_config_value(config, 'quality_analyzer.noise_threshold', 0.1),
@@ -44,24 +49,15 @@ class QualityAnalyzer:
         logger.debug("Quality analyzer initialized with thresholds: %s", self.thresholds)
     
     def analyze_image(self, image: np.ndarray) -> QualityMetrics:
-        """
-        Analyze image quality and characteristics.
-        
-        Args:
-            image: Input image as numpy array
-            
-        Returns:
-            QualityMetrics object with analysis results
-        """
+        """Analyze image quality and generate comprehensive metrics."""
         start_time = time.time()
         
-        # Validate input
         if image is None or len(image.shape) < 2:
             logger.warning("Invalid image provided for analysis")
             return self._create_error_metrics("Invalid image input")
         
         try:
-            # Convert to grayscale if needed
+            # Convert to grayscale for analysis
             if len(image.shape) == 3:
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 color_channels = image.shape[2]
@@ -80,32 +76,21 @@ class QualityAnalyzer:
             edge_density = self._calculate_edge_density(gray)
             text_region_count = self._estimate_text_regions(gray)
             estimated_dpi = self._estimate_dpi(gray.shape)
-            
-            # Determine image type
             image_type = self._classify_image_type(gray)
             
-            # Calculate overall score
             overall_score = self._calculate_overall_score(
                 sharpness_score, noise_level, contrast_score, brightness_score
             )
             
-            # Determine quality level
             quality_level = self._determine_quality_level(overall_score)
-            
-            # Determine if enhancement is needed
             needs_enhancement = self._needs_enhancement(
                 overall_score, sharpness_score, noise_level, contrast_score
             )
-            
-            # Recommend processing strategy
             recommended_strategy = self._recommend_strategy(overall_score, needs_enhancement)
-            
-            # Generate enhancement suggestions
             enhancement_suggestions = self._generate_suggestions(
                 sharpness_score, noise_level, contrast_score, brightness_score
             )
             
-            # Create metrics object
             metrics = QualityMetrics(
                 overall_score=overall_score,
                 sharpness_score=sharpness_score,
@@ -134,31 +119,27 @@ class QualityAnalyzer:
             return self._create_error_metrics(f"Analysis error: {str(e)}")
     
     def _calculate_sharpness(self, gray: np.ndarray) -> float:
-        """Calculate image sharpness using Laplacian variance."""
+        """Calculate sharpness using Laplacian variance (0.0=blurry, 1.0=sharp)."""
         try:
             laplacian = cv2.Laplacian(gray, cv2.CV_64F)
             variance = laplacian.var()
-            
-            # Normalize to 0-1 scale based on threshold
             normalized = min(variance / self.thresholds['sharpness_min'], 1.0)
             return max(0.0, normalized)
         except Exception:
             return 0.5
     
     def _calculate_noise_level(self, gray: np.ndarray) -> float:
-        """Estimate noise level using median filtering difference."""
+        """Estimate noise using median filtering difference (0.0=clean, 1.0=noisy)."""
         try:
-            # Use median filter to estimate noise
             median_filtered = cv2.medianBlur(gray, 5)
             noise = cv2.absdiff(gray.astype(np.float32), median_filtered.astype(np.float32))
             noise_level = np.mean(noise) / 255.0
-            
             return min(max(noise_level, 0.0), 1.0)
         except Exception:
             return 0.1
     
     def _calculate_contrast(self, gray: np.ndarray) -> float:
-        """Calculate image contrast using standard deviation."""
+        """Calculate contrast using standard deviation (0.0=flat, 1.0=high contrast)."""
         try:
             contrast = np.std(gray) / 128.0
             return min(max(contrast, 0.0), 1.0)
@@ -166,32 +147,30 @@ class QualityAnalyzer:
             return 0.5
     
     def _calculate_brightness(self, gray: np.ndarray) -> float:
-        """Calculate brightness quality score."""
+        """Calculate brightness quality score (optimal in middle range)."""
         try:
             mean_brightness = np.mean(gray)
-            
-            # Score based on how close to optimal range
             min_thresh = self.thresholds['brightness_min']
             max_thresh = self.thresholds['brightness_max']
             optimal_center = (min_thresh + max_thresh) / 2
             
             if min_thresh <= mean_brightness <= max_thresh:
-                # Within good range - score based on distance from center
+                # Within good range
                 distance_from_optimal = abs(mean_brightness - optimal_center)
                 max_distance = (max_thresh - min_thresh) / 2
                 return 1.0 - (distance_from_optimal / max_distance) * 0.3
             else:
-                # Outside good range - lower score
+                # Outside good range
                 if mean_brightness < min_thresh:
                     return 0.3 + (mean_brightness / min_thresh) * 0.4
-                else:  # mean_brightness > max_thresh
+                else:
                     excess = mean_brightness - max_thresh
                     return max(0.1, 0.7 - (excess / (255 - max_thresh)) * 0.6)
         except Exception:
             return 0.5
     
     def _calculate_blur_variance(self, gray: np.ndarray) -> float:
-        """Calculate blur variance (same as sharpness calculation)."""
+        """Calculate absolute blur variance (higher=sharper)."""
         try:
             laplacian = cv2.Laplacian(gray, cv2.CV_64F)
             return float(laplacian.var())
@@ -199,40 +178,36 @@ class QualityAnalyzer:
             return 0.0
     
     def _calculate_edge_density(self, gray: np.ndarray) -> float:
-        """Calculate edge pixel density."""
+        """Calculate edge pixel density (text has high density)."""
         try:
             edges = cv2.Canny(gray, 100, 200)
             edge_pixels = np.sum(edges > 0)
             total_pixels = edges.size
-            
             density = edge_pixels / total_pixels
-            return min(density * 10, 1.0)  # Scale for typical documents
+            return min(density * 10, 1.0)
         except Exception:
             return 0.5
     
     def _estimate_text_regions(self, gray: np.ndarray) -> int:
-        """Estimate number of text regions using connected components."""
+        """Estimate text region count using connected components."""
         try:
-            # Threshold image
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
             # Invert if text is white on black
             if np.mean(binary) > 127:
                 binary = cv2.bitwise_not(binary)
             
-            # Find connected components
             num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
             
-            # Count text-like components
             text_regions = 0
             total_area = gray.size
             
-            for i in range(1, num_labels):  # Skip background
+            # Filter components by size/shape heuristics
+            for i in range(1, num_labels):
                 area = stats[i, cv2.CC_STAT_AREA]
                 width = stats[i, cv2.CC_STAT_WIDTH] 
                 height = stats[i, cv2.CC_STAT_HEIGHT]
                 
-                # Heuristic for text-like regions
                 if (10 < area < total_area * 0.01 and 
                     2 < width < total_area * 0.1 and 
                     5 < height < 100):
@@ -243,29 +218,27 @@ class QualityAnalyzer:
             return 0
     
     def _estimate_dpi(self, shape: tuple) -> int:
-        """Estimate DPI based on image dimensions."""
+        """Estimate DPI based on pixel count."""
         height, width = shape
         pixel_count = height * width
         
-        # Rough DPI estimation based on pixel count
-        if pixel_count >= 4000000:    # 4MP+
+        if pixel_count >= 4000000:
             return 300
-        elif pixel_count >= 2000000:  # 2MP+
+        elif pixel_count >= 2000000:
             return 250
-        elif pixel_count >= 1000000:  # 1MP+
+        elif pixel_count >= 1000000:
             return 200
-        elif pixel_count >= 500000:   # 500K+
+        elif pixel_count >= 500000:
             return 150
         else:
             return 100
     
     def _classify_image_type(self, gray: np.ndarray) -> ImageType:
-        """Classify image type based on structural analysis."""
+        """Classify image type by detecting grid patterns."""
         try:
-            # Simple classification based on edge patterns
             edges = cv2.Canny(gray, 100, 200)
             
-            # Check for table/form structure
+            # Detect horizontal and vertical lines
             horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
             vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
             
@@ -275,7 +248,7 @@ class QualityAnalyzer:
             h_line_count = np.sum(horizontal_lines > 0)
             v_line_count = np.sum(vertical_lines > 0)
             
-            # Classification logic
+            # Classify based on line presence
             if h_line_count > 1000 and v_line_count > 1000:
                 return ImageType.TABLE
             elif h_line_count > 500 or v_line_count > 500:
@@ -288,18 +261,16 @@ class QualityAnalyzer:
     def _calculate_overall_score(self, sharpness: float, noise: float, 
                                contrast: float, brightness: float) -> float:
         """Calculate weighted overall quality score."""
-        # Weights for different factors
+        # Weights reflect importance for OCR
         weights = {
             'sharpness': 0.30,
-            'noise': 0.25,      # Lower noise is better
+            'noise': 0.25,
             'contrast': 0.25,
             'brightness': 0.20
         }
         
-        # Invert noise (lower is better)
-        noise_score = 1.0 - noise
+        noise_score = 1.0 - noise  # Invert: lower noise = better
         
-        # Calculate weighted score
         overall = (
             sharpness * weights['sharpness'] +
             noise_score * weights['noise'] +
@@ -310,7 +281,7 @@ class QualityAnalyzer:
         return min(max(overall, 0.0), 1.0)
     
     def _determine_quality_level(self, overall_score: float) -> ImageQuality:
-        """Determine quality level from overall score."""
+        """Map overall score to quality category."""
         if overall_score >= 0.8:
             return ImageQuality.EXCELLENT
         elif overall_score >= 0.6:
@@ -324,12 +295,12 @@ class QualityAnalyzer:
     
     def _needs_enhancement(self, overall_score: float, sharpness: float,
                           noise: float, contrast: float) -> bool:
-        """Determine if image needs enhancement."""
+        """Check if any metric falls below acceptable threshold."""
         return (
-            overall_score < 0.6 or          # Low overall quality
-            sharpness < 0.4 or              # Blurry image
-            noise > self.thresholds['noise_max'] or  # High noise
-            contrast < self.thresholds['contrast_min']  # Low contrast
+            overall_score < 0.6 or
+            sharpness < 0.4 or
+            noise > self.thresholds['noise_max'] or
+            contrast < self.thresholds['contrast_min']
         )
     
     def _recommend_strategy(self, overall_score: float, needs_enhancement: bool) -> ProcessingStrategy:
@@ -343,7 +314,7 @@ class QualityAnalyzer:
     
     def _generate_suggestions(self, sharpness: float, noise: float,
                             contrast: float, brightness: float) -> List[str]:
-        """Generate enhancement suggestions."""
+        """Generate specific enhancement suggestions."""
         suggestions = []
         
         if sharpness < 0.4:
@@ -363,7 +334,7 @@ class QualityAnalyzer:
         return suggestions
     
     def _create_error_metrics(self, error_message: str) -> QualityMetrics:
-        """Create metrics object for error cases."""
+        """Create error state metrics object."""
         return QualityMetrics(
             overall_score=0.1,
             sharpness_score=0.0,

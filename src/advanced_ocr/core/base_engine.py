@@ -1,14 +1,8 @@
-# src/advanced_ocr/core/base_engine.py
-"""
-Abstract base class for OCR engines.
-Defines the interface that all OCR engines must implement.
+"""Abstract base class for OCR engines.
 
-Responsibility: Define standardized interface for OCR engines ONLY
-- Standardize OCR engine interface
-- Provide common initialization pattern  
-- Define required methods all engines must implement
-- Basic validation and logging support
-
+Defines the interface that all OCR engines must implement, ensuring consistency
+across PaddleOCR, EasyOCR, Tesseract, and TrOCR engines. Provides common
+initialization patterns, validation, logging, and performance tracking.
 """
 
 from abc import ABC, abstractmethod
@@ -16,20 +10,18 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import logging
 
-# Import from our centralized types
 from ..types import OCRResult
 
+
 class BaseOCREngine(ABC):
-    """
-    Abstract base class for all OCR engines.
+    """Abstract base class for all OCR engines.
     
     All engines must inherit from this and implement the required methods.
-    This ensures consistency across PaddleOCR, EasyOCR, Tesseract, and TrOCR.
+    Ensures consistency and standardization across all OCR engine implementations.
     """
     
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize OCR engine with configuration.
+        """Initialize OCR engine with configuration.
         
         Args:
             name: Engine name identifier (e.g., "PaddleOCR", "EasyOCR")
@@ -50,8 +42,7 @@ class BaseOCREngine(ABC):
     
     @abstractmethod
     def initialize(self) -> bool:
-        """
-        Initialize the OCR engine and load models.
+        """Initialize the OCR engine and load models.
         
         Returns:
             bool: True if initialization successful, False otherwise
@@ -60,8 +51,7 @@ class BaseOCREngine(ABC):
     
     @abstractmethod
     def is_available(self) -> bool:
-        """
-        Check if the OCR engine is available for use.
+        """Check if the OCR engine is available for use.
         
         Returns:
             bool: True if engine is available and ready, False otherwise
@@ -70,41 +60,31 @@ class BaseOCREngine(ABC):
     
     @abstractmethod
     def extract_text(self, image: np.ndarray) -> OCRResult:
-        """
-        Extract text from an image using this OCR engine.
+        """Extract text from an image using this OCR engine.
         
-        This is the CORE responsibility of every OCR engine.
+        This is the core responsibility of every OCR engine.
         
         Args:
             image: Preprocessed image as numpy array (RGB/BGR/Grayscale)
             
         Returns:
-            OCRResult: Raw OCR result with text regions and bounding boxes
-            
-        Important:
-            - Image is already preprocessed by ImageEnhancer
-            - Should ONLY do OCR text extraction
-            - Should NOT do layout reconstruction (pipeline handles this)
-            - Should NOT do image enhancement (ImageEnhancer handles this)
-            - Should return raw text regions with coordinates
+            OCRResult: Complete OCR result with text regions and bounding boxes
         """
         pass
     
     @abstractmethod
     def get_supported_languages(self) -> List[str]:
-        """
-        Get list of languages supported by this engine.
+        """Get list of languages supported by this engine.
         
         Returns:
             List[str]: List of language codes (e.g., ['en', 'es', 'fr'])
         """
         pass
     
-    # === COMMON UTILITY METHODS ===
+    # === Common utility methods ===
     
     def validate_image(self, image: np.ndarray) -> bool:
-        """
-        Basic image validation - common for all engines.
+        """Validate image format and dimensions for OCR processing.
         
         Args:
             image: Input image array
@@ -132,7 +112,12 @@ class BaseOCREngine(ABC):
         return True
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get engine performance statistics"""
+        """Get engine performance statistics.
+        
+        Returns:
+            Dict containing processing metrics including success rate,
+            average time, and error rate.
+        """
         stats = self.processing_stats.copy()
         
         if stats['total_processed'] > 0:
@@ -147,7 +132,7 @@ class BaseOCREngine(ABC):
         return stats
     
     def reset_stats(self):
-        """Reset performance statistics"""
+        """Reset performance statistics to zero."""
         self.processing_stats = {
             'total_processed': 0,
             'successful_extractions': 0,
@@ -156,17 +141,21 @@ class BaseOCREngine(ABC):
         }
     
     def cleanup(self):
-        """
-        Cleanup engine resources.
-        Default implementation - engines can override if needed.
+        """Cleanup engine resources.
+        
+        Default implementation - engines can override for custom cleanup.
         """
         self.is_initialized = False
         self.logger.debug(f"Cleaned up {self.name} engine")
     
     def __str__(self) -> str:
+        """String representation of engine."""
         return f"{self.name}(initialized={self.is_initialized})"
     
     def __repr__(self) -> str:
+        """Detailed string representation of engine."""
         return self.__str__()
-    
-BaseEngine=BaseOCREngine
+
+
+# Alias for compatibility
+BaseEngine = BaseOCREngine

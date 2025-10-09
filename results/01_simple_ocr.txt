@@ -1,0 +1,39 @@
+OCR Result - 2025-10-09 12:18:09
+============================================================
+
+Success: True
+Engine(s): PaddleOCR
+Confidence: 94.9%
+Processing Time: 13.75s
+
+Text Length: 627 characters
+Word Count: 89
+Line Count: 22
+
+Image Quality Score: 0.676
+Quality Level: good
+
+EXTRACTED TEXT:
+------------------------------------------------------------
+Receipt Number: #14586
+Name of Medical Institution: Clinic Tap    Date: 10/12/2020
+Practitioner Name:Yap Chana Chu
+License Number:
+Address: 18, Jalan Kenanga & Indahmura
+City/StateZIP: S1000 Kula Tohor
+Patient Information:
+Name: Lim TeckRe
+Street Address: 1500, Jalan Teratai 38176 Indahpura
+City/StaterziP:81o00 Kulal Jchor
+
+OFFICIAL RECEIPT    KLINIK ABC
+5, Jalan Anggerik, Taman Rekamas,
+75450, Ayer Keroh,
+Melaka.
+07-7235585
+Date: 11/12/2020
+Received with thanks from Lim Teck Heng
+The sum of Ringgit Malaysia: One hundred only
+Being payment of Consultation / Medicines / Lab / X-Ray fees etc: Medicines and
+consultation
+1A

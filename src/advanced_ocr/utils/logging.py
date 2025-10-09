@@ -1,7 +1,17 @@
-"""
-Logging utilities for the Advanced OCR Library.
+"""Logging utilities for consistent logging across the library.
 
-This module provides consistent logging setup and configuration across the library.
+Provides centralized logging setup and configuration for all library components.
+
+Examples
+--------
+    from advanced_ocr.utils.logging import setup_logging, setup_logger
+    
+    # Setup library-wide logging
+    setup_logging(level="DEBUG", log_file="ocr.log")
+    
+    # Get logger for a specific component
+    logger = setup_logger("OCRLibrary")
+    logger.info("Processing started")
 """
 
 import logging
@@ -13,14 +23,7 @@ from typing import Optional, Union
 def setup_logging(level: Union[str, int] = "INFO", 
                   log_file: Optional[str] = None,
                   name: str = "advanced_ocr") -> None:
-    """
-    Set up logging configuration for the entire library.
-    
-    Args:
-        level: Logging level (string or int)
-        log_file: Optional path to log file
-        name: Logger name prefix
-    """
+    """Set up logging configuration for the entire library."""
     # Convert string level to int if needed
     if isinstance(level, str):
         numeric_level = getattr(logging, level.upper(), logging.INFO)
@@ -58,7 +61,6 @@ def setup_logging(level: Union[str, int] = "INFO",
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
         except Exception as e:
-            # If file logging fails, at least we have console logging
             root_logger.warning(f"Failed to setup file logging to {log_file}: {e}")
     
     # Prevent propagation to avoid duplicate messages
@@ -66,18 +68,7 @@ def setup_logging(level: Union[str, int] = "INFO",
 
 
 def setup_logger(name: str, level: Union[str, int] = "INFO") -> logging.Logger:
-    """
-    Set up a logger for a specific component.
-    
-    This is what your pipeline.py expects to import.
-    
-    Args:
-        name: Logger name (usually class name)
-        level: Logging level
-        
-    Returns:
-        Configured logger instance
-    """
+    """Set up a logger for a specific component."""
     # Convert string level to int if needed
     if isinstance(level, str):
         numeric_level = getattr(logging, level.upper(), logging.INFO)
@@ -97,19 +88,10 @@ def setup_logger(name: str, level: Union[str, int] = "INFO") -> logging.Logger:
 
 
 def get_logger(name: str = "advanced_ocr") -> logging.Logger:
-    """
-    Get a logger instance.
-    
-    Args:
-        name: Logger name
-        
-    Returns:
-        Logger instance
-    """
+    """Get a logger instance."""
     return logging.getLogger(name)
 
 
-# Export the functions your pipeline needs
 __all__ = [
     "setup_logging",
     "setup_logger", 

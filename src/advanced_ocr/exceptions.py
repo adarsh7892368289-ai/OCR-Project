@@ -1,27 +1,32 @@
-# Custom exception classes for the Advanced OCR Library
+"""Exception classes for the Advanced OCR Library.
 
-"""
-Custom exception classes for the Advanced OCR Library.
-Provides specific error types for different failure scenarios.
+Defines the exception hierarchy for handling OCR-related errors.
+All exceptions inherit from OCRLibraryError for easy catching.
+
+Examples
+--------
+    from advanced_ocr import OCRLibraryError, EngineNotAvailableError
+    
+    # Catch all OCR errors
+    try:
+        result = ocr.process_image("document.jpg")
+    except OCRLibraryError as e:
+        print(f"OCR failed: {e}")
+    
+    # Catch specific errors
+    try:
+        result = ocr.process_image("document.jpg")
+    except EngineNotAvailableError:
+        print("Install required OCR engine")
+    except ImageProcessingError:
+        print("Invalid or corrupted image")
 """
 
 
 class OCRLibraryError(Exception):
-    """
-    Base exception class for all OCR Library errors.
-    
-    This is the parent class for all custom exceptions in the library.
-    Catch this to handle any OCR-related error generically.
-    """
+    """Base exception for all OCR Library errors."""
     
     def __init__(self, message: str, details: dict = None):
-        """
-        Initialize OCR Library error.
-        
-        Args:
-            message: Human-readable error message
-            details: Optional dictionary with additional error context
-        """
         super().__init__(message)
         self.message = message
         self.details = details or {}
@@ -33,27 +38,12 @@ class OCRLibraryError(Exception):
 
 
 class EngineNotAvailableError(OCRLibraryError):
-    """
-    Raised when a requested OCR engine is not available.
-    
-    This can happen when:
-    - Engine dependencies are not installed
-    - Engine failed to initialize
-    - Engine is not registered in the manager
-    """
+    """Raised when a requested OCR engine is not available."""
     
     def __init__(self, engine_name: str, reason: str = None):
-        """
-        Initialize engine not available error.
-        
-        Args:
-            engine_name: Name of the unavailable engine
-            reason: Optional reason why engine is not available
-        """
+        message = f"OCR Engine '{engine_name}' is not available"
         if reason:
-            message = f"OCR Engine '{engine_name}' is not available: {reason}"
-        else:
-            message = f"OCR Engine '{engine_name}' is not available"
+            message += f": {reason}"
         
         details = {"engine_name": engine_name}
         if reason:
@@ -65,25 +55,9 @@ class EngineNotAvailableError(OCRLibraryError):
 
 
 class ImageProcessingError(OCRLibraryError):
-    """
-    Raised when image preprocessing or loading fails.
-    
-    This can happen when:
-    - Image file cannot be loaded
-    - Image format is not supported  
-    - Image is corrupted or invalid
-    - Preprocessing operations fail
-    """
+    """Raised when image loading or preprocessing fails."""
     
     def __init__(self, message: str, image_path: str = None, operation: str = None):
-        """
-        Initialize image processing error.
-        
-        Args:
-            message: Error description
-            image_path: Path to problematic image (if applicable)
-            operation: Failed operation name (if applicable)
-        """
         details = {}
         if image_path:
             details["image_path"] = image_path
@@ -96,24 +70,9 @@ class ImageProcessingError(OCRLibraryError):
 
 
 class ConfigurationError(OCRLibraryError):
-    """
-    Raised when there are configuration issues.
-    
-    This can happen when:
-    - Invalid configuration values
-    - Missing required configuration
-    - Configuration file parsing fails
-    """
+    """Raised when configuration is invalid or missing."""
     
     def __init__(self, message: str, config_key: str = None, config_value = None):
-        """
-        Initialize configuration error.
-        
-        Args:
-            message: Error description
-            config_key: Problematic configuration key
-            config_value: Problematic configuration value
-        """
         details = {}
         if config_key:
             details["config_key"] = config_key
@@ -126,48 +85,39 @@ class ConfigurationError(OCRLibraryError):
 
 
 class QualityAnalysisError(OCRLibraryError):
-    """
-    Raised when image quality analysis fails.
+    """Raised when image quality analysis fails."""
     
-    This can happen when:
-    - Quality metrics calculation fails
-    - Image analysis operations fail
-    - Quality thresholds are not met
-    """
-    pass
+    def __init__(self, message: str, metric: str = None, image_path: str = None):
+        details = {}
+        if metric:
+            details["metric"] = metric
+        if image_path:
+            details["image_path"] = image_path
+            
+        super().__init__(message, details)
+        self.metric = metric
+        self.image_path = image_path
 
 
 class EnhancementError(OCRLibraryError):
-    """
-    Raised when image enhancement fails.
+    """Raised when image enhancement operations fail."""
     
-    This can happen when:
-    - Enhancement algorithms fail
-    - Enhanced image is worse than original
-    - Enhancement operations timeout
-    """
-    pass
+    def __init__(self, message: str, enhancement_type: str = None, image_path: str = None):
+        details = {}
+        if enhancement_type:
+            details["enhancement_type"] = enhancement_type
+        if image_path:
+            details["image_path"] = image_path
+            
+        super().__init__(message, details)
+        self.enhancement_type = enhancement_type
+        self.image_path = image_path
 
 
 class ValidationError(OCRLibraryError):
-    """
-    Raised when input validation fails.
-    
-    This can happen when:
-    - Invalid input parameters
-    - Missing required parameters
-    - Parameter types are incorrect
-    """
+    """Raised when input validation fails."""
     
     def __init__(self, message: str, parameter: str = None, expected_type: str = None):
-        """
-        Initialize validation error.
-        
-        Args:
-            message: Error description
-            parameter: Name of invalid parameter
-            expected_type: Expected parameter type
-        """
         details = {}
         if parameter:
             details["parameter"] = parameter
@@ -180,23 +130,9 @@ class ValidationError(OCRLibraryError):
 
 
 class ProcessingTimeoutError(OCRLibraryError):
-    """
-    Raised when OCR processing exceeds time limits.
-    
-    This can happen when:
-    - Processing takes longer than max_processing_time
-    - Engine becomes unresponsive
-    - Large images require too much processing time
-    """
+    """Raised when OCR processing exceeds time limits."""
     
     def __init__(self, message: str, timeout_seconds: int = None):
-        """
-        Initialize processing timeout error.
-        
-        Args:
-            message: Error description
-            timeout_seconds: Timeout limit that was exceeded
-        """
         details = {}
         if timeout_seconds:
             details["timeout_seconds"] = timeout_seconds
@@ -206,24 +142,9 @@ class ProcessingTimeoutError(OCRLibraryError):
 
 
 class EngineInitializationError(OCRLibraryError):
-    """
-    Raised when an OCR engine fails to initialize properly.
-    
-    This can happen when:
-    - Engine dependencies are missing
-    - Model files cannot be loaded
-    - GPU/hardware requirements not met
-    """
+    """Raised when an OCR engine fails to initialize."""
     
     def __init__(self, message: str, engine_name: str = None, underlying_error: Exception = None):
-        """
-        Initialize engine initialization error.
-        
-        Args:
-            message: Error description
-            engine_name: Name of engine that failed to initialize
-            underlying_error: Original exception that caused the failure
-        """
         details = {}
         if engine_name:
             details["engine_name"] = engine_name
@@ -236,7 +157,6 @@ class EngineInitializationError(OCRLibraryError):
         self.underlying_error = underlying_error
 
 
-# Export all exception classes
 __all__ = [
     'OCRLibraryError',
     'EngineNotAvailableError', 
